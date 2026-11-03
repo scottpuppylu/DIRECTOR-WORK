@@ -25,7 +25,8 @@
 
 - `start_session` 只在 **PO 親自發話的那一輪**、而且 PO 用話要求開這條線時，才能直接開（`user_asked`）。被 worker 的訊息、計時器、排程任務叫醒的那一輪，直接開會被拒，只能留「提案卡」（`own_initiative`），要 PO 點了才會開。
 - 所以：要開的 worker 先在待決頁列好（工單路徑、模型、effort），請 PO 在聊天裡一次說「開 W1、W2」；總監在那一輪全部開完。不要在被叫醒的那一輪空等提案卡。
-- 提案卡不能指定工作資料夾（`cwd`），新 session 會落在總監的專案資料夾或它自己的 worktree。工作資料夾限制寫進工單的 SCOPE / FORBIDDEN，不要只靠 `cwd`。
+- Strict 工單派工前的規格審查（`templates/SPEC_REVIEW.md`）要在 PO 發話的同一輪等到結果再開 worker。subagent 在背景跑時，先結束這一輪就只能留提案卡（實測 2026-11-04：同一輪等了約 4 分鐘）。
+- 直接開（`user_asked`）可以帶 `cwd` 指定 worker 的資料夾（實測 2026-11-04）。提案卡不能指定工作資料夾（`cwd`），新 session 會落在總監的專案資料夾或它自己的 worktree。工作資料夾限制寫進工單的 SCOPE / FORBIDDEN，不要只靠 `cwd`。
 - 新 session 的權限模式不一定和總監一樣（實測：從提案卡開出的 worker 是 `bypassPermissions`）。開完用 `get_session` 看；不能靠權限詢問擋住越界，要靠工單的 SCOPE / FORBIDDEN、`scope_check.py`，需要時加裝 `hook_guard.py`。`bypassPermissions` 只略過權限詢問，不略過 hook（實測 2026-11-04：worker 資料夾的 `.claude/settings.local.json` 裝了 `hook_guard.py`，`git push`、`git clean -fd` 照樣被擋）。
 - worker 的資料夾要先寫好壓縮門檻（`tools/setup_project_settings.py --apply`）。沒寫的資料夾，`get_usage` 會看到上下文視窗 1,000,000。
 - 額度重置後的喚醒（`docs/06b`）是被計時器叫醒的那一輪：只用 `SendMessage` 叫醒既有的 session，不開新的（從這種一輪送訊息是否可行，未實測）。
