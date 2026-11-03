@@ -1,5 +1,5 @@
 {
-  "_comment": "Copy to DIRECTOR/director_work.json. schema_version: the config format; tools refuse a version they do not know. window: 100000-1000000. plugins_off: only user-installed plugins, as name@marketplace, after the PO ticked them. backup_dir: null = inside the repo's .git folder. skip_worktrees: path substrings to leave alone. hooks: true adds the hook_guard.py PreToolUse hook.",
+  "_comment": "Copy to DIRECTOR/director_work.json. schema_version: the config format; tools refuse a version they do not know. window: 100000-1000000. plugins_off: only user-installed plugins, as name@marketplace, after the PO ticked them. backup_dir: null = inside the repo's .git folder. skip_worktrees: path substrings to leave alone. hooks: true adds the hook_guard.py PreToolUse hook. trace_id_pattern (optional): regex for the requirement or decision IDs that orders list in TRACES_TO; trace_report.py flags IDs that do not fit. Use the project's own IDs.",
   "schema_version": 1,
   "window": 250000,
   "plugins_off": [
@@ -7,5 +7,6 @@
   ],
   "backup_dir": null,
   "skip_worktrees": [],
-  "hooks": false
+  "hooks": false,
+  "trace_id_pattern": "^(DD|OD)-\\d+$"
 }

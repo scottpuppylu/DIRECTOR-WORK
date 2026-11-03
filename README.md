@@ -26,7 +26,7 @@
 你是這個專案的「總監」（Development Director），是我（PO）的代理人。
 請使用這套流程：https://github.com/scottpuppylu/DIRECTOR-WORK
 
-1. 依序讀 README.md → BOOTSTRAP.md → docs/ 01 到 10（含 06b）；在 Claude Desktop 上另讀 11。
+1. 依序讀 README.md → PURPOSE.md → BOOTSTRAP.md → docs/ 01 到 10（含 06b）；在 Claude Desktop 上另讀 11。
 2. 照 BOOTSTRAP.md 在本專案建置總監制：DIRECTOR/ 資料夾、CLAUDE.md 的總監段落、
    你自己的 RESUME_STATE、決策登記、PO 待決頁、壓縮門檻設定、記憶索引檢查。
 3. 會影響其他專案或使用者層設定的事（關 plugin 或 connector、帳號、付費、推送、
@@ -44,6 +44,7 @@
 | 檔案 | 內容 | 何時讀 |
 |---|---|---|
 | `README.md` | 本檔 | 第一次 |
+| `PURPOSE.md` | 初衷、目的、不能破壞的核心、改規則前的檢查；只有 PO 能改 | 第一次；改規則、工具、範本前 |
 | `BOOTSTRAP.md` | 新總監第一輪的逐步建置清單 | 第一次 |
 | `docs/01_roles_authority.md` | 角色、權限、總監可自行決定與必須送 PO 的事 | **每輪必讀** |
 | `docs/02_work_orders_gates.md` | 工單、gate、TASK REPORT、裁決、測試排程與預算 | 派工、裁決時 |
@@ -57,8 +58,8 @@
 | `docs/09_memory.md` | 記憶索引的大小與整理 | 每週、超過門檻時 |
 | `docs/10_lessons_learned.md` | 原專案的教訓 | 第一次；寫新規則前 |
 | `docs/11_claude_desktop.md` | 在 Claude Desktop 上開 worker、傳訊息、讀額度和上下文視窗用哪個工具 | 在 Desktop 上建置與操作時 |
-| `templates/` | CLAUDE.md 段落、工單、報告、RESUME_STATE、測試申請、決策登記、裁決、待決頁、DIRECTOR/ 其他檔案骨架 | 建置與派工時 |
-| `tools/` | 設定寫入、免費探測、用量統計、記憶大小檢查；交件檢查（格式、範圍、證據紀錄） | 見 `tools/README.md` |
+| `templates/` | CLAUDE.md 段落、工單、報告、RESUME_STATE、測試申請、決策登記、裁決、待決頁、規格審查提示、DIRECTOR/ 其他檔案骨架 | 建置與派工時 |
+| `tools/` | 設定寫入、免費探測、用量統計、記憶大小檢查；交件檢查（格式、驗收對照、範圍、證據紀錄）、追溯表 | 見 `tools/README.md` |
 | `director_work.example.json` | 工具設定範例 | 建置時 |
 | `VERSION`、`CHANGELOG.md` | 版本號、各版改了什麼、升級怎麼遷移 | 建置時記版本；升級時 |
 
@@ -66,6 +67,7 @@
 
 - **PO 的專案特有規則永遠優先。** 這套流程是預設值，不是更高層的規則。
 - 這套流程只管總監被任命的那個專案。其他專案、使用者層設定、全域工具，都要 PO 決定。
+- **不能偏離初衷。** `PURPOSE.md` 是所有規則的上位依據，只有 PO 能改。改規則前先過它的五題檢查，答案寫進 `CHANGELOG.md`。
 - 規則都是「規則 → 為什麼」。改規則時，把「為什麼」一起改。
 
 ## 授權
