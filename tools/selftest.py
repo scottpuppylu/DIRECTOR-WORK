@@ -1,5 +1,6 @@
-"""Run gate_check, trace_report, scope_check, evidence_record and hook_guard against good and bad cases in a temporary
-folder, and check that the fixed words, the size of the must-read docs, PURPOSE.md and the CHANGELOG have not drifted.
+"""Run gate_check, trace_report, metrics_report, scope_check, evidence_record and hook_guard against good and bad cases
+in a temporary folder, and check that the fixed words, the size of the must-read docs, PURPOSE.md and the CHANGELOG have
+not drifted.
 Prints one line per failed case and a summary; exit 1 when anything fails. Writes only to the temporary folder.
 """
 import hashlib
@@ -220,6 +221,92 @@ def test_acceptance(tmp):
     expect("--order with --report does not cross-check", "gate_check.py", 0, "--order", order, "--report",
            tmp / "match_missing_ac.md", lacks="in the order but not")
     expect("--match missing file", "gate_check.py", 1, "--match", tmp / "nope.md", order, says="file not found")
+
+
+def evidence_file(folder, name, head, exit_code=0, timed_out=False, dirty=False, label="AC-1", sha256="ab" * 32):
+    """An evidence_record.py file, written directly so the case does not depend on git."""
+    record = {"schema": 1, "label": label, "command": ["python", "-c", "0"], "exit_code": exit_code, "timed_out": timed_out,
+              "git": {"head": head, "dirty": dirty}, "artifacts": [{"path": "out.txt", "kind": "file", "size": 1, "sha256": sha256}]}
+    (folder / name).write_text(json.dumps(record), encoding="utf-8")
+
+
+def test_evidence_match(tmp):
+    """v0.11: --match --evidence-dir reads the evidence records an AUTO PASS row names. Without the flag nothing changes."""
+    typed = TYPED_ORDER.format(base="abc123")
+    order = tmp / "WO-001-parser.md"
+    order.write_bytes(typed.encode("utf-8"))
+    sha = hashlib.sha256(typed.encode("utf-8")).hexdigest()
+    head = "0123456789abcdef0123456789abcdef01234567"
+    folder = tmp / "records"
+    folder.mkdir()
+    good = list(ACCEPTANCE.values())
+
+    def ev(name, code, record=None, says=None, lacks=None, rows=good, title=f"/ c / {head} / yes", extra="", result="PASS"):
+        if record is not None:
+            evidence_file(folder, "e.json", **{"head": head, **record})
+        report = tmp / f"{name}.md"
+        text = match_report(rows, result, sha).replace("/ c / d / yes", title, 1).replace("RESULT:", extra + "RESULT:", 1)
+        report.write_text(text, encoding="utf-8")
+        expect(name, "gate_check.py", code, "--match", report, order, "--evidence-dir", folder, says=says, lacks=lacks)
+        return report
+
+    ev("ev_ok", 0, {}, "OK   match", "  ~ ")  # AC-2 (REVIEW) names out.txt: only AUTO rows are read
+    ev("ev_short_head", 0, {}, "OK   match", title=f"/ c / {head[:7]} / yes")
+    ev("ev_exit", 1, {"exit_code": 3}, "AC-1: e.json: the command exited 3")
+    ev("ev_timeout", 1, {"exit_code": 124, "timed_out": True}, "(timed out)")
+    ev("ev_artifact", 1, {"sha256": None}, "artifact missing when recorded: out.txt")
+    ev("ev_head", 1, {"head": "fedcba9876543210fedcba9876543210fedcba98"}, "record again after the last commit")
+    ev("ev_notes", 0, {"dirty": True, "label": "AC-9"},
+       ["~ AC-1: e.json: recorded with uncommitted changes", "~ AC-1: e.json: its label is AC-9"])
+    ev("ev_no_json", 1, {}, "AC-1: PASS names no evidence_record file (.json) in 證據",
+       rows=["| AC-1 | exit 0 | log.txt | PASS |"] + good[1:])
+    ev("ev_missing_record", 1, {}, "AC-1: gone.json is not an evidence_record file",
+       rows=["| AC-1 | exit 0 | gone.json | PASS |"] + good[1:])
+    ev("ev_head_line", 0, {}, "OK   match", "  ~ ", title="/ c / d / yes", extra=f"HEAD: {head}\n")
+    ev("ev_branch_slash", 0, {}, "OK   match", "  ~ ", title=f"/ feature/x / c / {head} / yes")
+    ev("ev_no_head", 0, {"head": "fedcba9876543210fedcba9876543210fedcba98"},
+       "~ HEAD: the report names no commit hash; evidence HEAD not compared", title="/ c / d / yes")
+    ev("ev_fail_row_unchecked", 0, {"exit_code": 3}, "OK   match", rows=["| AC-1 | exit 3 | e.json | FAIL |"] + good[1:],
+       result="FAIL")
+    plain = ev("ev_flag_off_base", 1, {"exit_code": 3})
+    expect("without --evidence-dir a failed record is not read", "gate_check.py", 0, "--match", plain, order, says="OK   match")
+    expect("--evidence-dir needs --match", "gate_check.py", 2, "--report", plain, "--evidence-dir", folder)
+    expect("--evidence-dir folder missing", "gate_check.py", 2, "--match", plain, order, "--evidence-dir", tmp / "nope")
+
+
+def test_metrics(tmp):
+    """metrics_report.py counts PURPOSE.md's numbers from the Director's files; a missing source is UNKNOWN, not 0."""
+    root = tmp / "metrics" / "DIRECTOR"
+    for folder in ("orders", "reviews"):
+        (root / folder).mkdir(parents=True)
+    typed = TYPED_ORDER.format(base="abc123")
+    (root / "orders" / "WO-001.md").write_text(typed.replace("REVISION       = 1", "REVISION       = 3"), encoding="utf-8")
+    (root / "orders" / "WO-002.md").write_text(typed.replace("# WO-001", "# WO-002"), encoding="utf-8")
+    (root / "reviews" / "v1.md").write_text(VERDICT.format(verdict="FAIL", step="CONTINUE_SAME_WORKER"), encoding="utf-8")
+    (root / "reviews" / "v2.md").write_text(VERDICT.format(verdict="PASS", step="ACCEPT_AND_CLOSE"), encoding="utf-8")
+    (root / "DIRECTOR_LOG.md").write_text(
+        "# DIRECTOR_LOG\n"
+        "2025-12-30 10:00 +08:00 | RESUMED WO-000 at x; next=y; waiting=NONE\n"
+        "2026-01-02 10:00 +08:00 | RESUMED WO-001 at AC-1; next=run; waiting=NONE; redo=NONE\n"
+        "2026-01-03 10:00 +08:00 | RESUMED WO-001 at AC-2; next=run; waiting=NONE; redo=capture.mp4\n"
+        "2026-01-02 11:00 +08:00 | BOOTSTRAP_STUCK 第 4 步 tool missing\n"
+        "2026-01-02 12:00 +08:00 | SPEC_REVIEW WO-001 tokens=1200 issues=0/1/2 adopted=2\n", encoding="utf-8")
+    (root / "PO_PENDING.md").write_text("ID: OD-1\nSTATUS: open\n\nID: OD-2\nSTATUS: closed\n\nID: ACT-1\nSTATUS: answered\n",
+                                        encoding="utf-8")
+    expect("metrics counts", "metrics_report.py", 0, "--director", root,
+           says=["| 返工次數 | 1（CONTINUE_SAME_WORKER 1、SWITCH_TO_OTHER_WORKER 0）；工單改版 2 次（1 份工單） | 裁決 2 份、工單 2 份 |",
+                 "| 中斷後遺失的工作 | 1 / 恢復 3 次；1 次沒寫 redo= |", "| PO 介入次數 | 3（OD 2、ACT 1），還在等 PO 1 |",
+                 "| 新專案導入卡住 | 1 |", "1 次，tokens 合計 1200，採用的問題 2 個", "UNKNOWN：跑 `usage_report.py`"])
+    expect("metrics --since drops older lines", "metrics_report.py", 0, "--director", root, "--since", "2026-01-01",
+           says=["| 中斷後遺失的工作 | 1 / 恢復 2 次 |", "範圍：2026-01-01 起"])
+    expect("metrics --since drops older orders", "metrics_report.py", 0, "--director", root, "--since", "2026-01-05",
+           says=["工單改版 0 次（0 份工單）", "| 新專案導入卡住 | 0 |", "0 次"])
+    empty = tmp / "metrics" / "empty"
+    empty.mkdir()
+    expect("metrics with nothing recorded", "metrics_report.py", 0, "--director", empty,
+           says=["UNKNOWN：找不到裁決或工單", "UNKNOWN：沒有 DIRECTOR_LOG.md", "UNKNOWN：沒有 PO_PENDING.md"], lacks="| 0 |")
+    expect("metrics bad --since", "metrics_report.py", 2, "--director", root, "--since", "Jan 1")
+    expect("metrics missing folder", "metrics_report.py", 1, "--director", tmp / "metrics" / "nope", says="folder not found")
 
 
 def test_trace(tmp):
@@ -482,7 +569,9 @@ def main():
     try:
         test_gate(tmp)
         test_acceptance(tmp)
+        test_evidence_match(tmp)
         test_trace(tmp)
+        test_metrics(tmp)
         test_purpose()
         test_scope(tmp)
         test_shared_code()

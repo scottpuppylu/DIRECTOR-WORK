@@ -12,7 +12,7 @@
 4. 被中斷的 GO：通知總管「RESUMED <task>，需要重新排程」，不假設時段還有效。
 5. 自己設的計時器、背景等待、監看程序：全部視為可能失效，逐項確認或重建。
 6. 更新 RESUME_STATE（時間 + 恢復說明），先處理 COMMS 裡欠別人的，才繼續 NEXT_STEP。
-7. 第一則給總監的訊息只有一行：`RESUMED <TASK_ID> at <checkpoint>; next=<step>; waiting=<誰或 NONE>`。沒有需要總監知道的事就不發。
+7. 第一則給總監的訊息只有一行：`RESUMED <TASK_ID> at <checkpoint>; next=<step>; waiting=<誰或 NONE>; redo=<第 3 步列入重做的輸出或 NONE>`。沒有需要總監知道的事就不發。總監把收到的這一行（或自己恢復時的同一行）記進 `DIRECTOR_LOG`，`metrics_report.py` 從這裡數中斷後遺失的工作。
 
 PO 手動停止後再讓它繼續，也要先完整跑一次這個程序：停止那一刻的指令可能只跑了一半，背景程序可能變成沒人管的孤兒程序。
 

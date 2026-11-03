@@ -6,6 +6,25 @@
 - **MINOR**：新增規則、文件、工具或選項，舊檔案照樣通過。
 - **PATCH**：修正文字、修 bug，規則不變。
 
+## 0.11.0 — 2026-11-04
+
+驗收證據可以機器核對，成效數字可以從檔案數出來。MINOR：`gate_check.py` 不帶 `--evidence-dir` 時行為不變；新的紀錄慣例只寫在需要時才讀的文件。
+
+- `gate_check.py --match 報告 工單 --evidence-dir 資料夾`：AUTO 條件填 PASS 時，證據欄要寫 `evidence_record.py` 的 `.json` 檔名；紀錄的指令要 exit 0、沒逾時、產物沒有缺，紀錄的 git HEAD 要和報告寫的 HEAD 相同。紀錄時有未提交的改動、label 不是這條 AC，只印提示。報告沒寫 commit 雜湊時印提示、不比 HEAD。紀錄只證明指令跑過而且通過，不證明它測對了東西。
+- 新增 `tools/metrics_report.py`：從 `DIRECTOR` 的裁決、工單、`DIRECTOR_LOG`、`PO_PENDING` 數出 `PURPOSE.md` 的成效數字（返工、中斷後重做、PO 介入、導入卡住）和規格審查的花費；來源檔不存在印 `UNKNOWN`。額度仍用 `usage_report.py`。
+- 兩個紀錄慣例，給 `metrics_report.py` 數：`docs/06b` 恢復程序第 7 步的 `RESUMED` 行加 `redo=`，總監記進 `DIRECTOR_LOG`；`BOOTSTRAP` 卡住時在 `DIRECTOR_LOG` 記 `BOOTSTRAP_STUCK 第 n 步 原因`。
+- `docs/02`、`templates/TASK_REPORT.md`、`tools/README.md` 寫明：AUTO 條件在最後一次 commit 之後記錄，證據欄寫 `.json` 檔名。
+- `selftest.py` 加上面各項的正反案例（共 202 項）。
+
+對齊初衷：
+1. 幫到誰：v0.10 的 `--match` 只查證據欄有沒有寫字，worker 寫了不存在或失敗的紀錄也會通過；`PURPOSE.md` 列了五個成效指標，但沒有工具能數，改規則前後無從比較。
+2. Desktop：工具只用標準函式庫、本機執行，selftest 在 Python 3.11 和 3.9 通過，也用真的 `evidence_record.py` 紀錄在暫存 git repo 跑過一次。在 Desktop 上拿真實 Strict 工單試用、量基準數字 NOT_VERIFIED。
+3. 服務：成品要真的對（5，PASS 要有通過的紀錄）、PO 不用盯細節（3，總監用工具核對）、用數字決定規則留不留（PURPOSE.md 怎麼判斷有沒有效）。
+4. 核心：每輪必讀不變（13,417 / 13,428 bytes）；`--evidence-dir` 是選用的，Direct 不受影響；PO 不多操作。新增的兩行紀錄由總監和 worker 寫。
+5. 舊檔案：不帶新參數時照樣通過。用 `--evidence-dir` 時，舊報告的證據欄若不是 `.json` 檔名會不通過，所以只對新報告用。
+
+遷移：把 `tools/` 整個重新複製到 `DIRECTOR/tools/`（含 `metrics_report.py`）。要核對證據時，總監審查改跑 `gate_check.py --match 報告 工單 --evidence-dir 證據資料夾`，並在派工時告訴 worker 證據欄要寫 `.json` 檔名、最後一次 commit 之後再記錄。
+
 ## 0.10.0 — 2026-11-04
 
 驗收條件分類型、規格和結果分開放，加上 PO 定的初衷。MINOR：新檢查對舊檔案只印提示（`  ~ ` 開頭），不會讓舊檔案不通過；`gate_check.py` 不帶新參數時行為不變。
