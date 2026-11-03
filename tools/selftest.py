@@ -1,7 +1,8 @@
-"""Run gate_check, scope_check, evidence_record and hook_guard against good and bad cases in a temporary folder,
-and check that the fixed words and the size of the must-read docs have not drifted.
+"""Run gate_check, trace_report, scope_check, evidence_record and hook_guard against good and bad cases in a temporary
+folder, and check that the fixed words, the size of the must-read docs, PURPOSE.md and the CHANGELOG have not drifted.
 Prints one line per failed case and a summary; exit 1 when anything fails. Writes only to the temporary folder.
 """
+import hashlib
 import json
 import pathlib
 import re
@@ -59,6 +60,19 @@ KNOWN_ISSUES: NONE
 NEXT: NONE
 ```
 """
+TYPED_ORDER = ORDER.replace("BASE_REF       = main @ {base}\n",
+                            "BASE_REF       = main @ {base}\nREVISION       = 1\nTRACES_TO      = DD-1\n").replace(
+    """| ID | req | how | expected | actual | evidence | status |
+|---|---|---|---|---|---|---|
+| AC-1 | parser accepts empty input | run test_parser | exit 0 | | | |
+""", """| ID | 類型 | 要求 | 驗證方法 | 預期 |
+|---|---|---|---|---|
+| AC-1 | AUTO | parser accepts empty input | run test_parser | exit 0 |
+| AC-2 | REVIEW | the output reads right | reviewer reads out.txt in full | no WRONG answer |
+| AC-3 | PO | PO accepts the wording | PO reads out.txt | PO says yes |
+""")
+ACCEPTANCE = {"AC-1": "| AC-1 | exit 0 | e.json | PASS |", "AC-2": "| AC-2 | out.txt written | out.txt | READY_FOR_REVIEW |",
+              "AC-3": "| AC-3 | wording drafted | out.txt | PENDING_PO |"}
 VERDICT = """# GATE VERDICT
 ## A. 判定
 {verdict}
@@ -78,12 +92,14 @@ def run(tool, *args, cwd=None):
     return done.returncode, done.stdout
 
 
-def expect(name, tool, code, *args, cwd=None, says=None):
+def expect(name, tool, code, *args, cwd=None, says=None, lacks=None):
+    """says / lacks: a string or a list of strings the output must hold / must not hold."""
     global total
     total += 1
     got, out = run(tool, *args, cwd=cwd)
-    if got != code or (says and says not in out):
-        failures.append(f"{name}: expected exit {code}{f' with {says!r}' if says else ''}, got {got}: {out.strip()[-300:]}")
+    says, lacks = [says] if isinstance(says, str) else says or [], [lacks] if isinstance(lacks, str) else lacks or []
+    if got != code or any(s not in out for s in says) or any(s in out for s in lacks):
+        failures.append(f"{name}: expected exit {code} with {says!r} and without {lacks!r}, got {got}: {out.strip()[-300:]}")
 
 
 def gate(tmp, name, kind, text, code, says=None):
@@ -138,6 +154,120 @@ def test_gate(tmp):
     expect("--since needs a date", "gate_check.py", 2, "--since", "yesterday", "--order", new)
 
 
+def match_report(rows, result="PASS", sha=None):
+    """A report whose ACCEPTANCE table holds rows, pointing at WO-001-parser.md."""
+    head = "ORDER: WO-001-parser.md REVISION 1\n" + (f"ORDER_SHA256: {sha}\n" if sha else "")
+    table = "ACCEPTANCE:\n| ID | 實際 | 證據 | 狀態 |\n|---|---|---|---|\n" + "\n".join(rows) + "\n"
+    text = REPORT.format(result=result, tests="unit 12/12", scope="PASS base=abc changed=2 forbidden=0 outside=0", evidence="e.json")
+    return text.replace("RESULT:", head + "RESULT:", 1).replace("UNVERIFIED: NONE", table + "UNVERIFIED: NONE")
+
+
+def test_acceptance(tmp):
+    """v0.10: typed acceptance criteria in the order, results in the report, --match and --hash. Old files only get notes."""
+    global total
+    total += 1
+    if "| AC-3 | PO |" not in TYPED_ORDER or "TRACES_TO" not in TYPED_ORDER:
+        failures.append("TYPED_ORDER did not build from ORDER; update the replace() in selftest.py")
+    typed = TYPED_ORDER.format(base="abc123")
+    gate(tmp, "typed_ok", "order", typed, 0)
+    expect("a typed order gets no notes", "gate_check.py", 0, "--order", tmp / "typed_ok.md", lacks="  ~ ")
+    expect("an old order passes with notes", "gate_check.py", 0, "--order", tmp / "order_ok.md",
+           says=["OK", "~ acceptance: no 類型 column", "~ REVISION: missing", "~ TRACES_TO: missing", "~ acceptance: 實際"])
+    gate(tmp, "typed_kind", "order", typed.replace("| AUTO |", "| AUTOMATIC |"), 1, "類型: must be one of")
+    gate(tmp, "typed_rev_word", "order", typed.replace("REVISION       = 1", "REVISION       = two"), 1, "must be a number")
+    gate(tmp, "typed_rev_nolog", "order", typed.replace("REVISION       = 1", "REVISION       = 2"), 1, "no row for revision 2")
+    gate(tmp, "typed_rev_log", "order", typed.replace("REVISION       = 1", "REVISION       = 2")
+         + "\n| 版本 | 時間 | 誰改 | 原因 | 影響的 AC |\n|---|---|---|---|---|\n| 2 | 2026-01-03 | director | split AC-1 | AC-1 |\n", 0)
+    expect("a report without ACCEPTANCE still passes", "gate_check.py", 0, "--report", tmp / "report_ok.md", says="~ ACCEPTANCE: no table")
+
+    order = tmp / "WO-001-parser.md"
+    order.write_bytes(typed.encode("utf-8"))
+    sha = hashlib.sha256(typed.encode("utf-8")).hexdigest()
+    crlf = tmp / "WO-001-crlf.md"
+    crlf.write_bytes(typed.replace("\n", "\r\n").encode("utf-8"))
+    expect("--hash prints the order hash", "gate_check.py", 0, "--hash", order, says=f"{sha}  ")
+    expect("--hash counts CRLF as LF", "gate_check.py", 0, "--hash", crlf, says=f"{sha}  ")
+    expect("--hash of a missing file", "gate_check.py", 1, "--hash", tmp / "nope.md", says="file not found")
+
+    def match(name, code, rows, says=None, result="PASS", digest=sha, against=order, lacks=None):
+        report = tmp / f"{name}.md"
+        report.write_text(match_report(rows, result, digest), encoding="utf-8")
+        expect(name, "gate_check.py", code, "--match", report, against, says=says, lacks=lacks)
+        return report
+
+    good = list(ACCEPTANCE.values())
+    match("match_ok", 0, good, says="OK   match", lacks="  ~ ")
+    match("match_crlf_order", 0, good, against=crlf)
+    match("match_missing_ac", 1, good[:2], "AC-3: in the order but not in the report")
+    match("match_extra_ac", 1, good + ["| AC-4 | x | y.json | PASS |"], "AC-4: in the report but not in the order")
+    match("match_review_pass", 1, [good[0], "| AC-2 | looks fine | out.txt | PASS |", good[2]],
+          ["AC-2 (REVIEW): status must be one of", "a reviewer, then the Director, judges it"])
+    match("match_po_pass", 1, good[:2] + ["| AC-3 | drafted | out.txt | PASS |"], ["AC-3 (PO)", "only the PO judges it"])
+    match("match_no_evidence", 1, ["| AC-1 | exit 0 | | PASS |"] + good[1:], "AC-1: PASS without evidence")
+    match("match_none_evidence", 1, ["| AC-1 | exit 0 | NONE | PASS |"] + good[1:], "AC-1: PASS without evidence")
+    match("match_no_actual", 1, ["| AC-1 | | e.json | PASS |"] + good[1:], "AC-1: PASS with 實際 empty")
+    match("match_pass_blocked", 1, ["| AC-1 | crashed | log.txt | BLOCKED |"] + good[1:], "RESULT PASS with")
+    match("match_partial_blocked", 0, ["| AC-1 | crashed | log.txt | BLOCKED |"] + good[1:], result="PARTIAL")
+    match("match_no_hash", 1, good, "ORDER_SHA256: missing", digest=None)
+    changed = tmp / "WO-001-changed.md"
+    changed.write_text(typed.replace("exit 0 |", "exit 0 or 1 |"), encoding="utf-8")
+    match("match_changed_order", 1, good, "the order is not the one the worker hashed", against=changed)
+    old = tmp / "WO-old.md"
+    old.write_text(ORDER.format(base="abc123"), encoding="utf-8")
+    old_sha = hashlib.sha256(ORDER.format(base="abc123").encode("utf-8")).hexdigest()  # write_text may add CR
+    match("match_untyped_as_auto", 0, [good[0]], "~ AC-1: the order gives no 類型; checked as AUTO", digest=old_sha, against=old)
+    match("match_untyped_review", 1, ["| AC-1 | x | y.json | READY_FOR_REVIEW |"], "AC-1 (AUTO)", digest=old_sha, against=old)
+    expect("--order with --report does not cross-check", "gate_check.py", 0, "--order", order, "--report",
+           tmp / "match_missing_ac.md", lacks="in the order but not")
+    expect("--match missing file", "gate_check.py", 1, "--match", tmp / "nope.md", order, says="file not found")
+
+
+def test_trace(tmp):
+    """trace_report.py joins orders, reports and verdicts; flags orders without TRACES_TO and IDs off the pattern."""
+    root = tmp / "trace"
+    for folder in ("orders", "reports", "reviews"):
+        (root / folder).mkdir(parents=True)
+    typed = TYPED_ORDER.format(base="abc123")
+    (root / "orders" / "WO-001-parser.md").write_text(typed, encoding="utf-8")
+    (root / "orders" / "WO-002-ui.md").write_text(ORDER.format(base="abc123").replace("# WO-001", "# WO-002"), encoding="utf-8")
+    (root / "orders" / "WO-003-api.md").write_text(typed.replace("# WO-001", "# WO-003").replace("DD-1", "REQ7"), encoding="utf-8")
+    (root / "reports" / "r1.md").write_text(match_report(list(ACCEPTANCE.values()), "PARTIAL"), encoding="utf-8")
+    (root / "reports" / "stray.md").write_text(REPORT.format(result="PASS", tests="t", scope="PASS", evidence="e"), encoding="utf-8")
+    (root / "reviews" / "v1.md").write_text(VERDICT.format(verdict="PASS_WITH_WARNINGS", step="ACCEPT_AND_CLOSE")
+                                            .replace("# GATE VERDICT", "# GATE VERDICT WO-001"), encoding="utf-8")
+    config = root / "director_work.json"
+    config.write_text(json.dumps({"schema_version": 1, "trace_id_pattern": r"^(DD|OD)-\d+$"}), encoding="utf-8")
+    base = ("--orders", root / "orders", "--reports", root / "reports")
+    expect("trace table", "trace_report.py", 0, *base, "--verdicts", root / "reviews", "--config", config,
+           says=["| DD-1 | WO-001 | AC-2 | REVIEW | READY_FOR_REVIEW | out.txt | PASS_WITH_WARNINGS |",
+                 "| DD-1 | WO-001 | AC-1 | AUTO | PASS | e.json | PASS_WITH_WARNINGS |",
+                 "| REQ7 | WO-003 | AC-1 | AUTO | 沒有報告 |", "## 沒有 TRACES_TO 的工單\n- WO-002",
+                 "## 編號格式不符 trace_id_pattern\n- WO-003: REQ7", "stray.md"])
+    expect("trace without a pattern accepts any ID", "trace_report.py", 0, *base, says="## 編號格式不符 trace_id_pattern\n- 無")
+    expect("trace with a missing folder", "trace_report.py", 1, "--orders", root / "nope", "--reports", root / "reports",
+           says="folder not found")
+
+
+def test_purpose():
+    """PURPOSE.md keeps its 7 aims and 9 cores and says only the PO edits it; every CHANGELOG version answers to it."""
+    global total
+    root = TOOLS.parent
+    text = (root / "PURPOSE.md").read_text(encoding="utf-8")
+    for heading, count in (("初衷", 7), ("不能破壞的核心", 9)):
+        total += 1
+        section = re.search(rf"^## {heading}\n(.*?)(?=^## |\Z)", text, re.M | re.S)
+        items = re.findall(r"^\d+\. \*\*", section.group(1), re.M) if section else []
+        if len(items) != count:
+            failures.append(f"PURPOSE.md: ## {heading} should list {count} items, found {len(items)}; only the PO changes it")
+    total += 1
+    if "只有 PO 能改本檔" not in text:
+        failures.append("PURPOSE.md no longer says 只有 PO 能改本檔")
+    for version, body in re.findall(r"^## (\d+\.\d+\.\d+)[^\n]*\n(.*?)(?=^## |\Z)", (root / "CHANGELOG.md").read_text(encoding="utf-8"), re.M | re.S):
+        total += 1
+        if "對齊初衷" not in body:
+            failures.append(f"CHANGELOG {version}: no 對齊初衷 line (PURPOSE.md, 改規則前的檢查)")
+
+
 def test_vocabulary():
     """vocabulary.json is the one source; the docs and templates that spell the lists out must still match it."""
     global total
@@ -148,7 +278,12 @@ def test_vocabulary():
     wanted += [("templates/TASK_REPORT.md", " | ".join(vocab["report_results"])),
                ("templates/GATE_VERDICT.md", " | ".join(vocab["verdicts"])),
                ("templates/GATE_VERDICT.md", " | ".join(vocab["next_steps"])),
-               ("templates/WORK_ORDER.md", " | ".join(vocab["governance"]))]
+               ("templates/WORK_ORDER.md", " | ".join(vocab["governance"])),
+               ("docs/02_work_orders_gates.md", f"`{' / '.join(vocab['ac_worker_statuses'])}`"),
+               ("templates/WORK_ORDER.md", " / ".join(vocab["ac_worker_statuses"])),
+               ("templates/TASK_REPORT.md", " / ".join(vocab["ac_worker_statuses"]["AUTO"]))]
+    wanted += [(path, vocab["ac_worker_statuses"][kind][0]) for kind in ("REVIEW", "PO")
+               for path in ("docs/02_work_orders_gates.md", "templates/TASK_REPORT.md")]
     for path, text in wanted:
         total += 1
         if text not in (root / path).read_text(encoding="utf-8"):
@@ -346,6 +481,9 @@ def main():
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="director_work_selftest_")).resolve()
     try:
         test_gate(tmp)
+        test_acceptance(tmp)
+        test_trace(tmp)
+        test_purpose()
         test_scope(tmp)
         test_shared_code()
         test_vocabulary()

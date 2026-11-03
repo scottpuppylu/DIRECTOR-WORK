@@ -14,17 +14,25 @@
 - 一律落檔：`DIRECTOR/orders/WO-<編號>-<短名>.md`，格式見 `templates/WORK_ORDER.md`。訊息只附路徑、一句摘要和必要的決定。
 - 必填：`PRIMARY_WORKER / MODEL / EFFORT / FALLBACK / GOVERNANCE / BASE_REF / SCOPE / FORBIDDEN / ACCEPTANCE / DELIVERABLES / STOP_RULES`。
 - 內容分段：A 背景、B 目標（MUST / OPTIONAL / OUT OF SCOPE，加上 SCOPE / FORBIDDEN 路徑清單）、C 執行前檢查、D 實作要求、E 驗收條件、F 安全與版控、G 完成定義。
-- 驗收條件每項有：ID、要求、驗證方法、預期、實際、證據、狀態。Mock 和單元測試不能當成真實環境的驗收。
+- 驗收條件每項有：ID、類型、要求、驗證方法、預期。結果（實際、證據、狀態）寫在 TASK REPORT 的 ACCEPTANCE 表，不寫回工單。Mock 和單元測試不能當成真實環境的驗收。
+- 類型 `AUTO / REVIEW / PO`：
+  - AUTO：有指令可以重跑，總監重跑後判定。
+  - REVIEW：要有人看成品，獨立審查後由總監判定。開工前寫明誰看、從哪個角度看、看多大範圍、看哪些常識閘門項目（`docs/07`）。
+  - PO：只有 PO 能判。
+  - worker 能填的狀態以 `tools/vocabulary.json` 為準：REVIEW 最多填 `READY_FOR_REVIEW`，PO 只填 `PENDING_PO`。
+- `TRACES_TO` 寫這張工單服務的需求或決定編號，沿用專案已有的編號；格式寫在 `director_work.json` 的 `trace_id_pattern`。
 - Worker 不改工單的驗收條件和規格。發現條件做不到、互相矛盾或有錯，回報 `BLOCKED` 並寫明原因，由總監裁決後改工單。
+- 總監改工單時 `REVISION` 加 1，在 H 節記一列（誰改、原因、影響的 AC）。派工時用 `gate_check.py --hash` 記下工單雜湊，寫進 `DIRECTOR_LOG`；worker 在報告填 `ORDER_SHA256`。這只能查出改動，擋不住改動。
 - 發工單前想清楚需求、現有結構、相依、邊界條件、測試方法，一次給完整。
+- 規格審查：Strict 工單派工前必做，Standard 選用，Direct 不做。總監開一個短上下文、只讀的 subagent，照 `templates/SPEC_REVIEW.md` 審工單；結果只給總監參考，不增加 PO 的工作。每次在 `DIRECTOR_LOG` 記下花費（subagent 回報的 token）和抓到的問題；花費高過它省下的返工，就降回選用。
 
 ### Gate 與回報
 
 - Worker 在 gate 完成、卡住、需要裁決、要偏離工單時回報，一個 gate 只送**一則完整**的 TASK REPORT（`templates/TASK_REPORT.md`）。
 - 交件前 worker 跑三支工具，把結論行貼進 TASK REPORT：`tools/scope_check.py`（改動有沒有超出工單）、`tools/gate_check.py`（欄位和用詞）、`tools/evidence_record.py`（驗收指令留下重跑指令和產物雜湊）。
-- 總監審查時自己重跑 `scope_check.py` 和 `evidence_record.py verify`，不只看報告怎麼寫。工具通過只代表格式、範圍和檔案對得上，不代表做對了；下面四階段照做。
+- 總監審查時自己重跑 `scope_check.py`、`evidence_record.py verify` 和 `gate_check.py --match 報告 工單`，不只看報告怎麼寫。`--match` 檢查每條驗收條件都有結果、狀態符合類型、PASS 附證據、工單雜湊相符。工具通過只代表格式、範圍和檔案對得上，不代表做對了；下面四階段照做。
 - 總監審查四階段：
-  1. 對照原始需求逐項核對，不接受 worker 自行縮減的驗收條件。
+  1. 對照原始需求逐項核對，不接受 worker 自行縮減的驗收條件。REVIEW 條件交給獨立審查（`docs/07`），PO 條件放上待決頁。
   2. 審證據：修改範圍、意外修改、build、測試是否足夠、回歸、未驗證項。沒有親自取得的證據要寫「依 worker 報告」。
   3. 判定：`PASS / PASS_WITH_WARNINGS / CONDITIONAL_PASS / PARTIAL / HOLD / BLOCKED / FAIL / NOT_RUN`。
   4. 下一步只選一個：`ACCEPT_AND_CLOSE / CONTINUE_SAME_WORKER / SWITCH_TO_OTHER_WORKER / REQUEST_INDEPENDENT_REVIEW / REQUEST_OWNER_AUTHORIZATION / STOP_AND_REPORT_BLOCKER`。
@@ -33,6 +41,7 @@
 - 狀態分開寫：工程、功能、成品、效能、穩定性、整合、PO 驗收，不用一個 PASS 蓋過其他。
 - 跳過的測試不算 PASS；既有失敗維持原樣寫 `NO_NEW_REGRESSION`，不是 ALL PASS。
 - 交接時用 `RESUME_STATE.md`（`docs/06`）；原 worker 先停在安全狀態，接手者先核對 repo 和交接資料一致，不重做已通過的工作。
+- 要看「哪個需求做到哪裡」時，用 `tools/trace_report.py` 從工單、報告和裁決產生追溯表（需求 → 工單 → AC → 證據 → 裁決），不另外人工維護。
 
 ### 重資源排程（有總管時）
 
@@ -59,6 +68,9 @@
 
 - 工單落檔，任何 session 中斷後都能重讀；訊息會被洗掉，也會讓每個收件者多一次完整上下文的成本。
 - 四階段審查擋住最常見的問題：worker 偷偷縮小驗收範圍、把「跑過」說成「通過」。驗收條件只有總監能改，worker 改了就等於自己批准自己的交件。
+- v0.10 以前，工單的驗收表同時放結果欄：worker 要填結果就得改工單，規格有沒有被動也就查不出來。所以規格留在工單，結果放報告，再用 `--match` 逐條對照。
+- 原專案一段展示影片的工程數字全部正確，角色卻朝反方向動作：審查只看了被問到的部位，看的角度也由作者自己挑。所以要用眼睛看的條件，開工前就寫明誰看、怎麼看，實作者不能自己判過。
+- 規格審查會花額度，所以只在 Strict 必做，而且要記下花費和抓到的問題，用數字決定要不要繼續做。
 - 狀態分開寫，是因為一個面向 PASS 常被拿來蓋過其他面向沒驗。
 - 規則只寫在文件裡，靠模型自律就會漏；寫成小程式才每次都擋得住，也不花額度。報告裡的「沒超出範圍」「測試通過」是自述，要能重跑才算證據。
 - GO 用檔案發：系統可能限制一個 session 在使用者兩次發言之間自動發出的跨 session 訊息數量（原專案約 10 則就被暫停），排程員最先撞到。看板檔沒有這個限制，背景等待也不花額度。原專案曾因看板寫短名、監看等全名，獨佔時段空轉近半小時。

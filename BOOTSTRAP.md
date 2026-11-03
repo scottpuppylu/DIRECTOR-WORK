@@ -16,7 +16,7 @@
 1. 把本規則包放到專案外的位置：`git clone https://github.com/scottpuppylu/DIRECTOR-WORK <RULES>`（PO 給了本機路徑就直接用）。第 3 步再把整個 `tools/` 複製到 `DIRECTOR/tools/`。
    PO 給了連結，就算同意下載這一個專案。跑工具前先讀過它的程式碼；第一輪會跑 `setup_project_settings.py`、`context_probe.py`、`usage_report.py`、`memory_size_check.py`、`gate_check.py`，其他的等要用時再讀。
    記下規則包的版本（`<RULES>/VERSION` 加上 `git -C <RULES> rev-parse --short HEAD`），第 3 步寫進 `DIRECTOR_OPERATING_RULES.md`。
-2. 讀 `README.md`、本檔、`docs/01` 到 `docs/10`（含 `06b`）。在 Claude Desktop 上另讀 `docs/11`。
+2. 讀 `README.md`、`PURPOSE.md`、本檔、`docs/01` 到 `docs/10`（含 `06b`）。在 Claude Desktop 上另讀 `docs/11`。
 3. 之後每輪只讀 README 標「每輪必讀」的檔。
 
 ## 2. 盤點專案（唯讀，結論寫檔）

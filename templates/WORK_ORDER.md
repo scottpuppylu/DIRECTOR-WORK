@@ -3,6 +3,8 @@
 
 ```text
 ISSUED_BY      = 總監  <YYYY-MM-DD HH:MM，讀 date>
+REVISION       = 1    # 開工後每改一次 +1，並在 H 節加一列
+TRACES_TO      = <這張工單服務的需求或決定編號，逗號分隔，例如 DD-03；沒有寫 NONE>
 PRIMARY_WORKER = session「<名稱>」
 MODEL / EFFORT = <模型> / <medium|high|xhigh>（理由見 docs/05）
 FALLBACK       = <同 session 新對話，從 RESUME_STATE 接續 | 其他 worker>
@@ -41,16 +43,26 @@ repo 與分支、工作樹乾淨、未提交修改、相關規範、相依、實
 沿用現有架構；最小但完整；處理例外；必要的向後相容；補上直接相關的測試；不做無關重構。每項修改做成開關，方便批次驗證（docs/02）。
 
 ## E. 驗收條件
-| ID | 要求 | 驗證方法 | 預期 | 實際 | 證據 | 狀態 |
-|---|---|---|---|---|---|---|
-| AC-1 | | | | | | PASS / FAIL / BLOCKED / UNVERIFIED |
+| ID | 類型 | 要求 | 驗證方法 | 預期 |
+|---|---|---|---|---|
+| AC-1 | <AUTO / REVIEW / PO> | | | |
 
-成品類交件另附常識閘門表（docs/07）。
+- `AUTO`：有指令可以重跑。總監自己重跑後判定；驗證指令用 `evidence_record.py` 留紀錄。
+- `REVIEW`：要有人看成品。開工前寫明誰看、從哪個角度看、看多大範圍、看哪些常識閘門項目（docs/07）。worker 最多填 `READY_FOR_REVIEW`。
+- `PO`：PO 保留的判定，例如最終驗收。worker 和總監都只填 `PENDING_PO`。
+
+結果不寫在這裡，寫在 TASK REPORT 的 ACCEPTANCE 表。成品類交件另附常識閘門表（docs/07）。
 
 ## F. 安全與版控
-照 docs/08。驗收條件和規格不准改，有問題回報 BLOCKED 由總監裁決（docs/02）。本工單特別禁止：<...>
+照 docs/08。驗收條件和規格不准改，有問題回報 BLOCKED 由總監裁決（docs/02）。總監派工時記下本檔雜湊，交件時比對；改了會被查出來，但工具擋不住改動。本工單特別禁止：<...>
 
 ## G. 交付與停止規則
 - DELIVERABLES：<檔案、commit / tag、審查包>
 - 完成：一則 TASK REPORT 給總監（templates/TASK_REPORT.md）。
 - STOP_RULES：同一根因 2 輪沒進展就停；超出 SCOPE 先問；超過測試上限 10 分鐘先停下回報。
+
+## H. 變更紀錄
+只有總監能改本工單。REVISION 1 不用寫；之後每改一次加一列，再把新的雜湊告訴 worker。
+
+| 版本 | 時間 | 誰改 | 原因 | 影響的 AC |
+|---|---|---|---|---|
