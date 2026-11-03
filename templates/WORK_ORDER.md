@@ -22,7 +22,17 @@ HEAVY_RESOURCE = <無 | 需先 TEST REQUEST：類型、預估分鐘>
 - MUST HAVE：
 - OPTIONAL：
 - OUT OF SCOPE：
-- DO NOT MODIFY：
+
+可以改和不准碰的路徑（`tools/scope_check.py` 直接讀這兩份清單）：
+
+```text
+SCOPE:
+- <相對 repo 根目錄的路徑或 glob，一行一個>
+FORBIDDEN:
+- <不准碰的路徑或 glob；沒有就寫 NONE>
+```
+
+`*` 不跨資料夾，`**` 跨資料夾，沒有萬用字元的名稱連底下全部都算。兩邊都符合時以 FORBIDDEN 為準。不要寫「相關檔案」這種話。
 
 ## C. 執行前檢查
 repo 與分支、工作樹乾淨、未提交修改、相關規範、相依、實際行為、能否重現、基準測試。路徑不存在先搜尋，不假設。

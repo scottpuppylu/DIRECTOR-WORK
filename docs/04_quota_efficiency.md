@@ -61,6 +61,7 @@
   讀 `c1` 的回應（categories、autoCompactThreshold、skills、memoryFiles）。**不呼叫模型。**
 - **絕對不要用 `claude -p "/context"` 量**：那會真的呼叫模型、花額度。
 - **歷史用量**：`tools/usage_report.py` 讀本機對話紀錄的 usage 欄位，只彙總數字，不印內容。
+- **讀不到數字不等於 0，估計值不能當實測。** 拿不到就寫 `UNKNOWN`，估的就標 `ESTIMATED`。上下文變小也不等於額度省了：改完重量一次，用同樣的工具比前後的數字，才算省到。
 
 ## 週期性複查
 

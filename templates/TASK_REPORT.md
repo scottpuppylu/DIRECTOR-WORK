@@ -10,6 +10,8 @@ RESULT: PASS | PARTIAL | BLOCKED | FAIL
   STABILITY: ...
 DONE: 完成項目，每項附證據路徑
 TESTS: 實際執行的測試與結果；沒跑的寫 NOT_RUN
+SCOPE_CHECK: PASS | VIOLATION | NOT_RUN，貼 scope_check.py 的最後一行
+EVIDENCE: 重跑指令與產物雜湊的紀錄路徑（evidence_record.py）；沒有就寫 NONE: 原因
 COMMON_SENSE_GATE: 表格路徑（成品類必附）
 UNVERIFIED:
 KNOWN_ISSUES:

@@ -56,7 +56,7 @@
 | `docs/09_memory.md` | 記憶索引的大小與整理 | 每週、超過門檻時 |
 | `docs/10_lessons_learned.md` | 原專案的教訓 | 第一次；寫新規則前 |
 | `templates/` | CLAUDE.md 段落、工單、報告、RESUME_STATE、測試申請、決策登記、裁決 | 建置與派工時 |
-| `tools/` | 設定寫入、免費探測、用量統計、記憶大小檢查 | 見 `tools/README.md` |
+| `tools/` | 設定寫入、免費探測、用量統計、記憶大小檢查；交件檢查（格式、範圍、證據紀錄） | 見 `tools/README.md` |
 | `director_work.example.json` | 工具設定範例 | 建置時 |
 
 ## 原則
