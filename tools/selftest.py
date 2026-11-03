@@ -203,15 +203,26 @@ def test_hook(tmp):
     blocked = ["git push origin main", "git -C . push", "git --no-pager -c a=b push --force", "cd x && git push",
                'bash -c "git push"', "git reset --hard HEAD~1", "git clean -fdx", "git stash", "git stash pop",
                "git stash push -u", "git worktree remove ../wt", "git branch -D old", "taskkill /F /IM python.exe",
-               "pkill node", "Stop-Process -Name node", "& 'C:/Program Files/Git/bin/git.exe' push"]
+               "pkill node", "Stop-Process -Name node", "& 'C:/Program Files/Git/bin/git.exe' push",
+               r"C:\Git\bin\git.exe push origin main", "sh -c 'git reset --hard'", 'powershell -Command "git push"',
+               'cmd /c "git push"', 'echo "$(git push)"', 'taskkill /F /FI "IMAGENAME eq app.exe"',
+               ("Get-Process app | Stop-Process -Force", "PowerShell"),
+               (r'& "C:\Program Files\Git\bin\git.exe" push', "PowerShell"), ('iex "git push"', "PowerShell"),
+               (r'cd "C:\dir\"; git push', "PowerShell")]
     allowed = ["git status", 'git commit -m "docs: explain the git push rule"', "git stash push -u -m wip-1",
-               "git stash apply abc123", "git clean -n", "git reset --soft HEAD~1", "taskkill /PID 1234", "echo push"]
+               "git stash apply abc123", "git clean -n", "git reset --soft HEAD~1", "taskkill /PID 1234", "echo push",
+               'grep -n "git stash" rules.md', 'git commit -m "note; git reset --hard is forbidden"', "kill -9 1234",
+               r'echo "a \" ; git push"', "rm -rf build",  # deleting files is out of scope (tools/README.md)
+               ("Stop-Process -Id 1234", "PowerShell"), ("Remove-Item -Recurse build", "PowerShell")]
     for command, code in [(c, 2) for c in blocked] + [(c, 0) for c in allowed]:
+        command, tool = command if isinstance(command, tuple) else (command, "Bash")
         total += 1
         done = subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py")], capture_output=True,
-                              encoding="utf-8", input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command}}))
+                              encoding="utf-8", input=json.dumps({"tool_name": tool, "tool_input": {"command": command}}))
         if done.returncode != code:
             failures.append(f"hook_guard {command!r}: expected exit {code}, got {done.returncode}: {done.stderr.strip()}")
+        elif re.search(r"<[^>]*>", done.stderr):  # a worker quoting it in KNOWN_ISSUES would fail gate_check
+            failures.append(f"hook_guard {command!r}: message has a <...> placeholder: {done.stderr.strip()}")
     repo = tmp / "hooked"
     repo.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
