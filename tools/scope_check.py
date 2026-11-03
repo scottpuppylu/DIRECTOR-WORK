@@ -4,7 +4,7 @@ Changed = tracked files that differ from the merge base with BASE_REF (committed
 plus untracked files that git does not ignore. FORBIDDEN wins over SCOPE. A path that matches no SCOPE entry is outside.
 
 Globs are relative to the repo root: `*` stays inside one folder, `**` crosses folders, a name without a wildcard also
-covers everything below it. Case is ignored on Windows.
+covers everything below it. A leading `/` is ignored. Case is ignored on Windows.
 Not seen: ignored files, files outside the repo. Only reads.
 
 The last line is the one to paste into the TASK REPORT. Exit 0 pass, 1 violation, 2 could not check.
@@ -28,13 +28,13 @@ def parse_list(text, key):
                 if not m:
                     break
                 items.append(re.split(r"\s+#", m.group(1))[0].strip())
-            return [item for item in items if item != "NONE"]
+            return items
     return None
 
 
 def glob_regex(glob):
     g = glob.replace("\\", "/")
-    g = g[2:] if g.startswith("./") else g
+    g = g[2:] if g.startswith("./") else g.lstrip("/")
     g = g + "**" if g.endswith("/") else g
     out, i = "", 0
     while i < len(g):
@@ -84,6 +84,9 @@ def main():
     scope, forbidden = parse_list(text, "SCOPE"), parse_list(text, "FORBIDDEN")
     if scope is None or forbidden is None:
         return cannot("work order has no SCOPE: / FORBIDDEN: list (run gate_check.py --order)")
+    if not scope or not forbidden:
+        return cannot("SCOPE: / FORBIDDEN: has no `- item` line right below it (run gate_check.py --order)")
+    scope, forbidden = [s for s in scope if s != "NONE"], [f for f in forbidden if f != "NONE"]
     base = a.base
     if not base:
         m = re.search(r"^\s*BASE_REF\s*=\s*(.*)$", text, re.M)

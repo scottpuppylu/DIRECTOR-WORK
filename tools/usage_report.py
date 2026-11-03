@@ -142,6 +142,9 @@ def main():
                     last = ts
             if calls_turn:
                 per_turn.append(calls_turn)
+    if not sizes:
+        print(f"NO_DATA: no usage records found (files: {files}); this is not a measured 0")
+        return 1
     sizes.sort()
     first_ctx.sort()
     per_turn.sort()

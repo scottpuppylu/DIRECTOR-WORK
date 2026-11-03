@@ -3,6 +3,7 @@ Prints one line per failed case and a summary; exit 1 when anything fails. Write
 """
 import json
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -177,6 +178,52 @@ def test_scope(tmp):
     gate_less = tmp / "bare.md"
     gate_less.write_text("BASE_REF = main\n", encoding="utf-8")
     expect("order without lists", "scope_check.py", 2, "--order", gate_less, "--repo", repo, says="NOT_RUN")
+    for name, old, new in (("blank line after SCOPE", "SCOPE:\n", "SCOPE:\n\n"), ("star bullets", "- src/**", "* src/**")):
+        bad = tmp / f"{name}.md"
+        bad.write_text(ORDER.format(base=base).replace(old, new, 1), encoding="utf-8")
+        expect(name, "scope_check.py", 2, "--order", bad, "--repo", repo, says="NOT_RUN")
+    slash = tmp / "slash.md"
+    slash.write_text(ORDER.format(base=base).replace("- src/**", "- /src/**"), encoding="utf-8")
+    (repo / "src" / "a.py").write_text("3\n", encoding="utf-8")
+    expect("leading slash in a glob", "scope_check.py", 0, "--order", slash, "--repo", repo, says="changed=2")
+    git("checkout", "-q", "--", "src/a.py")
+
+
+def test_shared_code():
+    global total
+    total += 1
+    blocks = [re.search(r"^def parse_list.*?(?=^\S)", (TOOLS / tool).read_text(encoding="utf-8"), re.M | re.S)
+              for tool in ("gate_check.py", "scope_check.py")]
+    if not all(blocks) or blocks[0].group() != blocks[1].group():
+        failures.append("parse_list differs between gate_check.py and scope_check.py; keep the two copies identical")
+
+
+def test_hook(tmp):
+    global total
+    blocked = ["git push origin main", "git -C . push", "git --no-pager -c a=b push --force", "cd x && git push",
+               'bash -c "git push"', "git reset --hard HEAD~1", "git clean -fdx", "git stash", "git stash pop",
+               "git stash push -u", "git worktree remove ../wt", "git branch -D old", "taskkill /F /IM python.exe",
+               "pkill node", "Stop-Process -Name node", "& 'C:/Program Files/Git/bin/git.exe' push"]
+    allowed = ["git status", 'git commit -m "docs: explain the git push rule"', "git stash push -u -m wip-1",
+               "git stash apply abc123", "git clean -n", "git reset --soft HEAD~1", "taskkill /PID 1234", "echo push"]
+    for command, code in [(c, 2) for c in blocked] + [(c, 0) for c in allowed]:
+        total += 1
+        done = subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py")], capture_output=True,
+                              encoding="utf-8", input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command}}))
+        if done.returncode != code:
+            failures.append(f"hook_guard {command!r}: expected exit {code}, got {done.returncode}: {done.stderr.strip()}")
+    repo = tmp / "hooked"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    (repo / ".git" / "info" / "exclude").write_text(".claude/settings.local.json\n", encoding="utf-8")
+    setup = ("setup_project_settings.py", "--repo", repo, "--only-this", "--hooks")
+    expect("hooks missing", *setup[:1], 1, *setup[1:], says="hooks.PreToolUse")
+    expect("hooks written", *setup[:1], 0, *setup[1:], "--apply", says="SET")
+    expect("hooks kept on rerun", *setup[:1], 0, *setup[1:], "--apply", says="OK")
+    data = json.loads((repo / ".claude" / "settings.local.json").read_text(encoding="utf-8"))
+    total += 1
+    if len(data["hooks"]["PreToolUse"]) != 1:
+        failures.append("setup_project_settings --hooks added the hook twice")
 
 
 def test_evidence(tmp):
@@ -238,6 +285,8 @@ def main():
     try:
         test_gate(tmp)
         test_scope(tmp)
+        test_shared_code()
+        test_hook(tmp)
         test_evidence(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

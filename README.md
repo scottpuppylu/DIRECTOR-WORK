@@ -50,12 +50,13 @@
 | `docs/03_communication.md` | 什麼時候發訊息、PO 待決頁、PO 訊息不漏讀 | **每輪必讀** |
 | `docs/04_quota_efficiency.md` | 額度成本模型、省額度的槓桿、怎麼量 | 設定時、每週複查時 |
 | `docs/05_models_effort.md` | 模型與思考程度（effort）怎麼選 | 開新工作線時 |
-| `docs/06_resume_lossless.md` | RESUME_STATE、中斷後恢復、額度重置喚醒 | **每輪必讀**（恢復時） |
+| `docs/06_resume_lossless.md` | RESUME_STATE、總監自身的恢復 | **每輪必讀**（恢復時） |
+| `docs/06b_on_demand_procedures.md` | 中斷後恢復程序、機制重建、額度重置喚醒、刪檔前比對 | 恢復、建機制、刪檔時 |
 | `docs/07_quality_gates.md` | 工程與成品分開、盲審包、常識閘門、修正上限 | 審查成品時 |
 | `docs/08_safety_rules.md` | 要 PO 核准的事、git 與檔案的禁止事項 | **每輪必讀** |
 | `docs/09_memory.md` | 記憶索引的大小與整理 | 每週、超過門檻時 |
 | `docs/10_lessons_learned.md` | 原專案的教訓 | 第一次；寫新規則前 |
-| `templates/` | CLAUDE.md 段落、工單、報告、RESUME_STATE、測試申請、決策登記、裁決 | 建置與派工時 |
+| `templates/` | CLAUDE.md 段落、工單、報告、RESUME_STATE、測試申請、決策登記、裁決、待決頁、DIRECTOR/ 其他檔案骨架 | 建置與派工時 |
 | `tools/` | 設定寫入、免費探測、用量統計、記憶大小檢查；交件檢查（格式、範圍、證據紀錄） | 見 `tools/README.md` |
 | `director_work.example.json` | 工具設定範例 | 建置時 |
 

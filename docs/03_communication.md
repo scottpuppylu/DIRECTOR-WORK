@@ -26,17 +26,7 @@ PO 的訊息有三個來源，總監每一個都讀，而且優先於 worker 訊
 ### PO 待決頁
 
 - 所有要 PO 回覆、確認或動手的事，一律先放上待決頁，聊天裡只說一句「待決頁新增了 OD-xx」。順序不能反，也不能只寫在聊天裡。
-- 一筆一項：
-  ```text
-  ID: OD-xx（要 PO 決定）或 ACT-xx（要 PO 動手）
-  STATUS: open | answered | closed
-  QUESTION: 一句話
-  OPTIONS: A / B / C（各一句影響）
-  RECOMMENDED: 總監建議與一句理由
-  IMAGES: 要 PO 看畫面判斷時附圖（同一視角的前後對照放一起，標明哪張是哪個方案）
-  ANSWER: PO 填
-  RESOLUTION: 總監處理結果、時間
-  ```
+- 一筆一項，格式照 `templates/PO_PENDING.md`（ID、STATUS open / answered / closed、問題、選項、建議、PO 回覆、處理結果）。
 - 要 PO 在某個 worker 的對話裡回覆時，ACT 寫明「請到『某某』對話回一句：……」，附可以直接照抄的句子。
 - Worker 需要 PO 的任何東西，先發訊息給總監，標題 `PO_REPLY_NEEDED`：問題、選項、建議、影響、圖片路徑。只在自己的對話問 PO、沒報總監，視為違規。
 

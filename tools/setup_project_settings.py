@@ -16,6 +16,7 @@ Why both keys: a plain CLI run honours "autoCompactWindow"; in the desktop app o
 CLAUDE_CODE_AUTO_COMPACT_WINDOW was confirmed to work. Both are written.
 Plugins: "enabledPlugins": {"name@marketplace": false} turns off a USER-installed plugin for this project only.
 Plugins that come from the desktop app / claude.ai cannot be turned off this way.
+--hooks also adds a PreToolUse hook that runs hook_guard.py (next to this file) before every Bash / PowerShell call.
 """
 import argparse
 import datetime
@@ -29,6 +30,9 @@ import sys
 
 REL = pathlib.Path(".claude") / "settings.local.json"
 ENV_KEY = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
+GUARD = pathlib.Path(__file__).resolve().parent / "hook_guard.py"
+HOOK = {"matcher": "Bash|PowerShell", "hooks": [{"type": "command", "command":
+        f'"{pathlib.Path(sys.executable).as_posix()}" -I -X utf8 "{GUARD.as_posix()}"'}]}
 
 
 def git(args, cwd):
@@ -54,7 +58,13 @@ def worktrees(repo):
             yield pathlib.Path(line[len("worktree "):].strip())
 
 
-def wanted_missing(data, window, plugins_off):
+def has_hook(data):
+    entries = (data.get("hooks") or {}).get("PreToolUse") or []
+    return any("hook_guard.py" in str(h.get("command", "")) for e in entries if isinstance(e, dict)
+               for h in e.get("hooks") or [] if isinstance(h, dict))
+
+
+def wanted_missing(data, window, plugins_off, hooks=False):
     miss = []
     if data.get("autoCompactWindow") != window:
         miss.append("autoCompactWindow")
@@ -62,6 +72,8 @@ def wanted_missing(data, window, plugins_off):
         miss.append("env." + ENV_KEY)
     ep = data.get("enabledPlugins") or {}
     miss += [f"enabledPlugins.{p}" for p in plugins_off if ep.get(p) is not False]
+    if hooks and not has_hook(data):
+        miss.append("hooks.PreToolUse")
     return miss
 
 
@@ -72,6 +84,7 @@ def main():
     ap.add_argument("--plugins-off", help="comma list name@marketplace to turn off for this project only")
     ap.add_argument("--config", help="director_work.json (default: <repo>/, <repo>/DIRECTOR/, <repo>/../DIRECTOR/)")
     ap.add_argument("--backup-dir", help="where to copy existing files before writing (default: <git common dir>/director-settings-backup)")
+    ap.add_argument("--hooks", action="store_true", help='also add the hook_guard.py PreToolUse hook (config: "hooks": true)')
     ap.add_argument("--only-this", action="store_true", help="only the worktree given by --repo, not all worktrees")
     ap.add_argument("--skip", action="append", default=[], help="skip worktrees whose path contains this text (repeatable)")
     ap.add_argument("--apply", action="store_true", help="write; without it nothing is written")
@@ -95,6 +108,7 @@ def main():
     if bad_names:
         sys.exit(f"plugin names must be name@marketplace: {bad_names}")
     skip = a.skip + list(cfg.get("skip_worktrees", []))
+    hooks = a.hooks or cfg.get("hooks") is True
 
     if a.backup_dir or cfg.get("backup_dir"):
         backup = pathlib.Path(a.backup_dir or cfg["backup_dir"])
@@ -103,7 +117,7 @@ def main():
         backup = (common if common.is_absolute() else repo / common).resolve() / "director-settings-backup"
 
     print(f"repo={repo} window={window} plugins_off={plugins_off or 'none'} config={cfg_path or 'none'} "
-          f"mode={'APPLY' if a.apply else 'REPORT'}")
+          f"hooks={'on' if hooks else 'off'} mode={'APPLY' if a.apply else 'REPORT'}")
     home = pathlib.Path.home().resolve()
     targets = [repo] if a.only_this else list(worktrees(repo))
     problems = 0
@@ -132,7 +146,7 @@ def main():
             print(f"NOT_IGNORED {wt} left untouched (add .claude/settings.local.json to .gitignore first)")
             problems += 1
             continue
-        miss = wanted_missing(data, window, plugins_off)
+        miss = wanted_missing(data, window, plugins_off, hooks)
         if not miss:
             print(f"OK          {wt}")
             continue
@@ -148,11 +162,13 @@ def main():
         data.setdefault("env", {})[ENV_KEY] = str(window)
         if plugins_off:
             data.setdefault("enabledPlugins", {}).update({p: False for p in plugins_off})
+        if hooks and not has_hook(data):
+            data.setdefault("hooks", {}).setdefault("PreToolUse", []).append(HOOK)
         path.parent.mkdir(exist_ok=True)
         tmp = path.with_name(path.name + ".tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
         os.replace(tmp, path)
-        again = wanted_missing(json.loads(path.read_text(encoding="utf-8")), window, plugins_off)
+        again = wanted_missing(json.loads(path.read_text(encoding="utf-8")), window, plugins_off, hooks)
         if again:
             print(f"FAIL        {wt} (still missing: {', '.join(again)})")
             problems += 1

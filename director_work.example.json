@@ -1,9 +1,10 @@
 {
-  "_comment": "Copy to DIRECTOR/director_work.json. window: 100000-1000000. plugins_off: only user-installed plugins, as name@marketplace, after the PO ticked them. backup_dir: null = inside the repo's .git folder. skip_worktrees: path substrings to leave alone.",
+  "_comment": "Copy to DIRECTOR/director_work.json. window: 100000-1000000. plugins_off: only user-installed plugins, as name@marketplace, after the PO ticked them. backup_dir: null = inside the repo's .git folder. skip_worktrees: path substrings to leave alone. hooks: true adds the hook_guard.py PreToolUse hook.",
   "window": 250000,
   "plugins_off": [
     "example-plugin@example-marketplace"
   ],
   "backup_dir": null,
-  "skip_worktrees": []
+  "skip_worktrees": [],
+  "hooks": false
 }
