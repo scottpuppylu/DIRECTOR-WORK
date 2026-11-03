@@ -39,7 +39,7 @@
    - CLAUDE.md 目標 200 行內；細節放在需要時才讀的文件或 skill。
    - 記憶索引 < 3k token（`docs/09`）。
    - 和本專案無關的 plugin：用專案設定 `"enabledPlugins": {"name@marketplace": false}` 只在本專案關掉**使用者自己安裝的** plugin，其他專案不受影響（原專案實測）。
-   - 桌面版 / claude.ai 帶進來的 plugin，專案設定關不掉，只能在 claude.ai 設定關，會影響所有專案；claude.ai connector 的開關也會變成所有新 session 的預設。**這兩類由 PO 決定。**
+   - 桌面版 / claude.ai 帶進來的 plugin（`claude plugin list --json` 裡 `scope: synced`），只能在 claude.ai 設定關（專案設定能不能關未實測），會影響所有專案；claude.ai connector 的開關也會變成所有新 session 的預設。**這兩類由 PO 決定。**
    - 不用的 MCP 也一樣：先列清單和估計 token，給 PO 勾。PO 說不關的，之後不要再自動提議。
 8. **少叫醒**：定時檢查間隔用 30 分鐘而不是 5 分鐘；等待用背景程序或閒置通知（`docs/03`）。
 9. **routine 工作線用較省的模型**（`docs/05`）。

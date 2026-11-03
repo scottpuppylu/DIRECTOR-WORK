@@ -143,7 +143,8 @@ def main():
             problems += 1
             continue
         if git(["check-ignore", "-q", REL.as_posix()], wt).returncode != 0:
-            print(f"NOT_IGNORED {wt} left untouched (add .claude/settings.local.json to .gitignore first)")
+            print(f"NOT_IGNORED {wt} left untouched (add .claude/settings.local.json to .git/info/exclude; "
+                  ".gitignore changes the repo and needs the PO)")
             problems += 1
             continue
         miss = wanted_missing(data, window, plugins_off, hooks)
