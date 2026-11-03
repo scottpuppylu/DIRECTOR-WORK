@@ -13,9 +13,13 @@ evidence and the product is still the Director's job (docs/02, docs/07).
              the report's ACCEPTANCE table against the order, one row per AC: no AC missing or added; each status
              allowed for its type (a worker cannot write PASS on a REVIEW or PO criterion); PASS needs evidence;
              RESULT PASS with no FAIL / BLOCKED / UNVERIFIED row; ORDER_SHA256 equals the order's hash now
+  --evidence-dir DIR
+             with --match: an AUTO row marked PASS must name in 證據 an evidence_record.py file (.json) in DIR whose
+             command exited 0, with no artifact missing, recorded at the HEAD the report names
   --hash FILE  print the SHA-256 that ORDER_SHA256 compares (line endings counted as LF)
 
-The hash only detects a changed order; it cannot stop anyone from editing it.
+The hash only detects a changed order; it cannot stop anyone from editing it. An evidence record shows a command ran
+and passed, not that it tests the right thing.
 Lines starting with `~` are notes for the newer format (v0.10): they never fail a file.
 
 Bringing in a project that already has files in another format:
@@ -50,6 +54,8 @@ DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 DATED_BY = {"order": r"^\s*ISSUED_BY\s*=.*?(\d{4}-\d{2}-\d{2})", "resume": r"^UPDATED\s*:.*?(\d{4}-\d{2}-\d{2})"}
 VAGUE = re.compile(r"視情況|相關檔案|相關的檔案|等等|之類|適當|盡量|儘量|必要時|\b(?:as needed|etc|tbd|todo)\b", re.I)
 PLACEHOLDER = re.compile(r"<[^<>\n]+>")
+EVIDENCE_FILE = re.compile(r"[\w.-]+\.json\b")
+SHA = re.compile(r"[0-9a-fA-F]{7,40}")
 TOO_BROAD = ("*", "**", "**/*", ".", "./", "/")
 
 
@@ -222,10 +228,54 @@ def check_report(text, notes):
     return problems
 
 
-def check_match(report, order, notes):
+def report_head(text):
+    """The commit a report names: `HEAD: <sha>`, or its place in `TASK_ID / ... / HEAD / WORKTREE_CLEAN: ... / <sha> / yes`.
+    Counted from the right, so a branch name with slashes does not shift it. None when there is no commit hash."""
+    for line in text.splitlines():
+        keys, sep, values = line.partition(":")
+        names = [key.strip() for key in keys.split("/")]
+        if sep and "HEAD" in names:
+            parts = [value.strip() for value in values.split("/")]
+            back = len(names) - names.index("HEAD")
+            if len(parts) >= back and SHA.fullmatch(parts[-back]):
+                return parts[-back].lower()
+    return None
+
+
+def check_evidence(ac, evidence, folder, head, problems, notes):
+    """An AUTO row marked PASS against the evidence_record.py files its 證據 cell names."""
+    names = EVIDENCE_FILE.findall(evidence)
+    if not names:
+        problems.append(f"{ac}: PASS names no evidence_record file (.json) in 證據")
+    for name in names:
+        try:
+            record = json.loads((pathlib.Path(folder) / name).read_text(encoding="utf-8-sig"))
+            code, git = record["exit_code"], record.get("git") or {}
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            problems.append(f"{ac}: {name} is not an evidence_record file in {folder}")
+            continue
+        if code != 0 or record.get("timed_out"):
+            problems.append(f"{ac}: {name}: the command exited {code}{' (timed out)' if record.get('timed_out') else ''}")
+        lost = [item.get("path") for item in record.get("artifacts", []) if item.get("sha256") is None]
+        if lost:
+            problems.append(f"{ac}: {name}: artifact missing when recorded: {lost[0]}")
+        recorded = (git.get("head") or "").lower()
+        if head and recorded and not (recorded.startswith(head) or head.startswith(recorded)):
+            problems.append(f"{ac}: {name}: recorded at HEAD {recorded[:12]}, the report says {head[:12]}; "
+                            "record again after the last commit")
+        if git.get("dirty"):
+            notes.append(f"{ac}: {name}: recorded with uncommitted changes")
+        if record.get("label") not in (None, ac):
+            notes.append(f"{ac}: {name}: its label is {record['label']}")
+
+
+def check_match(report, order, notes, evidence_dir=None):
     """The report's ACCEPTANCE rows against the order's acceptance criteria and its hash."""
     problems = []
     wanted, got = ac_table(order.decode("utf-8-sig")), ac_table(report)
+    head = report_head(report) if evidence_dir else None
+    if evidence_dir and not head:
+        notes.append("HEAD: the report names no commit hash; evidence HEAD not compared")
     if not wanted:
         problems.append("order: no AC-<n> row")
     for ac, spec in wanted.items():
@@ -246,6 +296,8 @@ def check_match(report, order, notes):
             problems.append(f"{ac} ({kind}): status must be one of {' / '.join(AC_STATUSES[kind])}, got: {status or 'empty'}{hint}")
         if status == "PASS" and (blank(evidence) or evidence.upper().startswith("NONE")):
             problems.append(f"{ac}: PASS without evidence")
+        elif status == "PASS" and kind == "AUTO" and evidence_dir:
+            check_evidence(ac, evidence, evidence_dir, head, problems, notes)
         if status in ("PASS", "FAIL") and blank(row.get("actual", "")):
             problems.append(f"{ac}: {status} with 實際 empty")
     for ac in sorted(got.keys() - wanted.keys()):
@@ -297,6 +349,7 @@ def main():
     for kind in CHECKS:
         ap.add_argument(f"--{kind}", nargs="+", default=[], metavar="FILE")
     ap.add_argument("--match", nargs=2, action="append", default=[], metavar=("REPORT", "ORDER"))
+    ap.add_argument("--evidence-dir", metavar="DIR", help="with --match: AUTO PASS rows need a passing evidence record here")
     ap.add_argument("--hash", nargs="+", default=[], metavar="FILE", help="print the hash ORDER_SHA256 compares")
     ap.add_argument("--warn", action="store_true", help="report problems as WARN and exit 0")
     ap.add_argument("--since", metavar="YYYY-MM-DD", help="skip files dated before this day")
@@ -312,6 +365,10 @@ def main():
         ap.error("give at least one of --resume / --order / --report / --verdict / --match / --hash")
     if a.since and not DATE.fullmatch(a.since):
         ap.error("--since takes a date: YYYY-MM-DD")
+    if a.evidence_dir and not a.match:
+        ap.error("--evidence-dir works with --match")
+    if a.evidence_dir and not pathlib.Path(a.evidence_dir).is_dir():
+        ap.error(f"--evidence-dir: folder not found: {a.evidence_dir}")
 
     failed = skipped = 0
     for kind, path in jobs:
@@ -327,7 +384,7 @@ def main():
         if text is None:
             problems = ["file not found"]
         elif kind == "match":
-            problems = check_match(text, files[1].read_bytes(), notes)
+            problems = check_match(text, files[1].read_bytes(), notes, a.evidence_dir)
         else:
             problems = CHECKS[kind](text, notes)
         failed += bool(problems)
