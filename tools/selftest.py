@@ -119,12 +119,19 @@ def test_gate(tmp):
     gate(tmp, "resume_date", "resume", RESUME.replace("2026-01-02", "today"), 1, "UPDATED")
     gate(tmp, "order_ok", "order", ORDER.format(base="abc123"), 0)
     gate(tmp, "order_vague", "order", ORDER.format(base="abc123").replace("- src/**", "- 相關檔案"), 1, "vague")
+    gate(tmp, "order_file_named_todo", "order", ORDER.format(base="abc123").replace("- src/**", "- todo.py"), 0)
+    gate(tmp, "order_etc", "order", ORDER.format(base="abc123").replace("- src/**", "- src/** etc."), 1, "vague")
     gate(tmp, "order_broad", "order", ORDER.format(base="abc123").replace("- src/**", "- **"), 1, "too broad")
     gate(tmp, "order_absolute", "order", ORDER.format(base="abc123").replace("- src/**", "- C:/src"), 1, "relative")
     gate(tmp, "order_noscope", "order", ORDER.format(base="abc123").replace("SCOPE:", "NOTES:"), 1, "SCOPE: missing")
     gate(tmp, "order_ac", "order", ORDER.format(base="abc123").replace("run test_parser", ""), 1, "how verified")
     gate(tmp, "order_gov", "order", ORDER.format(base="abc123").replace("Standard", "Loose"), 1, "GOVERNANCE")
     gate(tmp, "report_ok", "report", REPORT.format(**good_report), 0)
+    done_line = "DONE: parser fix, evidence e.json"
+    gate(tmp, "report_code_span", "report", REPORT.format(**good_report).replace(done_line, done_line + ", ids are `AC-<n>`, mail <a@b.example>"), 0)
+    gate(tmp, "report_placeholder", "report", REPORT.format(**good_report).replace(done_line, done_line + ", <what changed>"), 1, "placeholder")
+    gate(tmp, "report_scope_prefix", "report", REPORT.format(**{**good_report, "scope": "SCOPE_CHECK: " + good_report["scope"]}), 0)
+    gate(tmp, "report_scope_prefix_violation", "report", REPORT.format(**{**good_report, "scope": "SCOPE_CHECK: VIOLATION base=abc"}), 1, "scope violation")
     gate(tmp, "report_word", "report", REPORT.format(**{**good_report, "result": "DONE"}), 1, "RESULT")
     gate(tmp, "report_notrun", "report", REPORT.format(**{**good_report, "tests": "unit NOT_RUN"}), 1, "NOT_RUN")
     gate(tmp, "report_partial_notrun", "report", REPORT.format(**{**good_report, "result": "PARTIAL", "tests": "unit NOT_RUN"}), 0)
@@ -284,6 +291,8 @@ def test_metrics(tmp):
     (root / "orders" / "WO-002.md").write_text(typed.replace("# WO-001", "# WO-002"), encoding="utf-8")
     (root / "reviews" / "v1.md").write_text(VERDICT.format(verdict="FAIL", step="CONTINUE_SAME_WORKER"), encoding="utf-8")
     (root / "reviews" / "v2.md").write_text(VERDICT.format(verdict="PASS", step="ACCEPT_AND_CLOSE"), encoding="utf-8")
+    (root / "DECISION_REGISTER.md").write_text("# DECISION_REGISTER\n## A. 決策\n| ID | 決定 |\n|---|---|\n| DD-1 | use json |\n",
+                                               encoding="utf-8")  # has ## A but no 下一步: not a verdict
     (root / "DIRECTOR_LOG.md").write_text(
         "# DIRECTOR_LOG\n"
         "2025-12-30 10:00 +08:00 | RESUMED WO-000 at x; next=y; waiting=NONE\n"

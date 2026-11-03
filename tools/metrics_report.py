@@ -64,7 +64,8 @@ def main():
         log = [line for line in log_file.read_text(encoding="utf-8-sig").splitlines()
                if not (a.since and gate.DATE.match(line.strip()) and line.strip()[:10] < a.since)]
 
-    verdicts = documents(root, r"^##\s*A\b", "verdict", a.since)
+    # a verdict's ## A section has a 下一步 line; a decision register or an order also has ## A
+    verdicts = [(path, text) for path, text in documents(root, r"^##\s*A\b", "verdict", a.since) if next_step(text)]
     steps = [next_step(text) for _, text in verdicts]
     back = {word: steps.count(word) for word in SENT_BACK}
     orders = documents(root, r"^\s*ISSUED_BY\s*=", "order", a.since)

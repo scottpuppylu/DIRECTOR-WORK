@@ -85,7 +85,7 @@ DIRECTOR/
 ## 8. 量基準（不花額度）
 
 1. 用第 7.5 步存下的探測結果：各類別 token、記憶檔、skill 數量。
-2. `usage_report.py --since <建置當天日期>`。新專案只會看到建置 session 自己的紀錄：數字另列、不當基準，建置前的歷史記 UNKNOWN。印 `NO_DATA` 時記 UNKNOWN，不記 0。
+2. `usage_report.py --since <建置當天日期>`。新專案只會看到建置 session 自己的紀錄：數字另列、不當基準，建置前的歷史記 UNKNOWN。印 `NO_DATA` 時記 UNKNOWN，不記 0。`--since` 是 UTC 日期，時區比 UTC 快的地方（例如 +08:00 早上 8 點前）要填前一天；建置 session 不是從 `<REPO>` 開的，加 `--project-dir <建置 session 的專案資料夾>`（命名規則見第 0 步）。
 3. 結果寫進 `DIRECTOR/BASELINE_METRICS.md`（`templates/DIRECTOR_FILES.md`），日期從 `date` 讀。之後每週複查用同一套指令比較（`docs/04`）。
 
 ## 9. 無關 plugin 清單（問 PO）

@@ -52,8 +52,9 @@ COLUMNS = {"類型": "type", "type": "type", "要求": "requirement", "req": "re
 LEGACY_COLUMNS = ["requirement", "how verified", "expected", "actual", "evidence", "status"]
 DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 DATED_BY = {"order": r"^\s*ISSUED_BY\s*=.*?(\d{4}-\d{2}-\d{2})", "resume": r"^UPDATED\s*:.*?(\d{4}-\d{2}-\d{2})"}
-VAGUE = re.compile(r"視情況|相關檔案|相關的檔案|等等|之類|適當|盡量|儘量|必要時|\b(?:as needed|etc|tbd|todo)\b", re.I)
-PLACEHOLDER = re.compile(r"<[^<>\n]+>")
+VAGUE = re.compile(r"視情況|相關檔案|相關的檔案|等等|之類|適當|盡量|儘量|必要時|(?<![\w./\-])(?:as needed|etc|tbd|todo)(?![\w/\-]|\.\w)", re.I)  # not inside a name like todo.py
+PLACEHOLDER = re.compile(r"<[^<>@\n]+>")  # <name@host> is an address, not a placeholder
+CODE = re.compile(r"`[^`\n]*`")  # <...> inside a code span is format text, not a placeholder
 EVIDENCE_FILE = re.compile(r"[\w.-]+\.json\b")
 SHA = re.compile(r"[0-9a-fA-F]{7,40}")
 TOO_BROAD = ("*", "**", "**/*", ".", "./", "/")
@@ -66,8 +67,8 @@ def blank(value):
 def filled(name, value, problems):
     if blank(value):
         problems.append(f"{name}: empty")
-    elif PLACEHOLDER.search(value):
-        problems.append(f"{name}: placeholder left: {PLACEHOLDER.search(value).group(0)}")
+    elif PLACEHOLDER.search(CODE.sub("", value)):
+        problems.append(f"{name}: placeholder left: {PLACEHOLDER.search(CODE.sub('', value)).group(0)}")
     else:
         return True
     return False
@@ -211,7 +212,7 @@ def check_report(text, notes):
     result = fields.get("RESULT", "").strip()
     if result and result not in REPORT_RESULTS:
         problems.append(f"RESULT: must be exactly one of {', '.join(REPORT_RESULTS)}, got: {result}")
-    scope = fields.get("SCOPE_CHECK", "").strip()
+    scope = re.sub(r"^SCOPE_CHECK:\s*", "", fields.get("SCOPE_CHECK", "").strip())  # the pasted last line keeps its prefix
     if scope and not scope.startswith(("PASS", "VIOLATION", "NOT_RUN")) and not blank(scope):
         problems.append("SCOPE_CHECK: must start with PASS, VIOLATION or NOT_RUN (the last line of scope_check.py)")
     if fields.get("EVIDENCE", "").strip() == "NONE":
