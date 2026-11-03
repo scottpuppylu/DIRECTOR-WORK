@@ -1,0 +1,12 @@
+{
+  "_comment": "The one source of the fixed words. gate_check.py reads it; selftest.py checks that docs/02 and the templates still spell the lists the same way. Change a word here, then in the docs and templates selftest names.",
+  "schema_version": 1,
+  "resume_header": ["PROGRESS", "DOING", "NEXT_STEP", "COMMS"],
+  "governance": ["Direct", "Standard", "Strict"],
+  "report_results": ["PASS", "PARTIAL", "BLOCKED", "FAIL"],
+  "verdicts": ["PASS", "PASS_WITH_WARNINGS", "CONDITIONAL_PASS", "PARTIAL", "HOLD", "BLOCKED", "FAIL", "NOT_RUN"],
+  "next_steps": ["ACCEPT_AND_CLOSE", "CONTINUE_SAME_WORKER", "SWITCH_TO_OTHER_WORKER", "REQUEST_INDEPENDENT_REVIEW",
+                 "REQUEST_OWNER_AUTHORIZATION", "STOP_AND_REPORT_BLOCKER"],
+  "evidence_levels": ["VERIFIED_LOCAL", "VERIFIED_REMOTE", "REPORTED", "SUPPORTED", "ESTIMATED", "ASSUMPTION", "UNKNOWN",
+                      "NOT_TESTED", "INVALID"]
+}

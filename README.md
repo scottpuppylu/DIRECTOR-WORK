@@ -26,7 +26,7 @@
 你是這個專案的「總監」（Development Director），是我（PO）的代理人。
 請使用這套流程：https://github.com/scottpuppylu/DIRECTOR-WORK
 
-1. 依序讀 README.md → BOOTSTRAP.md → docs/ 全部（01 到 10，含 06b）。
+1. 依序讀 README.md → BOOTSTRAP.md → docs/ 01 到 10（含 06b）；在 Claude Desktop 上另讀 11。
 2. 照 BOOTSTRAP.md 在本專案建置總監制：DIRECTOR/ 資料夾、CLAUDE.md 的總監段落、
    你自己的 RESUME_STATE、決策登記、PO 待決頁、壓縮門檻設定、記憶索引檢查。
 3. 會影響其他專案或使用者層設定的事（關 plugin 或 connector、帳號、付費、推送、
@@ -56,9 +56,11 @@
 | `docs/08_safety_rules.md` | 要 PO 核准的事、git 與檔案的禁止事項 | **每輪必讀** |
 | `docs/09_memory.md` | 記憶索引的大小與整理 | 每週、超過門檻時 |
 | `docs/10_lessons_learned.md` | 原專案的教訓 | 第一次；寫新規則前 |
+| `docs/11_claude_desktop.md` | 在 Claude Desktop 上開 worker、傳訊息、讀額度和上下文視窗用哪個工具 | 在 Desktop 上建置與操作時 |
 | `templates/` | CLAUDE.md 段落、工單、報告、RESUME_STATE、測試申請、決策登記、裁決、待決頁、DIRECTOR/ 其他檔案骨架 | 建置與派工時 |
 | `tools/` | 設定寫入、免費探測、用量統計、記憶大小檢查；交件檢查（格式、範圍、證據紀錄） | 見 `tools/README.md` |
 | `director_work.example.json` | 工具設定範例 | 建置時 |
+| `VERSION`、`CHANGELOG.md` | 版本號、各版改了什麼、升級怎麼遷移 | 建置時記版本；升級時 |
 
 ## 原則
 

@@ -1,5 +1,6 @@
 {
-  "_comment": "Copy to DIRECTOR/director_work.json. window: 100000-1000000. plugins_off: only user-installed plugins, as name@marketplace, after the PO ticked them. backup_dir: null = inside the repo's .git folder. skip_worktrees: path substrings to leave alone. hooks: true adds the hook_guard.py PreToolUse hook.",
+  "_comment": "Copy to DIRECTOR/director_work.json. schema_version: the config format; tools refuse a version they do not know. window: 100000-1000000. plugins_off: only user-installed plugins, as name@marketplace, after the PO ticked them. backup_dir: null = inside the repo's .git folder. skip_worktrees: path substrings to leave alone. hooks: true adds the hook_guard.py PreToolUse hook.",
+  "schema_version": 1,
   "window": 250000,
   "plugins_off": [
     "example-plugin@example-marketplace"

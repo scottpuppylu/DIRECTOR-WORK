@@ -15,7 +15,7 @@ Per worktree it prints one of:
 Why both keys: a plain CLI run honours "autoCompactWindow"; in the desktop app only the env var
 CLAUDE_CODE_AUTO_COMPACT_WINDOW was confirmed to work. Both are written.
 Plugins: "enabledPlugins": {"name@marketplace": false} turns off a USER-installed plugin for this project only.
-Plugins that come from the desktop app / claude.ai cannot be turned off this way.
+Plugins that come from the desktop app / claude.ai: whether this setting turns them off is not tested.
 --hooks also adds a PreToolUse hook that runs hook_guard.py (next to this file) before every Bash / PowerShell call.
 """
 import argparse
@@ -29,6 +29,7 @@ import subprocess
 import sys
 
 REL = pathlib.Path(".claude") / "settings.local.json"
+CONFIG_VERSION = 1  # director_work.json without schema_version counts as 1
 ENV_KEY = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
 GUARD = pathlib.Path(__file__).resolve().parent / "hook_guard.py"
 HOOK = {"matcher": "Bash|PowerShell", "hooks": [{"type": "command", "command":
@@ -97,6 +98,8 @@ def main():
 
     cfg_path = find_config(repo, a.config)
     cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig")) if cfg_path else {}
+    if cfg.get("schema_version", 1) != CONFIG_VERSION:
+        sys.exit(f"{cfg_path}: schema_version {cfg['schema_version']} is not {CONFIG_VERSION}; see CHANGELOG.md for how to migrate")
     window = a.window or cfg.get("window") or 250000
     if not 100000 <= window <= 1000000:
         sys.exit(f"--window {window} outside 100000-1000000")
