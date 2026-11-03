@@ -9,21 +9,30 @@ evidence and the product is still the Director's job (docs/02, docs/07).
   --order    required fields filled in; SCOPE / FORBIDDEN are concrete path lists; acceptance rows are concrete
   --report   required fields filled in; RESULT in the vocabulary; PASS is refused with NOT_RUN tests or a scope violation
   --verdict  verdict and next step in the vocabulary; status split by aspect; stop state written
+
+Bringing in a project that already has files in another format:
+  --warn          print WARN instead of FAIL and exit 0, so old files do not block work
+  --since DATE    SKIP files dated before DATE (YYYY-MM-DD): ISSUED_BY of an order, UPDATED of a RESUME_STATE, the
+                  first date in a report or verdict. Files without a date are still checked.
+The fixed words come from vocabulary.json next to this file.
 """
 import argparse
+import json
 import pathlib
 import re
 import sys
 
-RESUME_HEADER = ("PROGRESS", "DOING", "NEXT_STEP", "COMMS")
+VOCAB = json.loads((pathlib.Path(__file__).resolve().parent / "vocabulary.json").read_text(encoding="utf-8"))
+RESUME_HEADER = tuple(VOCAB["resume_header"])
 ORDER_FIELDS = ("ISSUED_BY", "PRIMARY_WORKER", "MODEL / EFFORT", "FALLBACK", "GOVERNANCE", "BASE_REF")
-GOVERNANCE = ("Direct", "Standard", "Strict")
+GOVERNANCE = tuple(VOCAB["governance"])
 REPORT_FIELDS = ("RESULT", "ENGINEERING", "PRODUCT", "DONE", "TESTS", "SCOPE_CHECK", "EVIDENCE", "UNVERIFIED",
                  "KNOWN_ISSUES", "NEXT")
-REPORT_RESULTS = ("PASS", "PARTIAL", "BLOCKED", "FAIL")
-VERDICTS = ("PASS", "PASS_WITH_WARNINGS", "CONDITIONAL_PASS", "PARTIAL", "HOLD", "BLOCKED", "FAIL", "NOT_RUN")
-NEXT_STEPS = ("ACCEPT_AND_CLOSE", "CONTINUE_SAME_WORKER", "SWITCH_TO_OTHER_WORKER", "REQUEST_INDEPENDENT_REVIEW",
-              "REQUEST_OWNER_AUTHORIZATION", "STOP_AND_REPORT_BLOCKER")
+REPORT_RESULTS = tuple(VOCAB["report_results"])
+VERDICTS = tuple(VOCAB["verdicts"])
+NEXT_STEPS = tuple(VOCAB["next_steps"])
+DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+DATED_BY = {"order": r"^\s*ISSUED_BY\s*=.*?(\d{4}-\d{2}-\d{2})", "resume": r"^UPDATED\s*:.*?(\d{4}-\d{2}-\d{2})"}
 VAGUE = re.compile(r"視情況|相關檔案|相關的檔案|等等|之類|適當|盡量|儘量|必要時|\b(?:as needed|etc|tbd|todo)\b", re.I)
 PLACEHOLDER = re.compile(r"<[^<>\n]+>")
 TOO_BROAD = ("*", "**", "**/*", ".", "./", "/")
@@ -179,25 +188,43 @@ def check_verdict(text):
 CHECKS = {"resume": check_resume, "order": check_order, "report": check_report, "verdict": check_verdict}
 
 
+def dated(kind, text):
+    """The date a file says it was written, or None."""
+    m = re.search(DATED_BY[kind], text, re.M) if kind in DATED_BY else DATE.search(text)
+    return m.group(m.lastindex or 0) if m else None
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     for kind in CHECKS:
         ap.add_argument(f"--{kind}", nargs="+", default=[], metavar="FILE")
+    ap.add_argument("--warn", action="store_true", help="report problems as WARN and exit 0")
+    ap.add_argument("--since", metavar="YYYY-MM-DD", help="skip files dated before this day")
     a = ap.parse_args()
     sys.stdout.reconfigure(encoding="utf-8")
     jobs = [(kind, path) for kind in CHECKS for path in getattr(a, kind)]
     if not jobs:
         ap.error("give at least one of --resume / --order / --report / --verdict")
+    if a.since and not DATE.fullmatch(a.since):
+        ap.error("--since takes a date: YYYY-MM-DD")
 
-    failed = 0
+    failed = skipped = 0
     for kind, path in jobs:
         file = pathlib.Path(path)
-        problems = CHECKS[kind](file.read_text(encoding="utf-8-sig")) if file.is_file() else ["file not found"]
+        text = file.read_text(encoding="utf-8-sig") if file.is_file() else None
+        day = dated(kind, text) if text is not None and a.since else None
+        if day and day < a.since:
+            skipped += 1
+            print(f"SKIP {kind} {path} (dated {day}, before --since)")
+            continue
+        problems = CHECKS[kind](text) if text is not None else ["file not found"]
         failed += bool(problems)
-        print(f"{'FAIL' if problems else 'OK  '} {kind} {path}")
+        print(f"{('WARN' if a.warn else 'FAIL') if problems else 'OK  '} {kind} {path}")
         for problem in problems:
             print(f"  - {problem}")
-    return 1 if failed else 0
+    if a.warn or a.since:
+        print(f"checked {len(jobs) - skipped}, {'warned' if a.warn else 'failed'} {failed}, skipped {skipped}")
+    return 1 if failed and not a.warn else 0
 
 
 if __name__ == "__main__":

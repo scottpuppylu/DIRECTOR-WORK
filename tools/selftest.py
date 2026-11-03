@@ -1,4 +1,5 @@
-"""Run gate_check, scope_check and evidence_record against good and bad cases in a temporary folder.
+"""Run gate_check, scope_check, evidence_record and hook_guard against good and bad cases in a temporary folder,
+and check that the fixed words and the size of the must-read docs have not drifted.
 Prints one line per failed case and a summary; exit 1 when anything fails. Writes only to the temporary folder.
 """
 import json
@@ -122,6 +123,51 @@ def test_gate(tmp):
     expect("missing file", "gate_check.py", 1, "--resume", tmp / "nope.md", says="file not found")
     expect("no arguments", "gate_check.py", 2)
 
+    old = tmp / "order_old.md"
+    old.write_text(ORDER.format(base="abc123").replace("2026-01-02", "2025-12-31").replace("- src/**", "- 相關檔案"), encoding="utf-8")
+    new = tmp / "order_new.md"
+    new.write_text(ORDER.format(base="abc123").replace("- src/**", "- 相關檔案"), encoding="utf-8")
+    undated = tmp / "report_undated.md"
+    undated.write_text(REPORT.format(**{**good_report, "result": "DONE"}), encoding="utf-8")
+    expect("an old file still fails without flags", "gate_check.py", 1, "--order", old, says="FAIL")
+    expect("--warn reports and does not block", "gate_check.py", 0, "--warn", "--order", old, new, says="warned 2")
+    expect("--since skips an old order", "gate_check.py", 0, "--since", "2026-01-01", "--order", old, says="SKIP")
+    expect("--since still checks a new order", "gate_check.py", 1, "--since", "2026-01-01", "--order", old, new, says="skipped 1")
+    expect("--since still checks an undated file", "gate_check.py", 1, "--since", "2026-01-01", "--report", undated, says="FAIL")
+    expect("--since skips an old RESUME_STATE", "gate_check.py", 0, "--since", "2026-02-01", "--resume", tmp / "resume_empty.md", says="SKIP")
+    expect("--since needs a date", "gate_check.py", 2, "--since", "yesterday", "--order", new)
+
+
+def test_vocabulary():
+    """vocabulary.json is the one source; the docs and templates that spell the lists out must still match it."""
+    global total
+    vocab = json.loads((TOOLS / "vocabulary.json").read_text(encoding="utf-8"))
+    root = TOOLS.parent
+    wanted = [("docs/02_work_orders_gates.md", f"`{' / '.join(vocab[key])}`") for key in ("verdicts", "next_steps", "evidence_levels")]
+    wanted += [("docs/02_work_orders_gates.md", f"**{word}**") for word in vocab["governance"]]
+    wanted += [("templates/TASK_REPORT.md", " | ".join(vocab["report_results"])),
+               ("templates/GATE_VERDICT.md", " | ".join(vocab["verdicts"])),
+               ("templates/GATE_VERDICT.md", " | ".join(vocab["next_steps"])),
+               ("templates/WORK_ORDER.md", " | ".join(vocab["governance"]))]
+    for path, text in wanted:
+        total += 1
+        if text not in (root / path).read_text(encoding="utf-8"):
+            failures.append(f"vocabulary: {path} no longer contains {text!r}; change tools/vocabulary.json and the docs together")
+
+
+MUST_READ_LIMIT = 13428  # bytes of the 每輪必讀 docs on 2026-11-04; every round re-reads them, so growth costs quota
+
+
+def test_must_read_size():
+    """The docs README marks 每輪必讀 must stay under MUST_READ_LIMIT; raise it only with a reason in the commit."""
+    global total
+    total += 1
+    root = TOOLS.parent
+    files = re.findall(r"^\| `(docs/[^`]+)` \|.*\*\*每輪必讀\*\*", (root / "README.md").read_text(encoding="utf-8"), re.M)
+    size = sum(len((root / f).read_bytes().replace(b"\r\n", b"\n")) for f in files)
+    if not files or size > MUST_READ_LIMIT:
+        failures.append(f"must-read docs {files}: {size} bytes, limit {MUST_READ_LIMIT}; trim them or explain the new limit")
+
 
 def test_scope(tmp):
     repo = tmp / "repo"
@@ -235,6 +281,11 @@ def test_hook(tmp):
     total += 1
     if len(data["hooks"]["PreToolUse"]) != 1:
         failures.append("setup_project_settings --hooks added the hook twice")
+    future = tmp / "future.json"
+    future.write_text('{"schema_version": 2, "window": 250000}', encoding="utf-8")
+    expect("unknown config version is refused", *setup[:1], 1, "--repo", repo, "--only-this", "--config", future)
+    future.write_text('{"window": 250000}', encoding="utf-8")
+    expect("config without a version counts as 1", *setup[:1], 0, "--repo", repo, "--only-this", "--config", future, says="OK")
 
 
 def test_evidence(tmp):
@@ -297,6 +348,8 @@ def main():
         test_gate(tmp)
         test_scope(tmp)
         test_shared_code()
+        test_vocabulary()
+        test_must_read_size()
         test_hook(tmp)
         test_evidence(tmp)
     finally:
