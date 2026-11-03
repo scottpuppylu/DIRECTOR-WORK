@@ -11,6 +11,88 @@
 - **上下文保持短。** 每次呼叫模型都會重送整段上下文，所以這是額度最大的槓桿：自動壓縮門檻設 25 萬、每個 gate 換新 session、大量閱讀交給 subagent。
 - **數字不能代替看成品。** 測試通過不等於成品對。成品要另外看、另外判，最後由 PO 驗收。
 
+## 跑起來長怎樣
+
+### 誰跟誰說話
+
+PO 只跟總監說話。總監和 worker 之間靠檔案交接，訊息只在交件、卡住、要決定時才發。
+
+```mermaid
+flowchart LR
+    PO["PO（你）"]
+    D["總監 session"]
+    W1["worker session A"]
+    W2["worker session B"]
+    F[("DIRECTOR/ 資料夾<br/>工單、裁決、待決頁、紀錄")]
+
+    PO -- "方向、核准、驗收" --> D
+    D -- "待決頁：要你決定的事" --> PO
+    D -- "開工作線、派工單" --> W1
+    D -- "開工作線、派工單" --> W2
+    W1 -- "交件報告" --> D
+    W2 -- "交件報告" --> D
+    D <-- "讀寫" --> F
+```
+
+### 一張工單從派工到驗收
+
+```mermaid
+sequenceDiagram
+    actor PO
+    participant D as 總監
+    participant W as worker
+    participant T as tools/ 檢查
+
+    PO->>D: 「做 X」
+    D->>D: 寫工單（範圍、禁止事項、驗收條件）
+    D->>T: gate_check --order（工單格式）
+    D->>PO: 待決頁：要開幾條線、用什麼模型
+    PO->>D: 「開」
+    D->>W: 開 session，給工單路徑和一句目標
+    W->>W: 實作、測試、記錄證據、寫 RESUME_STATE
+    W->>D: TASK REPORT（交件）
+    D->>T: scope_check、evidence_record verify、gate_check --match
+    D->>D: 寫裁決：通過 / 退回同一個 worker / 換人
+    D->>PO: 要你看成品或核准合併的事
+    PO->>D: 驗收或退回
+```
+
+中斷了怎麼辦：每個 session 都把「做到哪、下一步」寫在自己的 `RESUME_STATE.md`。額度用完、當機、換新 session，都從那幾行接著做，不靠對話記憶。
+
+### PO 實際看到的
+
+你不用盯 worker。總監會把要你決定的事集中在 `DIRECTOR/PO_PENDING.md`，每一項都有選項和建議：
+
+```text
+ID: OD-05
+STATUS: open
+QUESTION: 接受新的存檔格式嗎？
+OPTIONS: A 接受 / B 要改（說明哪裡）
+RECOMMENDED: A：只加版本號和 id，舊檔自動遷移並留備份
+ANSWER:
+```
+
+在聊天裡回「OD-05：A」就好。
+
+### 建置後專案裡多了什麼
+
+節錄，完整清單見 `BOOTSTRAP.md` 第 3 步：
+
+```text
+工作區/
+├── 你的專案/                 git repo
+│   └── CLAUDE.md             最上方加一段「總監」說明，原內容不動
+└── DIRECTOR/                 總監的所有狀態；預設放 repo 外，所有 worktree 共用
+    ├── RESUME_STATE.md       總監做到哪、下一步
+    ├── PO_PENDING.md         要 PO 決定的事
+    ├── DECISION_REGISTER.md  決定過的事和理由
+    ├── ACTIVE_WORKSTREAMS.md 現在有哪些工作線
+    ├── DIRECTOR_LOG.md       一行一事的紀錄
+    ├── orders/               工單
+    ├── reviews/              裁決
+    └── tools/                檢查工具（從本 repo 複製）
+```
+
 本流程源自一個 3D 遊戲專案的實戰（多個 session 同時開發，運作數週）。文中的數字是那個專案量到的案例，換了方案、版本或專案，數字可能不同，請自己量（`tools/`）。
 
 ## 在新專案啟用
