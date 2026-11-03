@@ -166,7 +166,8 @@ def main():
             data.setdefault("hooks", {}).setdefault("PreToolUse", []).append(HOOK)
         path.parent.mkdir(exist_ok=True)
         tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
+        with open(tmp, "w", encoding="utf-8", newline="\n") as fh:  # Path.write_text(newline=) needs 3.10
+            fh.write(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
         os.replace(tmp, path)
         again = wanted_missing(json.loads(path.read_text(encoding="utf-8")), window, plugins_off, hooks)
         if again:
