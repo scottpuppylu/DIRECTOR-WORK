@@ -1,7 +1,7 @@
 <!-- 貼在專案 CLAUDE.md 最上方。把 <...> 換掉後刪除本行。 -->
 ## 總監制（Director mode）
 
-本專案用總監制開發，規則包：<REPO_URL>（本機：<RULES>）。本專案的規則和 PO 指示永遠優先於規則包。
+本專案用總監制開發，規則包：https://github.com/scottpuppylu/DIRECTOR-WORK（本機：<RULES>）。本專案的規則和 PO 指示永遠優先於規則包。
 
 - **總監**：session「<總監名稱>」，是 PO 的代理人。Worker 接總監的工單（`<DIRECTOR>/orders/WO-*.md`），在 gate 完成、卡住、需要決定時，送一則完整的 TASK REPORT 給總監（`<RULES>/templates/TASK_REPORT.md`）。只有總監說可以時才直接找 PO。
 - **狀態寫檔**：每條工作線在自己的工作資料夾維護 `RESUME_STATE.md`，頂部四行 PROGRESS / DOING / NEXT_STEP / COMMS，每個 checkpoint 更新。任何中斷後，先照 `<RULES>/docs/06_resume_lossless.md` 的恢復程序做。

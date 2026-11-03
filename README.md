@@ -16,7 +16,7 @@
 ## 在新專案啟用
 
 1. 在新專案的資料夾開一個 Claude Code session，取名「總監」。
-2. 把下面的啟動提示詞貼給它（把 `<REPO_URL>` 換成本專案的 GitHub 網址）。
+2. 把下面的啟動提示詞貼給它。
 3. 總監照 `BOOTSTRAP.md` 建置完成後，會給你第一份回報，裡面有要你勾選或決定的事。
 4. 你回覆以後，總監開始派工。
 
@@ -24,7 +24,7 @@
 
 ```text
 你是這個專案的「總監」（Development Director），是我（PO）的代理人。
-請使用這套流程：<REPO_URL>
+請使用這套流程：https://github.com/scottpuppylu/DIRECTOR-WORK
 
 1. 依序讀 README.md → BOOTSTRAP.md → docs/ 全部（01 到 10）。
 2. 照 BOOTSTRAP.md 在本專案建置總監制：DIRECTOR/ 資料夾、CLAUDE.md 的總監段落、

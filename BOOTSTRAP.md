@@ -12,7 +12,7 @@
 
 ## 1. 取得規則包並讀完
 
-1. 把本規則包放到專案外的位置：`git clone <REPO_URL> <RULES>`，或只複製 `tools/` 到第 3 步的 `DIRECTOR/tools/`。
+1. 把本規則包放到專案外的位置：`git clone https://github.com/scottpuppylu/DIRECTOR-WORK <RULES>`，或只複製 `tools/` 到第 3 步的 `DIRECTOR/tools/`。
    PO 給了連結，就算同意下載這一個專案。跑任何工具前，先讀過它的程式碼。
 2. 讀 `README.md`、本檔、`docs/01` 到 `docs/10`。
 3. 之後每輪只讀 README 標「每輪必讀」的檔。
