@@ -16,10 +16,15 @@ evidence and the product is still the Director's job (docs/02, docs/07).
   --evidence-dir DIR
              with --match: an AUTO row marked PASS must name in 證據 an evidence_record.py file (.json) in DIR whose
              command exited 0, with no artifact missing, recorded at the HEAD the report names
-  --hash FILE  print the SHA-256 that ORDER_SHA256 compares (line endings counted as LF)
+  --dispatch-log LOG
+             with --match: the order's hash now must equal the one the Director logged at dispatch, as a line
+             `DISPATCH <WO-ID> rev=<n> sha=<64 hex>` in LOG (the last line for an order wins; the ID is the order's
+             title or file name). No line for the order: Strict fails, Standard notes it, Direct does not look.
+             Without this flag the hash is only compared with the order as it is now, which a worker can rewrite.
+  --hash FILE  print the SHA-256 that ORDER_SHA256 compares (line endings counted as LF) and the DISPATCH line to log
 
-The hash only detects a changed order; it cannot stop anyone from editing it. An evidence record shows a command ran
-and passed, not that it tests the right thing.
+The hash only detects a changed order after the fact; it cannot stop anyone from editing it. An evidence record shows
+a command ran and passed, not that it tests the right thing.
 Lines starting with `~` are notes for the newer format (v0.10): they never fail a file.
 
 Bringing in a project that already has files in another format:
@@ -57,6 +62,7 @@ PLACEHOLDER = re.compile(r"<[^<>@\n]+>")  # <name@host> is an address, not a pla
 CODE = re.compile(r"`[^`\n]*`")  # <...> inside a code span is format text, not a placeholder
 EVIDENCE_FILE = re.compile(r"[\w.-]+\.json\b")
 SHA = re.compile(r"[0-9a-fA-F]{7,40}")
+DISPATCH = re.compile(r"\bDISPATCH\s+(\S+?)(?:\.md)?\s+rev=(\d+)\s+sha=([0-9a-fA-F]{64})\b")
 TOO_BROAD = ("*", "**", "**/*", ".", "./", "/")
 
 
@@ -125,6 +131,47 @@ def ac_table(text):
 
 def order_hash(data):
     return hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest()
+
+
+def order_ids(text, path=None):
+    """The names a dispatch line may call this order: the first word of its title and its file name without .md."""
+    ids = []
+    title = re.search(r"^#\s+(\S+)", text, re.M)
+    if title:
+        ids.append(title.group(1))
+    if path is not None:
+        ids.append(pathlib.Path(path).stem)
+    return ids
+
+
+def order_revision(text):
+    m = re.search(r"^[ \t]*REVISION[ \t]*=[ \t]*(\d+)", text, re.M)
+    return m.group(1) if m else "1"
+
+
+def dispatch_records(text):
+    """{order id: (rev, sha)} from `DISPATCH <WO-ID> rev=<n> sha=<hash>` lines; the last line for an id wins."""
+    return {m.group(1): (m.group(2), m.group(3).lower()) for m in DISPATCH.finditer(text)}
+
+
+def check_dispatch(order_text, order_path, now, dispatch, log_name, problems, notes):
+    """The order's hash now against the hash the Director logged when dispatching it."""
+    governance = re.search(r"^\s*GOVERNANCE\s*=\s*(\S+)", order_text, re.M)
+    governance = governance.group(1) if governance else "Standard"
+    ids = order_ids(order_text, order_path)
+    hits = [(name, dispatch[name]) for name in ids if name in dispatch]
+    if not hits:
+        if governance == "Direct":
+            return
+        line = f"DISPATCH {ids[0] if ids else '<WO-ID>'} rev={order_revision(order_text)} sha={now}"
+        text = f"DISPATCH: no line for {' / '.join(ids) or order_path} in {log_name}; log `{line}` when dispatching"
+        (problems if governance == "Strict" else notes).append(text)
+        return
+    name, (rev, sha) = hits[-1]
+    if sha != now:
+        problems.append(f"DISPATCH: the order's hash now ({now[:12]}) is not the one logged at dispatch "
+                        f"({sha[:12]}, {name} rev={rev}); the order changed after dispatch: compare its 變更紀錄, "
+                        "and treat the report's ORDER_SHA256 as matching a changed order")
 
 
 def check_resume(text, notes):
@@ -270,10 +317,12 @@ def check_evidence(ac, evidence, folder, head, problems, notes):
             notes.append(f"{ac}: {name}: its label is {record['label']}")
 
 
-def check_match(report, order, notes, evidence_dir=None):
-    """The report's ACCEPTANCE rows against the order's acceptance criteria and its hash."""
+def check_match(report, order, notes, evidence_dir=None, dispatch=None, order_path=None, log_name=None):
+    """The report's ACCEPTANCE rows against the order's acceptance criteria and its hash.
+    dispatch: the records of --dispatch-log (None when the flag is absent), order_path: the order file's path."""
     problems = []
-    wanted, got = ac_table(order.decode("utf-8-sig")), ac_table(report)
+    order_text = order.decode("utf-8-sig")
+    wanted, got = ac_table(order_text), ac_table(report)
     head = report_head(report) if evidence_dir else None
     if evidence_dir and not head:
         notes.append("HEAD: the report names no commit hash; evidence HEAD not compared")
@@ -314,6 +363,10 @@ def check_match(report, order, notes, evidence_dir=None):
     elif claimed.group(1).lower() != now:
         problems.append(f"ORDER_SHA256: the order is not the one the worker hashed ({claimed.group(1)[:12]} != {now[:12]}); "
                         "compare it with its 變更紀錄 and the hash logged at dispatch")
+    if dispatch is not None:
+        check_dispatch(order_text, order_path, now, dispatch, log_name, problems, notes)
+    elif re.search(r"^\s*GOVERNANCE\s*=\s*Strict\b", order_text, re.M):
+        notes.append("DISPATCH: Strict order checked without --dispatch-log; the hash was only compared with the order as it is now")
     return problems
 
 
@@ -351,7 +404,8 @@ def main():
         ap.add_argument(f"--{kind}", nargs="+", default=[], metavar="FILE")
     ap.add_argument("--match", nargs=2, action="append", default=[], metavar=("REPORT", "ORDER"))
     ap.add_argument("--evidence-dir", metavar="DIR", help="with --match: AUTO PASS rows need a passing evidence record here")
-    ap.add_argument("--hash", nargs="+", default=[], metavar="FILE", help="print the hash ORDER_SHA256 compares")
+    ap.add_argument("--dispatch-log", metavar="LOG", help="with --match: the order's hash must equal its DISPATCH line here")
+    ap.add_argument("--hash", nargs="+", default=[], metavar="FILE", help="print the hash ORDER_SHA256 compares and the DISPATCH line")
     ap.add_argument("--warn", action="store_true", help="report problems as WARN and exit 0")
     ap.add_argument("--since", metavar="YYYY-MM-DD", help="skip files dated before this day")
     a = ap.parse_args()
@@ -359,7 +413,13 @@ def main():
     jobs = [(kind, path) for kind in CHECKS for path in getattr(a, kind)] + [("match", pair) for pair in a.match]
     missing = [path for path in a.hash if not pathlib.Path(path).is_file()]
     for path in a.hash:
-        print(f"FAIL hash {path}\n  - file not found" if path in missing else f"{order_hash(pathlib.Path(path).read_bytes())}  {path}")
+        if path in missing:
+            print(f"FAIL hash {path}\n  - file not found")
+            continue
+        data = pathlib.Path(path).read_bytes()
+        text, digest = data.decode("utf-8-sig", errors="replace"), order_hash(data)
+        ids = order_ids(text, path)
+        print(f"{digest}  {path}\n  DISPATCH {ids[0] if ids else pathlib.Path(path).stem} rev={order_revision(text)} sha={digest}")
     if not jobs and a.hash:
         return 1 if missing else 0
     if not jobs:
@@ -370,6 +430,11 @@ def main():
         ap.error("--evidence-dir works with --match")
     if a.evidence_dir and not pathlib.Path(a.evidence_dir).is_dir():
         ap.error(f"--evidence-dir: folder not found: {a.evidence_dir}")
+    if a.dispatch_log and not a.match:
+        ap.error("--dispatch-log works with --match")
+    if a.dispatch_log and not pathlib.Path(a.dispatch_log).is_file():
+        ap.error(f"--dispatch-log: file not found: {a.dispatch_log}")
+    dispatch = dispatch_records(pathlib.Path(a.dispatch_log).read_text(encoding="utf-8-sig")) if a.dispatch_log else None
 
     failed = skipped = 0
     for kind, path in jobs:
@@ -385,7 +450,7 @@ def main():
         if text is None:
             problems = ["file not found"]
         elif kind == "match":
-            problems = check_match(text, files[1].read_bytes(), notes, a.evidence_dir)
+            problems = check_match(text, files[1].read_bytes(), notes, a.evidence_dir, dispatch, files[1], a.dispatch_log)
         else:
             problems = CHECKS[kind](text, notes)
         failed += bool(problems)

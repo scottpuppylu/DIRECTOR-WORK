@@ -230,6 +230,62 @@ def test_acceptance(tmp):
     expect("--match missing file", "gate_check.py", 1, "--match", tmp / "nope.md", order, says="file not found")
 
 
+def test_dispatch(tmp):
+    """v0.12: --match --dispatch-log compares the order's hash with the DISPATCH line the Director logged, so an order
+    rewritten and re-hashed by the worker is caught. Without the flag only the order as it is now is compared."""
+    typed = TYPED_ORDER.format(base="abc123")
+    order = tmp / "WO-001-parser.md"
+    order.write_bytes(typed.encode("utf-8"))
+    sha = hashlib.sha256(typed.encode("utf-8")).hexdigest()
+    good = list(ACCEPTANCE.values())
+
+    def log(name, *lines):
+        file = tmp / f"{name}.md"
+        file.write_text("# DIRECTOR_LOG\n" + "".join(f"2026-01-02 10:00 +08:00 | {line}\n" for line in lines), encoding="utf-8")
+        return file
+
+    def match(name, code, against=order, rows=good, says=None, lacks=None, dispatch_log=None):
+        report = tmp / f"{name}.md"
+        digest = hashlib.sha256(against.read_bytes().replace(b"\r\n", b"\n")).hexdigest()  # write_text may add CR
+        report.write_text(match_report(rows, "PASS", digest), encoding="utf-8")
+        extra = ("--dispatch-log", dispatch_log) if dispatch_log else ()
+        expect(name, "gate_check.py", code, "--match", report, against, *extra, says=says, lacks=lacks)
+        return report
+
+    logged = log("log_ok", f"DISPATCH WO-001 rev=1 sha={sha}")
+    match("dispatch_ok", 0, says="OK   match", lacks="  ~ ", dispatch_log=logged)
+    match("dispatch_by_file_name", 0, says="OK   match", lacks="  ~ ", dispatch_log=log("log_stem", f"DISPATCH WO-001-parser.md rev=1 sha={sha}"))
+    match("dispatch_latest_line_wins", 0, says="OK   match", dispatch_log=log("log_two", f"DISPATCH WO-001 rev=1 sha={'0' * 64}",
+                                                                              f"DISPATCH WO-001 rev=1 sha={sha}"))
+    match("dispatch_stale_line_fails", 1, says="not the one logged at dispatch", dispatch_log=log("log_stale", f"DISPATCH WO-001 rev=1 sha={sha}",
+                                                                                                 f"DISPATCH WO-001 rev=2 sha={'0' * 64}"))
+    # the worker weakens AC-1, drops the REVIEW / PO rows, or turns REVIEW into AUTO, then re-hashes: the report agrees
+    # with the order as it is now, only the dispatch record disagrees
+    weakened = tmp / "WO-001-weak.md"
+    weakened.write_text(typed.replace("| AC-1 | AUTO | parser accepts empty input | run test_parser | exit 0 |",
+                                      "| AC-1 | AUTO | parser exists | ls | file listed |"), encoding="utf-8")
+    match("dispatch_weakened_rehashed", 1, against=weakened, says="the order changed after dispatch", dispatch_log=logged)
+    expect("the same rewrite passes without --dispatch-log", "gate_check.py", 0, "--match", tmp / "dispatch_weakened_rehashed.md", weakened)
+    dropped = tmp / "WO-001-dropped.md"
+    dropped.write_text("\n".join(line for line in typed.splitlines() if "| AC-2 |" not in line and "| AC-3 |" not in line) + "\n", encoding="utf-8")
+    match("dispatch_rows_dropped_rehashed", 1, against=dropped, rows=good[:1], says="the order changed after dispatch", dispatch_log=logged)
+    retyped = tmp / "WO-001-retyped.md"
+    retyped.write_text(typed.replace("| AC-2 | REVIEW |", "| AC-2 | AUTO |"), encoding="utf-8")
+    match("dispatch_review_to_auto_rehashed", 1, against=retyped, rows=[good[0], "| AC-2 | reads right | e.json | PASS |", good[2]],
+          says="the order changed after dispatch", dispatch_log=logged)
+    for governance, code, mark in (("Strict", 1, "  - DISPATCH: no line for WO-001 / WO-001-"), ("Standard", 0, "  ~ DISPATCH: no line for"), ("Direct", 0, None)):
+        other = tmp / f"WO-001-{governance}.md"
+        other.write_text(typed.replace("GOVERNANCE     = Standard", f"GOVERNANCE     = {governance}"), encoding="utf-8")
+        match(f"dispatch_no_record_{governance}", code, against=other, says=mark, lacks=None if mark else "DISPATCH",
+              dispatch_log=log("log_other", f"DISPATCH WO-999 rev=1 sha={'1' * 64}"))
+    strict = tmp / "WO-001-Strict.md"
+    match("strict_without_dispatch_log_notes", 0, against=strict, says="~ DISPATCH: Strict order checked without --dispatch-log")
+    match("standard_without_dispatch_log_silent", 0, lacks="DISPATCH")
+    expect("--dispatch-log needs --match", "gate_check.py", 2, "--order", order, "--dispatch-log", logged)
+    expect("--dispatch-log file missing", "gate_check.py", 2, "--match", tmp / "dispatch_ok.md", order, "--dispatch-log", tmp / "nope.md")
+    expect("--hash prints the DISPATCH line to log", "gate_check.py", 0, "--hash", order, says=f"\n  DISPATCH WO-001 rev=1 sha={sha}")
+
+
 def evidence_file(folder, name, head, exit_code=0, timed_out=False, dirty=False, label="AC-1", sha256="ab" * 32):
     """An evidence_record.py file, written directly so the case does not depend on git."""
     record = {"schema": 1, "label": label, "command": ["python", "-c", "0"], "exit_code": exit_code, "timed_out": timed_out,
@@ -578,6 +634,7 @@ def main():
     try:
         test_gate(tmp)
         test_acceptance(tmp)
+        test_dispatch(tmp)
         test_evidence_match(tmp)
         test_trace(tmp)
         test_metrics(tmp)
