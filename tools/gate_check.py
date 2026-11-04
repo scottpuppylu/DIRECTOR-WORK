@@ -12,7 +12,9 @@ evidence and the product is still the Director's job (docs/02, docs/07).
   --match REPORT ORDER
              the report's ACCEPTANCE table against the order, one row per AC: no AC missing or added; each status
              allowed for its type (a worker cannot write PASS on a REVIEW or PO criterion); PASS needs evidence;
-             RESULT PASS with no FAIL / BLOCKED / UNVERIFIED row; ORDER_SHA256 equals the order's hash now
+             RESULT PASS with no FAIL / BLOCKED / UNVERIFIED row; ORDER_SHA256 equals the order's hash now.
+             Either table fails on a duplicate AC row, a duplicate column name or a row whose cell count differs
+             from the header's; a `|` inside backticks or written `\\|` does not split a cell
   --evidence-dir DIR
              with --match: an AUTO row marked PASS must name in 證據 an evidence_record.py file (.json) in DIR whose
              command exited 0, with no artifact missing, recorded at the HEAD the report names
@@ -113,17 +115,62 @@ def check_paths(key, text, problems):
                 problems.append(f"{key}: must be relative to the repo root: {item}")
 
 
-def ac_table(text):
+def split_cells(line):
+    r"""The cells of a table row: `|` splits, except inside a backtick code span or escaped as `\|` (which becomes `|`)."""
+    cells, cell, fence, i = [], [], 0, 0
+    line = line.strip()
+    if line.startswith("|"):
+        line = line[1:]
+    if line.endswith("|") and not line.endswith("\\|"):
+        line = line[:-1]
+    while i < len(line):
+        ch = line[i]
+        if ch == "`":
+            run = len(line[i:]) - len(line[i:].lstrip("`"))
+            fence = 0 if fence == run else (run if fence == 0 else fence)
+            cell.append("`" * run)
+            i += run
+            continue
+        if ch == "\\" and i + 1 < len(line) and line[i + 1] == "|":
+            cell.append("|")
+            i += 2
+            continue
+        if ch == "|" and not fence:
+            cells.append("".join(cell).strip())
+            cell = []
+        else:
+            cell.append(ch)
+        i += 1
+    cells.append("".join(cell).strip())
+    return cells
+
+
+def ac_table(text, problems=None):
     """{AC id: {column: cell}} from the table rows that start with AC-<n>, columns named by the table's header row.
-    A header without known names falls back to the old order: requirement, how verified, expected, ..."""
-    header, rows = None, {}
+    A header without known names falls back to the old order: requirement, how verified, expected, ...
+    With a problems list, records a duplicate AC row, a duplicate column name and a row whose cell count differs
+    from its header's; without one (older callers) it only parses, keeping the first row of a duplicate."""
+    header, rows, width = None, {}, None
     for line in text.splitlines():
         if not line.lstrip().startswith("|"):
             continue
-        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        cells = split_cells(line)
         if cells[0] == "ID":
             header = [COLUMNS.get(cell, cell) for cell in cells[1:]]
+            width = len(cells)
+            seen = set()
+            for name in header:
+                if name in seen and problems is not None:
+                    problems.append(f"acceptance: column {name} appears twice in the header")
+                seen.add(name)
         elif re.fullmatch(r"AC-[\w-]+", cells[0]):
+            if problems is not None:
+                if cells[0] in rows:
+                    problems.append(f"{cells[0]}: listed twice; one row per AC")
+                if width is not None and len(cells) != width:
+                    problems.append(f"{cells[0]}: {len(cells)} cells, the header has {width}")
+            if cells[0] in rows:
+                continue
             names = header if header and set(header) & set(COLUMNS.values()) else LEGACY_COLUMNS
             rows[cells[0]] = dict(zip(names, cells[1:]))
     return rows
@@ -199,7 +246,7 @@ def check_order(text, notes):
             problems.append(f"GOVERNANCE: must be one of {', '.join(GOVERNANCE)}")
     check_paths("SCOPE", text, problems)
     check_paths("FORBIDDEN", text, problems)
-    rows = ac_table(text)
+    rows = ac_table(text, problems)
     if not rows:
         problems.append("acceptance: no AC-<n> row")
     for ac, row in rows.items():
@@ -271,7 +318,7 @@ def check_report(text, notes):
             problems.append("RESULT PASS with a scope violation")
         if scope.startswith("NOT_RUN"):
             problems.append("RESULT PASS with SCOPE_CHECK NOT_RUN: the scope was not checked")
-    if not ac_table(text):
+    if not ac_table(text, problems):
         notes.append("ACCEPTANCE: no table; give each AC of the order its own row and check it with --match")
     return problems
 
@@ -322,7 +369,9 @@ def check_match(report, order, notes, evidence_dir=None, dispatch=None, order_pa
     dispatch: the records of --dispatch-log (None when the flag is absent), order_path: the order file's path."""
     problems = []
     order_text = order.decode("utf-8-sig")
-    wanted, got = ac_table(order_text), ac_table(report)
+    order_problems = []
+    wanted, got = ac_table(order_text, order_problems), ac_table(report, problems)
+    problems.extend(f"order: {p}" for p in order_problems)
     head = report_head(report) if evidence_dir else None
     if evidence_dir and not head:
         notes.append("HEAD: the report names no commit hash; evidence HEAD not compared")

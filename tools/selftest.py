@@ -230,6 +230,51 @@ def test_acceptance(tmp):
     expect("--match missing file", "gate_check.py", 1, "--match", tmp / "nope.md", order, says="file not found")
 
 
+def test_table(tmp):
+    r"""v0.12: the ACCEPTANCE table parser rejects a duplicate AC row, a duplicate column name and a row whose cell count
+    differs from the header's; `|` inside backticks or escaped as `\|` does not split a cell."""
+    global total
+    total += 1
+    typed = TYPED_ORDER.format(base="abc123")
+    order = tmp / "WO-010-table.md"
+    order.write_text(typed, encoding="utf-8")
+    sha = hashlib.sha256(typed.encode("utf-8")).hexdigest()
+    good = list(ACCEPTANCE.values())
+
+    def match(name, code, rows, says=None, lacks=None, against=order, digest=sha, header=None):
+        report = tmp / f"{name}.md"
+        text = match_report(rows, "PASS", digest)
+        if header:
+            text = text.replace("| ID | 實際 | 證據 | 狀態 |", header)
+        report.write_text(text, encoding="utf-8")
+        expect(name, "gate_check.py", code, "--match", report, against, says=says, lacks=lacks)
+
+    match("table_dup_ac_fail_then_pass", 1, ["| AC-1 | exit 1 | e.json | FAIL |"] + good,
+          ["AC-1: listed twice; one row per AC", "RESULT PASS with FAIL"])
+    match("table_dup_ac_pass_then_pass", 1, good + [good[0]], "AC-1: listed twice")
+    match("table_short_row", 1, ["| AC-1 | PASS |"] + good[1:], "AC-1: 2 cells, the header has 4")
+    match("table_long_row", 1, ["| AC-1 | exit 0 | e.json | PASS | extra |"] + good[1:], "AC-1: 5 cells, the header has 4")
+    match("table_dup_column", 1, good, "column actual appears twice in the header", header="| ID | 實際 | 實際 | 狀態 |")
+    gate(tmp, "table_dup_ac_order", "order", typed.replace("| AC-2 |", "| AC-1 |", 1), 1, "AC-1: listed twice")
+    gate(tmp, "table_short_row_order", "order", typed.replace("| run test_parser | exit 0 |", "| run test_parser |"), 1,
+         "AC-1: 4 cells, the header has 5")
+    gate(tmp, "table_dup_column_order", "order", typed.replace("| ID | 類型 | 要求 | 驗證方法 | 預期 |", "| ID | 類型 | 要求 | 要求 | 預期 |"), 1,
+         "column requirement appears twice")
+    piped = typed.replace("| run test_parser |", "| run `cat a.txt \\| grep -E \"x\\|y\"` and `a | b`, then `c` |")
+    if piped == typed:
+        failures.append("test_table: TYPED_ORDER has no `run test_parser` cell; update the replace()")
+    pipe_order = tmp / "WO-011-pipe.md"
+    pipe_order.write_text(piped, encoding="utf-8")
+    pipe_sha = hashlib.sha256(piped.encode("utf-8")).hexdigest()
+    expect("a `|` inside backticks does not split the order's cell", "gate_check.py", 0, "--order", pipe_order, lacks=["cells", "  ~ "])
+    match("table_pipe_in_report_cell", 0, ["| AC-1 | `a | b` and `x\\|y` ran, exit 0 | e.json | PASS |"] + good[1:],
+          "OK   match", against=pipe_order, digest=pipe_sha)
+    match("table_escaped_pipe_in_cell", 0, ["| AC-1 | saw a \\| b | e.json | PASS |"] + good[1:], "OK   match",
+          against=pipe_order, digest=pipe_sha)
+    match("table_unclosed_backtick_is_short", 1, ["| AC-1 | `a | e.json | PASS |"] + good[1:], "cells, the header has 4",
+          against=pipe_order, digest=pipe_sha)
+
+
 def test_dispatch(tmp):
     """v0.12: --match --dispatch-log compares the order's hash with the DISPATCH line the Director logged, so an order
     rewritten and re-hashed by the worker is caught. Without the flag only the order as it is now is compared."""
@@ -634,6 +679,7 @@ def main():
     try:
         test_gate(tmp)
         test_acceptance(tmp)
+        test_table(tmp)
         test_dispatch(tmp)
         test_evidence_match(tmp)
         test_trace(tmp)
