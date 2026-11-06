@@ -112,7 +112,8 @@ def filled(name, value, problems):
 
 
 def parse_list(text, key):
-    """Items of a `KEY:` line followed by `- item` lines; None when the key is missing."""
+    """Items of a `KEY:` line followed by `- item` lines; None when the key is missing. ` #` starts a comment; an item
+    written in backticks (`- `a #b.txt``) is taken as it is, so a name holding ` #` round-trips (S02)."""
     lines = text.splitlines()
     for n, line in enumerate(lines):
         if re.fullmatch(rf"\s*{key}\s*[:：]\s*", line):
@@ -121,9 +122,22 @@ def parse_list(text, key):
                 m = re.match(r"\s*-\s+(.*)", item)
                 if not m:
                     break
-                items.append(re.split(r"\s+#", m.group(1))[0].strip())
+                quoted = re.fullmatch(r"`([^`]+)`(?:\s+#.*)?\s*", m.group(1))
+                items.append(quoted.group(1) if quoted else re.split(r"\s+#", m.group(1))[0].strip())
             return items
     return None
+
+
+def comment_notes(text, notes):
+    """An item cut at ` #` may be a name that holds ` #` (S02): say what was kept, and how to keep the rest."""
+    for key in ("SCOPE", "FORBIDDEN", "REQUIRED_CHANGES", "CHECKS"):
+        m = re.search(rf"^[ \t]*{key}[ \t]*[:：][ \t]*\n((?:[ \t]*-[ \t]+.*\n?)*)", text, re.M)
+        for line in (m.group(1).splitlines() if m else []):
+            item = re.match(r"\s*-\s+(.*)", line).group(1)
+            if re.search(r"\s+#", item) and not re.fullmatch(r"`([^`]+)`(?:\s+#.*)?\s*", item):
+                kept = re.split(r"\s+#", item)[0].strip()
+                notes.append(f"{key}: `{item.strip()}` is read as `{kept}` (` #` starts a "
+                             "comment); if ` #` is part of the name, write the item in backticks")
 
 
 def check_paths(key, text, problems):
@@ -359,6 +373,7 @@ def check_order(text, notes):
             problems.append(f"GOVERNANCE: must be one of {', '.join(GOVERNANCE)}")
     check_paths("SCOPE", text, problems)
     check_paths("FORBIDDEN", text, problems)
+    comment_notes(text, notes)
     required_changes(text, problems)
     rows = ac_table(text, problems)
     if not rows:

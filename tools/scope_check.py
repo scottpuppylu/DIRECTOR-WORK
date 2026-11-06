@@ -1,10 +1,14 @@
 """Compare what a branch really changed with the SCOPE / FORBIDDEN lists of its work order.
 
 Changed = the union of four git states, both sides of a rename: committed (merge base with BASE_REF .. HEAD), staged
-(index against HEAD), unstaged (worktree against the index, and worktree against the merge base) and untracked
-files that git does not ignore. So a change that was committed or staged and then undone in the worktree is still seen.
+(HEAD .. index), unstaged (index .. worktree) and untracked files that git does not ignore. So a change that was
+committed or staged and then undone in the worktree is still seen. Submodule changes are always compared, whatever
+`submodule.*.ignore` or `diff.ignoreSubmodules` says. Files marked assume-unchanged or skip-worktree, which git diff
+skips, are hashed and compared with the index; one that differs counts as unstaged, and a `FLAGGED:` line says how
+many are marked (a skip-worktree file missing from the worktree is a sparse checkout and counts as unchanged).
 The line above the last one counts each state. FORBIDDEN wins over SCOPE. A path that matches no SCOPE entry is outside.
 
+List items follow gate_check: ` #` starts a comment, and an item in backticks is taken as written.
 Globs are relative to the repo root: `*` stays inside one folder, `**` crosses folders, a name without a wildcard also
 covers everything below it. A leading `/` is ignored. Case is ignored on Windows.
 Not seen: ignored files, files outside the repo. Only reads.
@@ -24,7 +28,8 @@ import sys
 
 
 def parse_list(text, key):
-    """Items of a `KEY:` line followed by `- item` lines; None when the key is missing."""
+    """Items of a `KEY:` line followed by `- item` lines; None when the key is missing. ` #` starts a comment; an item
+    written in backticks (`- `a #b.txt``) is taken as it is, so a name holding ` #` round-trips (S02)."""
     lines = text.splitlines()
     for n, line in enumerate(lines):
         if re.fullmatch(rf"\s*{key}\s*[:：]\s*", line):
@@ -33,7 +38,8 @@ def parse_list(text, key):
                 m = re.match(r"\s*-\s+(.*)", item)
                 if not m:
                     break
-                items.append(re.split(r"\s+#", m.group(1))[0].strip())
+                quoted = re.fullmatch(r"`([^`]+)`(?:\s+#.*)?\s*", m.group(1))
+                items.append(quoted.group(1) if quoted else re.split(r"\s+#", m.group(1))[0].strip())
             return items
     return None
 
@@ -63,11 +69,40 @@ def matches(path, patterns):
     return next((glob for glob, rx in patterns if rx.fullmatch(path)), None)
 
 
-def git(root, *args):
-    done = subprocess.run(["git", "-C", str(root), *args], capture_output=True)
+def git(root, *args, stdin=None):
+    done = subprocess.run(["git", "-C", str(root), *args], capture_output=True, input=stdin)
     if done.returncode:
         raise RuntimeError(f"git {' '.join(args)}: {done.stderr.decode('utf-8', 'replace').strip()}")
     return done.stdout.decode("utf-8", "replace")
+
+
+def hidden_changes(root):
+    """(marked, changed): paths marked assume-unchanged or skip-worktree, and those whose worktree file is not the
+    index blob (S03). git diff trusts the marks, so the files are hashed here with the repo's filters."""
+    marked = {entry[2:]: entry[0] for entry in git(root, "ls-files", "-v", "-z").split("\0")
+              if len(entry) > 2 and (entry[0].islower() or entry[0] == "S")}
+    if not marked:
+        return {}, set()
+    index = {}
+    for entry in git(root, "ls-files", "-s", "-z").split("\0"):
+        meta, _, path = entry.partition("\t")
+        if path in marked:
+            index[path] = meta.split()[:2]
+    changed, compare = set(), []
+    for path, tag in marked.items():
+        mode, blob = index.get(path, ("", ""))
+        file = pathlib.Path(root, path)
+        if mode not in ("100644", "100755"):
+            continue  # a symlink or submodule entry: not hashed here
+        if not file.is_file():
+            if tag.islower():
+                changed.add(path)  # assume-unchanged and gone: deleted
+            continue  # skip-worktree and gone: a sparse checkout
+        compare.append((path, blob))
+    if compare:
+        hashes = git(root, "hash-object", "--stdin-paths", stdin="\n".join(p for p, _ in compare).encode("utf-8")).split()
+        changed |= {path for (path, blob), now in zip(compare, hashes) if now != blob}
+    return marked, changed
 
 
 def main():
@@ -105,14 +140,16 @@ def main():
     try:
         root = git(a.repo, "rev-parse", "--show-toplevel").strip()
         merge_base = git(root, "merge-base", base, "HEAD").strip()
-        names = ("diff", "--name-only", "--no-renames", "-z")
+        names = ("diff", "--name-only", "--no-renames", "--ignore-submodules=none", "-z")
         states = {"committed": git(root, *names, merge_base, "HEAD"), "staged": git(root, *names, "--cached", "HEAD"),
-                  "unstaged": git(root, *names) + "\0" + git(root, *names, merge_base),
+                  "unstaged": git(root, *names),
                   "untracked": git(root, "ls-files", "--others", "--exclude-standard", "-z")}
+        marked, hidden = hidden_changes(root)
     except (RuntimeError, OSError) as error:
         return cannot(str(error))
 
     states = {state: {path for path in out.split("\0") if path} for state, out in states.items()}
+    states["unstaged"] |= hidden
     changed = sorted(set().union(*states.values()))
     scope_rx = [(g, glob_regex(g)) for g in scope]
     forbidden_rx = [(g, glob_regex(g)) for g in forbidden]
@@ -130,6 +167,8 @@ def main():
         print(f"{kind:9} {path}" + (f"  ({rule})" if rule else ""))
     if len(hits) > a.max_lines:
         print(f"... {len(hits) - a.max_lines} more")
+    if marked:
+        print(f"FLAGGED: {len(marked)} file(s) marked assume-unchanged or skip-worktree; {len(hidden)} differ from the index")
     print("STATES: " + " ".join(f"{state}={len(paths)}" for state, paths in states.items()))
     print(f"SCOPE_CHECK: {'VIOLATION' if hits else 'PASS'} base={merge_base[:10]} changed={len(changed)} "
           f"forbidden={count} outside={len(hits) - count - len(missing)}" + ("" if required is None else f" missing={len(missing)}"))

@@ -1053,6 +1053,37 @@ def test_scope(tmp):
     expect("untracked-only forbidden file", "scope_check.py", 1, *check, says=["untracked=1", "forbidden=1"])
     (repo / "src" / "frozen" / "new.py").unlink()
 
+    # v0.13 batch 3 (S01): three diffs, base..HEAD, HEAD..index, index..worktree: a staged rename is not unstaged too
+    git("mv", "docs/old.md", "docs/older.md")
+    expect("a staged rename counts as staged only (S01)", "scope_check.py", 1, *check,
+           says=["STATES: committed=1 staged=2 unstaged=1 untracked=0", "outside=2"])
+    git("mv", "docs/older.md", "docs/old.md")
+    # S03: a file marked skip-worktree or assume-unchanged is hashed against the index
+    git("update-index", "--skip-worktree", "src/frozen/b.py")
+    frozen.write_text("2\n", encoding="utf-8")
+    expect("a skip-worktree file does not hide a forbidden change (S03)", "scope_check.py", 1, *check,
+           says=["FORBIDDEN src/frozen/b.py", "FLAGGED: 1 file(s) marked assume-unchanged or skip-worktree; 1 differ", "forbidden=1"])
+    frozen.write_text("1\n", encoding="utf-8")
+    expect("a marked file that matches the index passes", "scope_check.py", 0, *check, says=["; 0 differ", "changed=2"])
+    git("update-index", "--no-skip-worktree", "src/frozen/b.py")
+    git("update-index", "--assume-unchanged", "src/frozen/b.py")
+    frozen.unlink()
+    expect("an assume-unchanged file deleted from the worktree", "scope_check.py", 1, *check, says=["FORBIDDEN src/frozen/b.py", "forbidden=1"])
+    git("update-index", "--no-assume-unchanged", "src/frozen/b.py")
+    git("checkout", "-q", "--", "src/frozen/b.py")
+    # S02: an item in backticks keeps ` #`; without them ` #` starts a comment, and gate_check --order says so
+    hashed = repo / "src" / "x #draft.txt"
+    hashed.write_text("x", encoding="utf-8")
+    for name, item, code, says in (("a backticked FORBIDDEN item keeps ` #` (S02)", "`src/x #draft.txt`  # the draft", 1,
+                                    ["FORBIDDEN src/x #draft.txt", "forbidden=1"]),
+                                   ("without backticks ` #` starts a comment", "src/x #draft.txt", 0, "forbidden=0")):
+        listed = tmp / f"{name[:12]}.md"
+        listed.write_text(ORDER.format(base=base).replace("- src/frozen/**\n", "- src/frozen/**\n- " + item + "\n"), encoding="utf-8")
+        expect(name, "scope_check.py", code, "--order", listed, "--repo", repo, says=says)
+    expect("--order notes an item cut at ` #`", "gate_check.py", 0, "--order", listed,
+           says="~ FORBIDDEN: `src/x #draft.txt` is read as `src/x` (` #` starts a comment); if ` #` is part of the name")
+    hashed.unlink()
+
     # v0.13: optional REQUIRED_CHANGES; the changes now are src/a.py and .config/app.json
     expect("no REQUIRED_CHANGES keeps the old last line", "scope_check.py", 0, *check, says="outside=0", lacks="missing=")
     for name, item, code, says in (("required file not changed", "src/parser.py", 1, ["MISSING   src/parser.py", "VIOLATION", "outside=0 missing=1"]),
@@ -1060,6 +1091,41 @@ def test_scope(tmp):
         wanted = tmp / f"{name}.md"
         wanted.write_text(ORDER.format(base=base).replace("- src/frozen/**\n", "- src/frozen/**\nREQUIRED_CHANGES:\n- " + item + "\n"), encoding="utf-8")
         expect(name, "scope_check.py", code, "--order", wanted, "--repo", repo, says=says)
+
+
+def test_submodule_ignore(tmp):
+    """v0.13 batch 3 (S04): `submodule.<name>.ignore=all` does not hide a staged change of a FORBIDDEN submodule."""
+    root = tmp / "submodule"
+    source, outer = root / "source", root / "outer"
+    source.mkdir(parents=True)
+    outer.mkdir()
+
+    def git(where, *args):
+        return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                               "-c", "protocol.file.allow=always", *args], cwd=where, check=True, capture_output=True,
+                              text=True).stdout.strip()
+
+    git(source, "init", "-q", "-b", "main")
+    (source / "f.txt").write_text("a", encoding="utf-8")
+    git(source, "add", "-A")
+    git(source, "commit", "-q", "-m", "a")
+    first = git(source, "rev-parse", "HEAD")
+    (source / "f.txt").write_text("b", encoding="utf-8")
+    git(source, "commit", "-q", "-am", "b")
+    git(outer, "init", "-q", "-b", "main")
+    git(outer, "submodule", "add", "-q", str(source), "vendor/lib")
+    git(outer / "vendor" / "lib", "checkout", "-q", "--detach", first)
+    git(outer, "add", "-A")
+    git(outer, "commit", "-q", "-m", "base")
+    base = git(outer, "rev-parse", "HEAD")
+    order = root / "WO.md"
+    order.write_text(f"BASE_REF = {base}\nSCOPE:\n- src/**\nFORBIDDEN:\n- vendor/lib\n", encoding="utf-8")
+    git(outer / "vendor" / "lib", "checkout", "-q", "main")
+    git(outer, "add", "vendor/lib")
+    git(outer, "config", "submodule.vendor/lib.ignore", "all")
+    git(outer, "config", "diff.ignoreSubmodules", "all")
+    expect("submodule ignore=all does not hide a staged forbidden gitlink (S04)", "scope_check.py", 1, "--order", order,
+           "--repo", outer, says=["FORBIDDEN vendor/lib", "staged=1", "forbidden=1"])
 
 
 def test_shared_code():
@@ -1519,6 +1585,7 @@ def main():
         test_metrics(tmp)
         test_purpose()
         test_scope(tmp)
+        test_submodule_ignore(tmp)
         test_shared_code()
         test_vocabulary()
         test_must_read_size()
