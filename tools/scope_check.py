@@ -1,7 +1,9 @@
 """Compare what a branch really changed with the SCOPE / FORBIDDEN lists of its work order.
 
-Changed = tracked files that differ from the merge base with BASE_REF (committed, staged or not; both sides of a rename)
-plus untracked files that git does not ignore. FORBIDDEN wins over SCOPE. A path that matches no SCOPE entry is outside.
+Changed = the union of four git states, both sides of a rename: committed (merge base with BASE_REF .. HEAD), staged
+(index against HEAD), unstaged (worktree against the index, and worktree against the merge base) and untracked
+files that git does not ignore. So a change that was committed or staged and then undone in the worktree is still seen.
+The line above the last one counts each state. FORBIDDEN wins over SCOPE. A path that matches no SCOPE entry is outside.
 
 Globs are relative to the repo root: `*` stays inside one folder, `**` crosses folders, a name without a wildcard also
 covers everything below it. A leading `/` is ignored. Case is ignored on Windows.
@@ -98,12 +100,15 @@ def main():
     try:
         root = git(a.repo, "rev-parse", "--show-toplevel").strip()
         merge_base = git(root, "merge-base", base, "HEAD").strip()
-        tracked = git(root, "diff", "--name-only", "--no-renames", "-z", merge_base).split("\0")
-        untracked = git(root, "ls-files", "--others", "--exclude-standard", "-z").split("\0")
+        names = ("diff", "--name-only", "--no-renames", "-z")
+        states = {"committed": git(root, *names, merge_base, "HEAD"), "staged": git(root, *names, "--cached", "HEAD"),
+                  "unstaged": git(root, *names) + "\0" + git(root, *names, merge_base),
+                  "untracked": git(root, "ls-files", "--others", "--exclude-standard", "-z")}
     except (RuntimeError, OSError) as error:
         return cannot(str(error))
 
-    changed = sorted({path for path in tracked + untracked if path})
+    states = {state: {path for path in out.split("\0") if path} for state, out in states.items()}
+    changed = sorted(set().union(*states.values()))
     scope_rx = [(g, glob_regex(g)) for g in scope]
     forbidden_rx = [(g, glob_regex(g)) for g in forbidden]
     hits = []
@@ -118,6 +123,7 @@ def main():
     if len(hits) > a.max_lines:
         print(f"... {len(hits) - a.max_lines} more")
     count = sum(1 for hit in hits if hit[0] == "FORBIDDEN")
+    print("STATES: " + " ".join(f"{state}={len(paths)}" for state, paths in states.items()))
     print(f"SCOPE_CHECK: {'VIOLATION' if hits else 'PASS'} base={merge_base[:10]} changed={len(changed)} "
           f"forbidden={count} outside={len(hits) - count}")
     return 1 if hits else 0

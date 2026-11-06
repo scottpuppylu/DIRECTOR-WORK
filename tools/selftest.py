@@ -724,6 +724,25 @@ def test_scope(tmp):
     expect("leading slash in a glob", "scope_check.py", 0, "--order", slash, "--repo", repo, says="changed=2")
     git("checkout", "-q", "--", "src/a.py")
 
+    # v0.13 (A05): a FORBIDDEN change that is committed or staged, then undone in the worktree, is still seen
+    frozen = repo / "src" / "frozen" / "b.py"
+    frozen.write_text("2\n", encoding="utf-8")
+    git("add", "src/frozen/b.py")
+    expect("staged change with the same worktree change", "scope_check.py", 1, *check, says=["forbidden=1", "staged=1"])
+    frozen.write_text("1\n", encoding="utf-8")
+    expect("staged change undone in the worktree", "scope_check.py", 1, *check, says=["src/frozen/b.py", "staged=1", "forbidden=1"])
+    git("reset", "-q", "--", "src/frozen/b.py")
+    frozen.write_text("2\n", encoding="utf-8")
+    git("add", "src/frozen/b.py")
+    git("commit", "-q", "-m", "frozen")
+    frozen.write_text("1\n", encoding="utf-8")
+    expect("committed change undone in the worktree", "scope_check.py", 1, *check, says=["src/frozen/b.py", "committed=2", "forbidden=1"])
+    git("reset", "-q", "HEAD~1")  # back to the work commit; the worktree already holds the old content
+    expect("unstaged-only change", "scope_check.py", 0, *check, says=["STATES: committed=1 staged=0", "untracked=0", "changed=2"])
+    (repo / "src" / "frozen" / "new.py").write_text("x", encoding="utf-8")
+    expect("untracked-only forbidden file", "scope_check.py", 1, *check, says=["untracked=1", "forbidden=1"])
+    (repo / "src" / "frozen" / "new.py").unlink()
+
 
 def test_shared_code():
     global total
