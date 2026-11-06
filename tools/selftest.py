@@ -1438,6 +1438,47 @@ def test_hook_rules(tmp):
     for path in (rules_path, TOOLS / "hook_guard.py"):
         check(f"self-protection {path.name}", write(path), "worker", "deny:G00")
         check(f"self-protection {path.name}", write(path), "director", "ask:G00")
+    # batch 1 acceptance (11-07) 1: push through a git alias or the push plumbing is still push, in both profiles
+    for command in ("git -c alias.p=push p", "git -c alias.p='!git push' p", "git config alias.p push && git p",
+                    "git config --local alias.p push", "git -C . config set alias.p push", "git --config-env=alias.p=X p",
+                    "git send-pack origin HEAD", "git http-push https://example.invalid/r.git main",
+                    '"C:/Program Files/Git/mingw64/libexec/git-core/git-send-pack.exe" origin HEAD', "git-push origin"):
+        for profile in ("worker", "director"):
+            check(f"push bypass {command!r}", bash(command), profile, "deny:G02")
+    for command in ("git config --get alias.p", "git config -l", "git config --unset alias.p", "git -c core.autocrlf=false status",
+                    "git log --grep=alias.p=x"):
+        check(f"not a push {command!r}", bash(command), "worker", "silent")
+    # 2: a shell command that writes the rules file or hook_guard.py is G00; reading them is not
+    for call in (bash(f"sed -i s/deny/none/ {rules_path.as_posix()}"), bash("sed -i.bak s/x/y/ tools/hook_guard.py"),
+                 bash("sed --in-place s/x/y/ tools/guard_rules.json"), bash("echo x > tools/hook_guard.py"),
+                 bash("cat x >> tools/guard_rules.json"), bash("cat x>tools/guard_rules.json"), bash("> tools/guard_rules.json cat x"),
+                 bash("cat x 2> tools/guard_rules.json"), bash("cat x &> tools/guard_rules.json"), bash("cat x >| tools/guard_rules.json"),
+                 bash("tee tools/guard_rules.json < x"), bash("cp /tmp/r.json tools/guard_rules.json"), bash("mv tools/hook_guard.py x.py"),
+                 bash("git checkout HEAD -- tools/hook_guard.py"), bash("git restore tools/guard_rules.json"),
+                 bash("perl -pi -e s/deny/none/ tools/guard_rules.json"), bash('bash -c "sed -i s/a/b/ tools/guard_rules.json"'),
+                 bash('echo "$(cat x > tools/guard_rules.json)"'), shell(r"Set-Content tools\guard_rules.json x"),
+                 shell(r"Get-Content x | Out-File tools\GUARD_RULES.json"), shell(r"Copy-Item x -Destination tools\hook_guard.py"),
+                 shell(r"[IO.File]::WriteAllText('tools\guard_rules.json', 'x')")):
+        check(f"G00 shell write {call['tool_input']['command']!r}", call, "worker", "deny:G00")
+        check(f"G00 shell write {call['tool_input']['command']!r}", call, "director", "ask:G00")
+    for call in (bash("cat tools/guard_rules.json"), bash("sed -n 1p tools/guard_rules.json"), bash("git diff tools/hook_guard.py"),
+                 bash("git log -p tools/hook_guard.py > /tmp/hook.patch"), bash("sed -n '/a>b/p' tools/guard_rules.json"),
+                 bash("python -I tools/hook_guard.py --rules tools/guard_rules.json < call.json 2>&1"),
+                 shell(r"Get-Content tools\guard_rules.json | Select-Object -First 5"), bash("sed -i s/a/b/ notes.md")):
+        for profile in ("worker", "director"):
+            check(f"G00 shell read {call['tool_input']['command']!r}", call, profile, "silent")
+    # 3: the gh token file on Windows (%APPDATA%/GitHub CLI) is a credential file like ~/.config/gh/hosts.yml
+    gh_win = f"{home}/AppData/Roaming/GitHub CLI"
+    gh_calls = [tool("Read", file_path=f"{gh_win}/hosts.yml"), tool("Grep", pattern="oauth", path=gh_win),
+                tool("Grep", pattern="oauth", path=f"{home}/.config/gh"), bash(f'cat "{gh_win}/hosts.yml"'),
+                shell(r'Get-Content "$env:APPDATA\GitHub CLI\hosts.yml"'), bash(r'type "%APPDATA%\GitHub CLI\hosts.yml"')]
+    if os.name == "nt":
+        gh_calls.append(tool("Read", file_path=f"{gh_win}/HOSTS.yml".replace("/", "\\")))
+    for call in gh_calls:
+        for profile in ("worker", "director"):
+            check(f"gh hosts.yml {json.dumps(call['tool_input'])}", call, profile, "deny:G50")
+    check("another file under AppData/Roaming is not G50", tool("Read", file_path=f"{home}/AppData/Roaming/Code/settings.json"),
+          "worker", "silent")
     # legacy checks still run with --rules, and plain commands stay silent with nothing on stdout (F2)
     check("legacy stash is still blocked", bash("git stash"), "director", "legacy")
     check("legacy reset --hard is still blocked", bash("git reset --hard HEAD~1"), "director", "legacy")
@@ -2187,7 +2228,16 @@ def test_pause(tmp):
                        ("an allowed command and another", bash("git status && make")), ("git log --output", bash("git log --output=x.txt")),
                        ("git -c", bash("git -c core.pager=x log")), ("Stop-Process after Get-Process", shell("Get-Process python | Stop-Process")),
                        ("an MCP write", tool("mcp__shop__create_item")), ("start_session", tool("mcp__ccd_session__start_session")),
-                       ("cat of a credential file", bash("cat .env"))]:
+                       ("cat of a credential file", bash("cat .env")),
+                       # batch 1 acceptance (11-07) 4: an allowed command that writes a file through a redirect
+                       ("git log > a.py", bash("git log > a.py")), ("git log >> a.py", bash("git log >> a.py")),
+                       ("git status 2> a.txt", bash("git status 2> a.txt")), ("git log &> a.txt", bash("git log &> a.txt")),
+                       ("git log >& a.txt", bash("git log >& a.txt")), ("git log >| a.py", bash("git log >| a.py")),
+                       ("git log >a.py", bash("git log >a.py")), ("> a.py git log", bash("> a.py git log")),
+                       ("redirect inside $() in quotes", bash('git log "$(git status > a.py)"')),
+                       ("process substitution", bash("git diff >(cat > a.py)")),
+                       ("PowerShell *> a.txt", shell("git status *> a.txt")), ("PowerShell 2> a.txt", shell("git status 2> a.txt")),
+                       ("Get-Process > a.txt", shell("Get-Process > a.txt")), ("pause_ctl status > a.txt", bash(f"{ctl} status > a.txt"))]:
         check(f"{name} is paused", call, "paused")
     for name, call in [("Read", tool("Read", file_path="README.md")), ("Grep", tool("Grep", pattern="x")), ("git status", bash("git status")),
                        ("git -C dir log", bash("git -C D:/x log --oneline -3")),
@@ -2196,7 +2246,10 @@ def test_pause(tmp):
                        ("Get-Process sorted", shell("Get-Process | Sort-Object CPU -Descending | Select-Object -First 5")),
                        ("tasklist", bash('tasklist /FI "IMAGENAME eq python.exe"')), ("SendMessage", tool("SendMessage", to="x", message="stopped")),
                        ("an MCP read", tool("mcp__shop__list_items")), ("Write RESUME_STATE.md", tool("Write", file_path=str(tmp / "RESUME_STATE.md"))),
-                       ("Edit a TASK REPORT", tool("Edit", file_path=str(tmp / "TASK_REPORT_item2.md")))]:
+                       ("Edit a TASK REPORT", tool("Edit", file_path=str(tmp / "TASK_REPORT_item2.md"))),
+                       ("git status 2>&1", bash("git status 2>&1")), ("git log >&2", bash("git log --oneline -3 >&2")),
+                       ("PowerShell git status 2>&1", shell("git status 2>&1")), ("a quoted >", bash('git log --format="%h -> %s"')),
+                       ("tasklist 2>&1 | findstr", bash("tasklist 2>&1 | findstr python"))]:
         check(f"{name} runs while paused", call, "silent")
     check("the Director's pause_ctl off runs", bash(f"{ctl} off --director {director.as_posix()}"), "silent", "director")
     check("a read the pause lets through still meets G50", tool("Read", file_path=".env"), "deny:G50")

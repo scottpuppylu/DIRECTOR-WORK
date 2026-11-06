@@ -84,7 +84,7 @@ hook_guard.py --rules <tools>/guard_rules.json --profile worker|director [--prot
   - `path`：`tools` 列的工具，`file_path`（或 `notebook_path`、`path`）比 `globs`，`except` 除外。Grep 的 `glob`、Glob 的 `pattern` 接在搜尋路徑後面，也當成一個目標比。`~/` 是家目錄，`**/` 是任意層，`*` 不跨 `/`；相對路徑以 hook 輸入的 `cwd` 為準；Windows 不分大小寫、反斜線視同 `/`。
   - `mcp`：只看 MCP 工具名稱最後一段（`mcp__伺服器__動作`），駝峰拆成底線、轉小寫後比 `words`。開頭是 `read_only_mcp_prefixes`（get、list、read、search、query、status）的一律不比，所以 `get_order`、`list_billing_charges` 不會被「付費」擋。
 - `internal_report_tools`（`SendMessage`、`mcp__ccd_session_mgmt__send_message`）是回報總監的管道，任何規則都不比。
-- 內建 `G00`：Write / Edit / MultiEdit / NotebookEdit 改使用中的規則檔、`hook_guard.py` 旁邊的 `guard_rules.json` 或 `hook_guard.py` 本身，worker deny、director ask。
+- 內建 `G00`：Write / Edit / MultiEdit / NotebookEdit 改使用中的規則檔、`hook_guard.py` 旁邊的 `guard_rules.json` 或 `hook_guard.py` 本身，worker deny、director ask。Bash / PowerShell 也算：子指令寫出這些檔名，又是寫檔指令（`sed -i`、`perl -i`、`tee`、`cp`、`mv`、`git checkout/restore`、`Set-Content`、`Out-File`、`Copy-Item` 等），或重新導向（`>`、`>>`、`2>`、`&>`、`>|`）指到這些檔，或同一行有 `[IO.File]::Write*` 這類 .NET 寫檔呼叫。只讀的指令（`cat`、`sed -n`、`git diff`、把輸出導到別的檔）照常放行。檔名放在變數裡、`python -c` 或腳本裡寫檔，看不到。
 - 結論：有 deny 就 exit 2，stderr 是 `BLOCKED by hook_guard [ID]: 原因`；原本的檢查（stash、`reset --hard`、`--protect` 等）擋下時用原本的訊息；有 ask 就 exit 0，stdout 只有一行 `{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "ask", "permissionDecisionReason": "[ID] 原因"}}`；其他 exit 0、什麼都不印。**永遠不回 allow**：不出聲就是照 Claude Code 自己的權限流程，hook 只會讓結果更嚴。
 - 多條規則同時命中：deny 優先於 ask，同一種結論取編號最小的。結果只看輸入和規則檔，規則的先後順序不影響結果。
 - 規則檔讀不到或格式錯：exit 1，stderr `hook_guard: bad rules file: ...`。配合 setup 寫的 `"onFailure": "block"`，等於擋下所有工具呼叫，直到規則檔修好。
@@ -93,7 +93,7 @@ hook_guard.py --rules <tools>/guard_rules.json --profile worker|director [--prot
 | ID | 類別 | worker | director | 擋什麼 |
 |---|---|---|---|---|
 | G01 | force push | deny | deny | `git push --force`、`-f`、`--force-with-lease`、`--mirror`、`--delete`、`+ref`、`:ref` |
-| G02 | push | deny | deny | `git push` 各種寫法、`gh repo sync` |
+| G02 | push | deny | deny | `git push` 各種寫法、`git send-pack`、`git http-push`（含 `git-push`、`git-send-pack` 執行檔）、`gh repo sync`；設定 alias 的 `git -c alias.*=`、`--config-env=alias.*`、`git config alias.*`（查詢的 `--get`、`-l`、`--unset` 除外），因為 alias 可以把 push 換個名字執行 |
 | G10 | 刪除 | deny | ask | `rm`、`rmdir`、`rd`、`del`、`erase`、`unlink`、`shred`、`Remove-Item`、`ri`、`find -delete` |
 | G11 | 刪除 | deny | ask | MCP 動作含 delete、trash、destroy、purge、wipe、erase、uninstall |
 | G20 | 送出 | deny | ask | `gh pr/issue/release/gist/repo` 的寫入子指令、`gh api` 帶寫入方法或欄位、`npm/pnpm/yarn/cargo publish`、`twine upload`、`docker/podman/gem push` |
@@ -102,7 +102,7 @@ hook_guard.py --rules <tools>/guard_rules.json --profile worker|director [--prot
 | G40 | 改設定 | deny | ask | Write / Edit 到 `.claude/settings*.json`、`managed-settings.json`、`.credentials.json`、`CLAUDE.md`、`CLAUDE.local.md`、`~/.claude.json`、`.mcp.json`；`~/.claude/projects/*/memory/**` 和 `~/.claude/plans/**` 除外 |
 | G41 | 改設定 | deny | ask | `git config --global/--system`、`claude config/mcp` 的寫入、`setx`、`reg add` 等、PowerShell 改 HKLM / HKCU |
 | G42 | 改設定 | deny | ask | MCP 動作含 setting、settings、permission_mode |
-| G50 | 機密 | deny | deny | Read / Grep / Glob / NotebookRead 和讀檔類指令（`cat`、`head`、`grep`、`sed`、`Get-Content`、`type`、`cp`、`base64`、`certutil` 等）碰到 `.env`、`.env.*`、`.envrc`、`*.pem`、`*.key`、`*.p12`、`*.pfx`、`id_rsa*` 等私鑰、`.ssh/**`、`.aws/credentials`、`gh/hosts.yml`、`.git-credentials`、`.npmrc`、`.pypirc`、`.netrc`、`.claude/.credentials.json`、`credentials.json`、`secrets.*`；`.env.example`、`.env.sample`、`.env.template`、`.env.dist`、`*.pub`、`known_hosts`、`.ssh/config` 除外 |
+| G50 | 機密 | deny | deny | Read / Grep / Glob / NotebookRead 和讀檔類指令（`cat`、`head`、`grep`、`sed`、`Get-Content`、`type`、`cp`、`base64`、`certutil` 等）碰到 `.env`、`.env.*`、`.envrc`、`*.pem`、`*.key`、`*.p12`、`*.pfx`、`id_rsa*` 等私鑰、`.ssh/**`、`.aws/credentials`、`gh/hosts.yml`（含 Windows 的 `%APPDATA%/GitHub CLI/hosts.yml`）、`.git-credentials`、`.npmrc`、`.pypirc`、`.netrc`、`.claude/.credentials.json`、`credentials.json`、`secrets.*`；`.env.example`、`.env.sample`、`.env.template`、`.env.dist`、`*.pub`、`known_hosts`、`.ssh/config` 除外 |
 | G51 | 機密 | deny | deny | 印出環境變數：不帶參數的 `env`、`printenv`、`set`、`export`；`export -p`、`declare -x`；`gci env:`；`echo` / `Write-Output` 帶名稱含 token、secret、password、key、credential、auth 的變數；單獨一行 `$env:GITHUB_TOKEN`；`[Environment]::GetEnvironmentVariable(s)` |
 | G52 | 機密 | deny | deny | 印出 token 或密碼的指令：`gh auth token`、`gh auth status --show-token`、`git credential fill`、credential helper 的 `get`、`aws configure get`、`aws configure export-credentials`、`aws sts get-session-token`、`az account get-access-token`、`gcloud auth print-*-token`、`kubectl config view --raw`、`security find-*-password -w` |
 
@@ -112,6 +112,8 @@ hook_guard.py --rules <tools>/guard_rules.json --profile worker|director [--prot
 - G50 只看讀取工具；寫 `.credentials.json` 仍由 G40 處理。
 - G50–G52 擋不到的（寫進限制）：`grep -r` 不指定檔案時掃到 `.env`；`python -c`、`node -e` 這類直譯器讀檔；`$X` 間接展開的變數名；指令輸出本身帶出的 token（例如程式把 token 印到 log）。輸出遮罩屬於下一批。
 - 仍然只是安全帶：寫進腳本再執行、變數拼出來的指令、編碼過的指令看不到（Claude Code 文件也說 Bash 權限規則不是安全邊界）。
+- 間接執行看不到：`python -c "import subprocess; ..."`、`node -e`、自己寫的腳本裡呼叫 git 或寫檔。這類情況由容器路線處理（容器裡沒有 token、沒有 push 權限），hook 不再追。
+- G02 擋不到的：用環境變數帶設定（`GIT_CONFIG_PARAMETERS`、`GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n`）、直接改 `.git/config` 或用 `include.path` 引入的 alias。G02 會多擋只讀的 `git config get alias.p`（新語法）和不帶值的 `git config alias.p`，寧可多擋。
 - selftest 會跑每條規則的 `example_block` 和 `example_allow`（兩個身分各一次），所以規則檔加一條，案例就自動多幾個。
 
 ### `--pause-flag`（1.1.0）
@@ -125,7 +127,7 @@ hook_guard.py --rules <tools>/guard_rules.json --profile worker --pause-flag <DI
   - `allow_tools`：Read、Grep、Glob、NotebookRead、TaskList、TaskGet、TaskOutput、ToolSearch、ReadNotifications、`update_plan`、`wrap_up`；`internal_report_tools`（SendMessage）也放行，才能回報停在哪裡。
   - `allow_mcp_read_only: true`：開頭是 get、list、read、search、query、status 的 MCP 工具放行。
   - `allow_write`：Write / Edit / MultiEdit / NotebookEdit 只放行進度檔 `**/RESUME_STATE.md`、`**/TASK_REPORT*.md`。
-  - `allow_shell`：每個身分一組 regex。Bash / PowerShell 沒有 `run_in_background`，而且拆出的每個子指令（`名稱 參數...`，不分大小寫）都完整比對到其中一條才放行。預設放行 `git status/log/diff/show/rev-parse`（不可帶 `--output`、`-c`）、`tasklist`、`Get-Process`、`ps`、排序和篩選輸出的指令、`pause_ctl.py status|procs`；`pause_ctl.py off` 只有 director 放行。
+  - `allow_shell`：每個身分一組 regex。Bash / PowerShell 沒有 `run_in_background`、整行沒有把輸出寫到檔案（不在引號裡的 `>`、`>>`、`2>`、`&>`、`>|`、`>(...)`，`$(...)` 裡的也算；`2>&1`、`>&2` 只是合併串流，照常放行），而且拆出的每個子指令（`名稱 參數...`，不分大小寫）都完整比對到其中一條才放行。預設放行 `git status/log/diff/show/rev-parse`（不可帶 `--output`、`-c`）、`tasklist`、`Get-Process`、`ps`、排序和篩選輸出的指令、`pause_ctl.py status|procs`；`pause_ctl.py off` 只有 director 放行。
 - 被擋的：其他 Bash / PowerShell、背景執行、Monitor、Agent、Workflow、其他寫檔、MCP 寫入動作、`start_session`。
 - 給了 `--pause-flag` 卻沒給 `--rules`，或規則檔沒有 `pause` 段、`pause` 段格式錯：exit 1（配合 `onFailure: block` 等於全部擋下）。
 - 限制：旗標只擋**新的**工具呼叫，已經在跑的程式（背景批次、子程序）照跑，要依 `docs/02` 停整條程序樹，再用 `pause_ctl.py procs` 確認；含空白的路徑在 allowlist regex 裡比不到 `\S+`，會被擋（寧可多擋）。

@@ -31,13 +31,23 @@
       "decision": {"worker": "deny", "director": "deny"},
       "reason": "pushing needs the PO's approval (docs/08); the PO runs the push",
       "match": [
-        {"kind": "shell", "cmd": ["git"], "args": [["push"]]},
+        {"kind": "shell", "cmd": ["git"], "args": [["push", "send-pack", "http-push"]]},
+        {"kind": "shell", "cmd": ["git-push", "git-send-pack", "git-http-push"]},
+        {"kind": "shell", "cmd": ["git"], "arg_search": ["(?i)^(--config-env=)?alias\\.[^=]*="]},
+        {"kind": "shell", "cmd": ["git"], "args": [["config"]], "arg_search": ["(?i)^alias\\."],
+         "not_flags": ["--get.*", "-l", "--list", "--unset.*", "--remove-section"]},
         {"kind": "shell", "cmd": ["gh"], "args": [["repo"], ["sync"]]}
       ],
       "example_block": [{"tool_name": "Bash", "tool_input": {"command": "git push origin main"}},
-                        {"tool_name": "Bash", "tool_input": {"command": "gh repo sync"}}],
-      "example_allow": {"tool_name": "Bash", "tool_input": {"command": "git status"}},
-      "permissions": ["Bash(git push *)", "PowerShell(git push *)", "Bash(gh repo sync *)", "PowerShell(gh repo sync *)"]
+                        {"tool_name": "Bash", "tool_input": {"command": "gh repo sync"}},
+                        {"tool_name": "Bash", "tool_input": {"command": "git send-pack origin HEAD"}},
+                        {"tool_name": "Bash", "tool_input": {"command": "git -c alias.p=push p"}},
+                        {"tool_name": "Bash", "tool_input": {"command": "git config alias.p push"}}],
+      "example_allow": [{"tool_name": "Bash", "tool_input": {"command": "git status"}},
+                        {"tool_name": "Bash", "tool_input": {"command": "git config --get alias.p"}},
+                        {"tool_name": "Bash", "tool_input": {"command": "git -c core.autocrlf=false status"}}],
+      "permissions": ["Bash(git push *)", "PowerShell(git push *)", "Bash(git send-pack *)", "PowerShell(git send-pack *)",
+                      "Bash(git http-push *)", "PowerShell(git http-push *)", "Bash(gh repo sync *)", "PowerShell(gh repo sync *)"]
     },
     {
       "id": "G10",
@@ -166,10 +176,10 @@
       "reason": "credential files are not read in a session (docs/08); if the task needs a credential, report which one and why to the Director",
       "match": [
         {"kind": "path", "tools": ["Read", "Grep", "Glob", "NotebookRead"],
-         "globs": ["**/.env", "**/.env.*", "**/.envrc", "**/*.pem", "**/*.key", "**/*.p12", "**/*.pfx", "**/id_rsa*", "**/id_ecdsa*", "**/id_ed25519*", "**/.ssh/**", "**/.aws/credentials", "**/.config/gh/hosts.yml", "**/.git-credentials", "**/.npmrc", "**/.pypirc", "**/.netrc", "**/_netrc", "**/.claude/.credentials.json", "**/credentials.json", "**/secrets.*"],
+         "globs": ["**/.env", "**/.env.*", "**/.envrc", "**/*.pem", "**/*.key", "**/*.p12", "**/*.pfx", "**/id_rsa*", "**/id_ecdsa*", "**/id_ed25519*", "**/.ssh/**", "**/.aws/credentials", "**/.config/gh/hosts.yml", "**/.config/gh", "**/GitHub CLI/hosts.yml", "**/GitHub CLI", "**/.git-credentials", "**/.npmrc", "**/.pypirc", "**/.netrc", "**/_netrc", "**/.claude/.credentials.json", "**/credentials.json", "**/secrets.*"],
          "except": ["**/.env.example", "**/.env.sample", "**/.env.template", "**/.env.dist", "**/*.pub", "**/.ssh/known_hosts*", "**/.ssh/config"]},
         {"kind": "shell", "cmd": ["cat", "tac", "nl", "more", "less", "bat", "head", "tail", "sed", "awk", "gawk", "grep", "egrep", "fgrep", "rg", "findstr", "select-string", "sls", "get-content", "gc", "type", "cp", "copy", "copy-item", "cpi", "scp", "rsync", "base64", "certutil", "xxd", "od", "hexdump", "strings", "format-hex", "fhx", "import-csv", "get-filehash"],
-         "path_args": ["**/.env", "**/.env.*", "**/.envrc", "**/*.pem", "**/*.key", "**/*.p12", "**/*.pfx", "**/id_rsa*", "**/id_ecdsa*", "**/id_ed25519*", "**/.ssh/**", "**/.aws/credentials", "**/.config/gh/hosts.yml", "**/.git-credentials", "**/.npmrc", "**/.pypirc", "**/.netrc", "**/_netrc", "**/.claude/.credentials.json", "**/credentials.json", "**/secrets.*"],
+         "path_args": ["**/.env", "**/.env.*", "**/.envrc", "**/*.pem", "**/*.key", "**/*.p12", "**/*.pfx", "**/id_rsa*", "**/id_ecdsa*", "**/id_ed25519*", "**/.ssh/**", "**/.aws/credentials", "**/.config/gh/hosts.yml", "**/.config/gh", "**/GitHub CLI/hosts.yml", "**/GitHub CLI", "**/.git-credentials", "**/.npmrc", "**/.pypirc", "**/.netrc", "**/_netrc", "**/.claude/.credentials.json", "**/credentials.json", "**/secrets.*"],
          "path_except": ["**/.env.example", "**/.env.sample", "**/.env.template", "**/.env.dist", "**/*.pub", "**/.ssh/known_hosts*", "**/.ssh/config"]}
       ],
       "example_block": [{"tool_name": "Read", "tool_input": {"file_path": ".env"}},
@@ -178,7 +188,7 @@
                         {"tool_name": "Bash", "tool_input": {"command": "cat README.md"}}],
       "permissions": ["Read(//**/.env)", "Read(//**/.env.local)", "Read(//**/.env.production)", "Read(//**/*.pem)", "Read(//**/*.key)",
                       "Read(//**/*.p12)", "Read(//**/*.pfx)", "Read(//**/id_rsa)", "Read(//**/id_ed25519)", "Read(~/.ssh/**)",
-                      "Read(~/.aws/credentials)", "Read(~/.config/gh/hosts.yml)", "Read(~/.git-credentials)", "Read(~/.netrc)",
+                      "Read(~/.aws/credentials)", "Read(~/.config/gh/hosts.yml)", "Read(~/AppData/Roaming/GitHub CLI/hosts.yml)", "Read(~/.git-credentials)", "Read(~/.netrc)",
                       "Read(~/.claude/.credentials.json)"]
     },
     {

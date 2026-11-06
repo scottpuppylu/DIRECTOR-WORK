@@ -39,13 +39,17 @@ the lowest ID wins, so the result does not depend on the order of rules, the tim
 exits 0 with no output: it never answers allow, so Claude Code's own permission rules still apply. A rules file that
 cannot be read or is malformed gives exit 1 (install with "onFailure": "block" so that blocks). Rule G00 is built in:
 Write / Edit of the rules file in use, of guard_rules.json beside this script or of this script is denied for a
-worker and asked for a Director.
+worker and asked for a Director, and so is a shell command that writes one of them (named by file name, in any
+word): a > whose target names it, or sed / perl -i, tee, cp, mv, rm, Set-Content, Out-File, git checkout / restore,
+[IO.File]::WriteAllText and the like with the name among their words. Reading them (cat, git diff, running the hook,
+git log -p ... > elsewhere) passes. A name kept in a variable, or a file written by code that a command runs
+(python -c, a script), is not seen.
 With --pause-flag FILE (needs --rules; tools/pause_ctl.py on|off) every tool call is first checked against the
 flag: while FILE exists, a call is denied (exit 2, "PAUSED by WHO at TIME: REASON; ..." on stderr) unless the rules
 file's "pause" section lets it through: its allow_tools, read-only MCP actions, the internal report channel, Write /
 Edit of an allow_write path (progress files) and a shell line whose every simple command fully matches one of the
-profile's allow_shell regexes (tested on the command name and its words joined by single spaces). A Bash call with
-run_in_background is always denied while paused. A call the pause lets through is then checked by the rules as usual.
+profile's allow_shell regexes (tested on the command name and its words joined by single spaces) and that sends no
+output to a file (any unquoted >, >>, 2>, &>; 2>&1 is fine). A Bash call with run_in_background is always denied while paused. A call the pause lets through is then checked by the rules as usual.
 The flag stops new tool calls only; a program already running keeps running.
 Without --rules the output is the same as before, byte for byte.
 """
@@ -407,6 +411,87 @@ def pause_state(flag):
     return tuple(re.sub(r"\s+", " ", x).replace("<", "(").replace(">", ")") for x in parts)
 
 
+FD_DUP = re.compile(r"[\d*]?>&(\d+|-)")  # 2>&1, *>&1, >&2, 3>&-: joins or closes a stream, writes no file
+
+
+def has_redirect(command, shell="bash"):
+    """True when the line sends output to a file: an unquoted > / >> / &> / >| / >(...), also inside $(...) or `...`
+    in double quotes. Stream joins such as 2>&1 do not count."""
+    quotes, esc = SHELLS[shell]
+    quote, i = None, 0
+    while i < len(command):
+        c = command[i]
+        if quote == "'":
+            quote = None if c == "'" else quote
+        elif quote:
+            if c == '"':
+                quote = None
+            elif c == esc:
+                i += 1
+            elif shell != "cmd" and (c == "`" and shell == "bash" or command.startswith("$(", i)):
+                end = matching_end(command, i + (c == "$"))
+                if has_redirect(command[i + 2 - (c == "`"):end - 1], shell):
+                    return True
+                i = end
+                continue
+        elif c in quotes:
+            quote = c
+        elif c == esc:
+            i += 1
+        elif c == ">":
+            dup = FD_DUP.match(command, i - 1 if i and command[i - 1] in "0123456789*" else i)
+            if not dup or dup.end() <= i:
+                return True
+            i = dup.end()
+            continue
+        i += 1
+    return False
+
+
+def redirect_word(word):
+    """A word of a parsed command that holds a > other than a stream join (quotes are already gone, so err on blocking)."""
+    return ">" in word and not FD_DUP.fullmatch(word)
+
+
+# commands that change the files they name; sed / perl only with -i, git only with these subcommands
+WRITE_VERBS = {"tee", "tee-object", "cp", "copy", "copy-item", "cpi", "mv", "move", "move-item", "mi", "ren", "rename",
+               "rename-item", "rni", "rm", "del", "erase", "remove-item", "ri", "unlink", "truncate", "dd", "install", "ln",
+               "touch", "chmod", "attrib", "icacls", "set-content", "sc", "add-content", "ac", "out-file", "clear-content",
+               "clc", "new-item", "ni", "set-item", "si", "xcopy", "robocopy", "rsync", "scp"}
+GIT_WRITES = {"checkout", "restore", "rm", "mv"}
+
+
+DOTNET_WRITE = re.compile(r"::(write|append|copy|move|delete|replace|create)", re.I)
+
+
+def writes_file(name, rest):
+    if name in WRITE_VERBS:
+        return True
+    if name in ("sed", "gsed", "perl") and any(re.fullmatch(r"-[a-zA-Z]*i.*|--in-place.*", a) for a in rest):
+        return True
+    return name == "git" and positional("git", rest)[:1] in [[w] for w in GIT_WRITES]
+
+
+def self_write(commands, names):
+    """True when a command writes a guarded file (named by file name in any word): a write verb that names it, a >
+    whose target names it, or a .NET write call ([IO.File]::WriteAllText) on a line that names it. A > with no target
+    in its command (>| splits there) counts when the line names the file."""
+    named = lambda words: any(n in w.lower() for n in names for w in words)
+    line_named = any(named([n] + list(r)) for n, r in commands)
+    if line_named and any(DOTNET_WRITE.search(n) for n, _ in commands):
+        return True  # the ( of the call splits it from its path
+    for name, rest in commands:
+        words = [name] + list(rest)
+        if named(words) and writes_file(name, rest):
+            return True
+        for k, word in enumerate(words):
+            if redirect_word(word):
+                target = word.rsplit(">", 1)[1] or (words[k + 1] if k + 1 < len(words) else None)
+                if named([target]) if target is not None else line_named:
+                    return True
+    return False
+
+
 def pause_allows(data, profile, call):
     """True when the pause section lets this call through while the flag is on."""
     pause = data["pause"]
@@ -425,7 +510,9 @@ def pause_allows(data, profile, call):
     command = tool_input.get("command")
     if tool not in ("Bash", "PowerShell") or not isinstance(command, str) or tool_input.get("run_in_background"):
         return False
-    commands = list(simple_commands(command, "powershell" if tool == "PowerShell" else "bash"))
+    if has_redirect(command, "powershell" if tool == "PowerShell" else "bash"):
+        return False  # git log > a.py writes a file; 2>&1 is not a redirect to a file
+    commands = list(simple_commands(FD_DUP.sub(" ", command), "powershell" if tool == "PowerShell" else "bash"))
     allowed = pause["allow_shell"][profile]
     return bool(commands) and all(any(re.fullmatch(r, " ".join([n] + list(rest)), re.I | re.S) for r in allowed)
                                   for n, rest in commands)
@@ -571,7 +658,8 @@ def decide(data, profile, call, rules_path):
     tool_input = call.get("tool_input") if isinstance(call.get("tool_input"), dict) else {}
     cwd = call.get("cwd") if isinstance(call.get("cwd"), str) else None
     command = tool_input.get("command")
-    commands = (list(simple_commands(command, "powershell" if tool == "PowerShell" else "bash"))
+    # 2>&1 is dropped first: its & would otherwise split the line and leave "2>" looking like a redirect
+    commands = (list(simple_commands(FD_DUP.sub(" ", command), "powershell" if tool == "PowerShell" else "bash"))
                 if tool in ("Bash", "PowerShell") and isinstance(command, str) else [])
     value = next((tool_input[f] for f in PATH_FIELDS if isinstance(tool_input.get(f), str) and tool_input[f]), None)
     target = rule_path(value, cwd) if value else None
@@ -584,7 +672,8 @@ def decide(data, profile, call, rules_path):
     hits = []
     own = pathlib.Path(__file__)
     guarded = {rule_path(str(rules_path), None), rule_path(str(own), None), rule_path(str(own.with_name("guard_rules.json")), None)}
-    if tool in WRITE_TOOLS and target in guarded:
+    names = {pathlib.Path(str(rules_path)).name.lower(), "guard_rules.json", own.name.lower()}
+    if tool in WRITE_TOOLS and target in guarded or self_write(commands, names):
         hits.append((SELF_RULE["decision"][profile], "G00", SELF_RULE["reason"]))
     for rule in data["rules"]:
         decision = rule["decision"][profile]
