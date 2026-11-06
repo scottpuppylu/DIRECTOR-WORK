@@ -37,7 +37,8 @@ Lines starting with `~` are notes for the newer format (v0.10): they never fail 
 Bringing in a project that already has files in another format:
   --warn          print WARN instead of FAIL and exit 0, so old files do not block work
   --since DATE    SKIP files dated before DATE (YYYY-MM-DD): ISSUED_BY of an order, UPDATED of a RESUME_STATE, the
-                  first date in a report or verdict. Files without a date are still checked.
+                  first date in a report or verdict. A file with no such date cannot be placed, so it is also SKIPped,
+                  marked UNDATED and counted on its own in the last line; run without --since to check it.
 The fixed words come from vocabulary.json next to this file.
 """
 import argparse
@@ -534,7 +535,7 @@ def main():
         ap.error(f"--dispatch-log: file not found: {a.dispatch_log}")
     dispatch = dispatch_records(pathlib.Path(a.dispatch_log).read_text(encoding="utf-8-sig")) if a.dispatch_log else None
 
-    failed = skipped = 0
+    failed = skipped = undated = 0
     for kind, path in jobs:
         files = [pathlib.Path(p) for p in (path if kind == "match" else [path])]
         text = files[0].read_text(encoding="utf-8-sig") if all(f.is_file() for f in files) else None
@@ -543,6 +544,10 @@ def main():
         if day and day < a.since:
             skipped += 1
             print(f"SKIP {kind} {name} (dated {day}, before --since)")
+            continue
+        if a.since and text is not None and not day:
+            undated += 1
+            print(f"SKIP {kind} {name} (UNDATED: no date for --since to compare; run without --since to check it)")
             continue
         notes = []
         if text is None:
@@ -556,7 +561,8 @@ def main():
         for line in [f"  - {p}" for p in problems] + [f"  ~ {n}" for n in notes]:
             print(line)
     if a.warn or a.since:
-        print(f"checked {len(jobs) - skipped}, {'warned' if a.warn else 'failed'} {failed}, skipped {skipped}")
+        print(f"checked {len(jobs) - skipped - undated}, {'warned' if a.warn else 'failed'} {failed}, skipped {skipped}"
+              + (f", UNDATED {undated} (not checked)" if undated else ""))
     return 1 if failed and not a.warn else 0
 
 

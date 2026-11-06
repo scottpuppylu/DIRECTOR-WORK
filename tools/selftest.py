@@ -157,7 +157,11 @@ def test_gate(tmp):
     expect("--warn reports and does not block", "gate_check.py", 0, "--warn", "--order", old, new, says="warned 2")
     expect("--since skips an old order", "gate_check.py", 0, "--since", "2026-01-01", "--order", old, says="SKIP")
     expect("--since still checks a new order", "gate_check.py", 1, "--since", "2026-01-01", "--order", old, new, says="skipped 1")
-    expect("--since still checks an undated file", "gate_check.py", 1, "--since", "2026-01-01", "--report", undated, says="FAIL")
+    expect("an undated file is checked without --since", "gate_check.py", 1, "--report", undated, says="FAIL")
+    expect("--since skips an undated file and counts it", "gate_check.py", 1, "--since", "2026-01-01", "--report", undated,
+           "--order", old, new, says=["SKIP report", "UNDATED: no date", "checked 1, failed 1, skipped 1, UNDATED 1 (not checked)"])
+    expect("--since without undated files prints no UNDATED count", "gate_check.py", 0, "--since", "2026-01-01", "--order", old,
+           lacks="UNDATED")
     expect("--since skips an old RESUME_STATE", "gate_check.py", 0, "--since", "2026-02-01", "--resume", tmp / "resume_empty.md", says="SKIP")
     expect("--since needs a date", "gate_check.py", 2, "--since", "yesterday", "--order", new)
 
