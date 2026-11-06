@@ -2,6 +2,7 @@
 so nobody keeps a separate table up to date. Only reads; prints Markdown.
 
   trace_report.py --orders DIRECTOR/orders --reports <folder> [--verdicts DIRECTOR/reviews] [--config director_work.json]
+                  [--decisions <需求或決定檔.md> ...]
 
 An order is a .md file with ISSUED_BY; it lists what it serves in `TRACES_TO = DD-03, OD-12` (NONE when nothing).
 A report (a .md file with TASK_ID) belongs to the order whose file name its `ORDER:` line holds, else to the order
@@ -15,7 +16,10 @@ the chosen report by the REVISION on its `ORDER:` line: only a verdict for that 
 first; neither when two tie). With none, a sole verdict that names no revision is shown marked 未標版次, else the cell
 says no verdict has that revision. Verdicts for other revisions, and a `CANDIDATE_HEAD:` that is not the report's HEAD,
 are listed under 裁決對不到報告版次. `trace_id_pattern` in the config (a regex) flags IDs written in another format;
-without it every ID is accepted. Exit 0, or 1 when a folder is missing.
+without it every ID is accepted. `--decisions FILE` (repeatable) reads the IDs (`XX-number`) in the first column of the
+Markdown table rows of the project's requirement or decision files: a TRACES_TO ID found in none of them is listed under
+TRACES_TO 找不到的編號, and an ID there that no order traces under 沒有工單的需求. Without the flag the output is the
+same as before. Exit 0, or 1 when a folder or a --decisions file is missing.
 """
 import argparse
 import importlib.util
@@ -129,18 +133,37 @@ def cell(value):
     return (value or "").replace("|", "/").strip() or "—"
 
 
+def decision_ids(text):
+    """IDs like DD-03 in the first column of the Markdown table rows of a requirements or decisions file."""
+    ids = []
+    for line in text.splitlines():
+        cells = line.strip().split("|")
+        if len(cells) > 2 and not cells[0]:
+            first = cells[1].strip().strip("*`").strip()
+            if re.fullmatch(r"[A-Z]+-\d+", first):
+                ids.append(first)
+    return ids
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--orders", required=True)
     ap.add_argument("--reports", required=True)
     ap.add_argument("--verdicts")
     ap.add_argument("--config")
+    ap.add_argument("--decisions", action="append", default=[])
     a = ap.parse_args()
     sys.stdout.reconfigure(encoding="utf-8")
     missing = [f for f in (a.orders, a.reports, a.verdicts) if f and not pathlib.Path(f).is_dir()]
     if missing:
         print(f"FAIL folder not found: {', '.join(missing)}")
         return 1
+    missing = [f for f in a.decisions if not pathlib.Path(f).is_file()]
+    if missing:
+        print(f"FAIL file not found: {', '.join(missing)}")
+        return 1
+    known = list(dict.fromkeys(i for f in a.decisions for i in decision_ids(
+        pathlib.Path(f).read_text(encoding="utf-8-sig"))))
     cfg = json.loads(pathlib.Path(a.config).read_text(encoding="utf-8-sig")) if a.config else {}
     if cfg.get("schema_version", 1) != CONFIG_VERSION:
         sys.exit(f"{a.config}: schema_version {cfg['schema_version']} is not {CONFIG_VERSION}; see CHANGELOG.md")
@@ -192,8 +215,14 @@ def main():
         print("| " + " | ".join(cell(v) for v in row) + " |")
     untraced = [o["id"] for o in orders if o["traces"] is None]
     odd = [f"{o['id']}: {i}" for o in orders for i in o["traces"] or [] if pattern and not pattern.fullmatch(i)]
-    for title, items in (("沒有 TRACES_TO 的工單", untraced), ("編號格式不符 trace_id_pattern", odd),
-                         ("對不到工單的報告", [str(p) for p in stray]), ("裁決對不到報告版次", unpaired)):
+    sections = [("沒有 TRACES_TO 的工單", untraced), ("編號格式不符 trace_id_pattern", odd),
+                ("對不到工單的報告", [str(p) for p in stray]), ("裁決對不到報告版次", unpaired)]
+    if a.decisions:
+        traced = {i for o in orders for i in o["traces"] or []}
+        sections += [("TRACES_TO 找不到的編號", [f"{o['id']}: {i}" for o in orders for i in o["traces"] or []
+                                                 if i not in known]),
+                     ("沒有工單的需求", [i for i in known if i not in traced])]
+    for title, items in sections:
         print(f"\n## {title}\n" + ("\n".join(f"- {i}" for i in items) if items else "- 無"))
     several = [o for o in orders if len(o["reports"]) > 1]
     print("\n## 同一工單有多份報告（依 REVISION、ATTEMPT、日期選，不看檔名）")

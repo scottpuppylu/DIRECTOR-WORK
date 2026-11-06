@@ -715,6 +715,19 @@ def test_trace(tmp):
     expect("trace with a missing folder", "trace_report.py", 1, "--orders", root / "nope", "--reports", root / "reports",
            says="folder not found")
 
+    # v0.13 (A10): --decisions checks TRACES_TO against the project's requirement files, both ways
+    decisions = root / "decisions.md"
+    decisions.write_text("# 決定\n\n| ID | 決定 |\n|---|---|\n| DD-1 | parser |\n| **DD-2** | 沒人做 |\n"
+                         "| 說明 | DD-3 不是第一欄 |\n", encoding="utf-8")
+    expect("trace --decisions lists a TRACES_TO ID found in no decision file", "trace_report.py", 0, *base,
+           "--decisions", decisions, says="## TRACES_TO 找不到的編號\n- WO-003: REQ7", lacks="- WO-001: DD-1")
+    expect("trace --decisions lists a requirement no order traces", "trace_report.py", 0, *base,
+           "--decisions", decisions, says="## 沒有工單的需求\n- DD-2\n", lacks="- DD-3")
+    expect("trace without --decisions prints neither section", "trace_report.py", 0, *base,
+           lacks=["TRACES_TO 找不到的編號", "沒有工單的需求"])
+    expect("trace --decisions with a missing file", "trace_report.py", 1, *base, "--decisions", root / "nope.md",
+           says="FAIL file not found")
+
     # v0.13 (A09): a verdict is shown only next to the report of its own REVISION
     paired = tmp / "trace_verdicts"
     for folder in ("reports", "reviews"):
