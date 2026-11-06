@@ -6,7 +6,10 @@ Passing means the file follows the format and the rules below. It does not mean 
 evidence and the product is still the Director's job (docs/02, docs/07).
 
   --resume   the four header lines come first, in order, filled in; UPDATED holds a date
-  --order    required fields filled in; SCOPE / FORBIDDEN are concrete path lists; acceptance rows are concrete
+  --order    required fields filled in; SCOPE / FORBIDDEN are concrete path lists; acceptance rows are concrete;
+             an optional `CHECKS:` list holds one `- AC-n: ["program", "arg"]` line (JSON array of strings) per AUTO
+             criterion: the check the Director approves, locked by the dispatch hash. A Strict order with an AUTO
+             criterion and no check is noted
   --report   required fields filled in; RESULT in the vocabulary; PASS is refused with NOT_RUN tests or a scope violation
   --verdict  verdict and next step in the vocabulary; status split by aspect; stop state written
   --match REPORT ORDER
@@ -21,8 +24,9 @@ evidence and the product is still the Director's job (docs/02, docs/07).
              record's fields and types (schema, label, command, cwd, started, finished, exit_code, timed_out, git,
              artifacts) is not evidence; one without `schema` is read as legacy. A legacy record, a record without
              git HEAD, uncommitted changes or a label naming another AC fail a Strict order and are noted otherwise.
-             The report's HEAD must be 7 to 40 hex digits: Strict fails, Standard and --report note it. The records
-             are read, not rerun: only `evidence_record.py verify --rerun` runs a command again
+             The report's HEAD must be 7 to 40 hex digits: Strict fails, Standard and --report note it. When the order
+             has CHECKS, a record's command must be the approved one for its AC: Strict fails, Standard notes it.
+             The records are read, not rerun: only `evidence_record.py verify --rerun --order ...` runs a check again
   --dispatch-log LOG
              with --match: the order's hash now must equal the one the Director logged at dispatch, as a line
              `DISPATCH <WO-ID> rev=<n> sha=<64 hex>` in LOG (the last line for an order wins; the ID is the order's
@@ -221,6 +225,34 @@ def order_line(text):
     return line.group(1), (int(rev.group(1)) if rev else None)
 
 
+def order_checks(text, problems=None):
+    """{AC id: command} from the order's `CHECKS:` list, one `- AC-1: ["program", "arg", ...]` line per AUTO criterion
+    (a JSON array of strings, run without a shell); None when the order has no CHECKS. With a problems list, records a
+    line that is not in that form and an AC listed twice (the first line wins)."""
+    items = parse_list(text, "CHECKS")
+    if items is None:
+        return None
+    checks = {}
+    for item in items:
+        m = re.fullmatch(r"(AC-[\w-]+)\s*:\s*(.+)", item)
+        try:
+            command = json.loads(m.group(2)) if m else None
+        except ValueError:
+            command = None
+        if not (isinstance(command, list) and command and all(isinstance(part, str) for part in command)
+                and command[0].strip()):
+            if problems is not None:
+                problems.append(f'CHECKS: `{item}` is not `AC-n: ["program", "arg", ...]` (a JSON array of strings; '
+                                "a ` #` starts a comment, so a command cannot hold one)")
+            continue
+        if m.group(1) in checks:
+            if problems is not None:
+                problems.append(f"CHECKS: {m.group(1)} listed twice; one approved check per AC")
+            continue
+        checks[m.group(1)] = command
+    return checks
+
+
 def dispatch_records(text):
     """{order id: (rev, sha)} from `DISPATCH <WO-ID> rev=<n> sha=<hash>` lines; the last line for an id wins."""
     return {m.group(1): (m.group(2), m.group(3).lower()) for m in DISPATCH.finditer(text)}
@@ -289,6 +321,19 @@ def check_order(text, notes):
         notes.append(f"acceptance: no 類型 column; give each AC one of {' / '.join(AC_STATUSES)}")
     if {"actual", "evidence", "status"} & sample.keys():
         notes.append("acceptance: 實際 / 證據 / 狀態 belong in the TASK REPORT's ACCEPTANCE table, not in the order")
+    checks = order_checks(text, problems)
+    for ac in sorted(checks or {}):
+        kind = rows.get(ac, {}).get("type") or "AUTO"
+        if ac not in rows:
+            problems.append(f"CHECKS: {ac} is not an acceptance criterion of this order")
+        elif kind != "AUTO" and kind in AC_STATUSES:  # a type outside the vocabulary is reported above
+            problems.append(f"CHECKS: {ac} is {kind}; only an AUTO criterion has a check to rerun")
+    if re.search(r"^\s*GOVERNANCE\s*=\s*Strict\b", text, re.M):
+        unchecked = [ac for ac, row in rows.items() if (row.get("type") or "AUTO") == "AUTO" and ac not in (checks or {})]
+        if unchecked:
+            notes.append(f"CHECKS: Strict order without an approved check for AUTO {', '.join(unchecked)}; add "
+                         '`CHECKS:` with `- AC-n: ["program", "arg"]` so `evidence_record.py verify --rerun --order` '
+                         "runs the check the Director approved")
     revision = re.search(r"^[ \t]*REVISION[ \t]*=[ \t]*(\S*)", text, re.M)
     if not revision:
         notes.append("REVISION: missing; start at 1 and log every later change under 變更紀錄")
@@ -391,11 +436,12 @@ def evidence_module():
     return module
 
 
-def check_evidence(ac, evidence, folder, head, problems, notes, strict=False, candidate=None):
+def check_evidence(ac, evidence, folder, head, problems, notes, strict=False, candidate=None, approved=None):
     """An AUTO row marked PASS against the evidence_record.py files its 證據 cell names.
-    strict: uncommitted changes, a label naming another AC, a legacy record and a record without git HEAD fail instead
-    of being noted. candidate: the commit under review; the record's HEAD is compared with it instead of the report's
-    (exactly for a Strict order, as a prefix otherwise)."""
+    strict: uncommitted changes, a label naming another AC, a legacy record, a record without git HEAD and a command
+    other than the approved one fail instead of being noted. candidate: the commit under review; the record's HEAD is
+    compared with it instead of the report's (exactly for a Strict order, as a prefix otherwise). approved: the order's
+    CHECKS command for this AC, or None."""
     names = EVIDENCE_FILE.findall(evidence)
     if not names:
         problems.append(f"{ac}: PASS names no evidence_record file (.json) in 證據")
@@ -437,6 +483,10 @@ def check_evidence(ac, evidence, folder, head, problems, notes, strict=False, ca
         if git.get("dirty"):
             (problems if strict else notes).append(
                 f"{ac}: {name}: recorded with uncommitted changes" + ("; Strict: commit, then record again" if strict else ""))
+        if approved is not None and record["command"] != approved:
+            (problems if strict else notes).append(
+                f"{ac}: {name}: its command is not the order's approved check (CHECKS {ac}); "
+                + ("Strict: record again with exactly that command" if strict else "record again with that command"))
         label = record.get("label")
         if label is not None and ac not in re.split(r"[\s,;/+]+", str(label)):
             (problems if strict else notes).append(
@@ -451,6 +501,7 @@ def check_match(report, order, notes, evidence_dir=None, dispatch=None, order_pa
     order_text = order.decode("utf-8-sig")
     order_problems = []
     wanted, got = ac_table(order_text, order_problems), ac_table(report, problems)
+    checks = order_checks(order_text, order_problems) or {}
     problems.extend(f"order: {p}" for p in order_problems)
     strict = bool(re.search(r"^\s*GOVERNANCE\s*=\s*Strict\b", order_text, re.M))
     head_value = check_head(report, problems, notes, strict)
@@ -487,7 +538,7 @@ def check_match(report, order, notes, evidence_dir=None, dispatch=None, order_pa
         if status == "PASS" and (blank(evidence) or evidence.upper().startswith("NONE")):
             problems.append(f"{ac}: PASS without evidence")
         elif status == "PASS" and kind == "AUTO" and evidence_dir:
-            check_evidence(ac, evidence, evidence_dir, head, problems, notes, strict, candidate)
+            check_evidence(ac, evidence, evidence_dir, head, problems, notes, strict, candidate, checks.get(ac))
         if status in ("PASS", "FAIL") and blank(row.get("actual", "")):
             problems.append(f"{ac}: {status} with 實際 empty")
     for ac in sorted(got.keys() - wanted.keys()):

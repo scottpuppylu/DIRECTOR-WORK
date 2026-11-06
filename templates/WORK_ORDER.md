@@ -47,7 +47,13 @@ repo 與分支、工作樹乾淨、未提交修改、相關規範、相依、實
 |---|---|---|---|---|
 | AC-1 | <AUTO / REVIEW / PO> | | | |
 
-- `AUTO`：有指令可以重跑。總監自己重跑後判定；驗證指令用 `evidence_record.py` 留紀錄。
+- `AUTO`：有指令可以重跑。總監自己重跑後判定；驗證指令用 `evidence_record.py` 留紀錄。核准的指令寫在下面的 `CHECKS:`（選用，Strict 建議寫），一條 AUTO 一行，JSON 字串陣列、不經 shell、不能含 ` #`；派工雜湊會鎖住它，總監用 `evidence_record.py verify --rerun --order` 跑的就是這一行，worker 用同一個指令記錄：
+
+```text
+CHECKS:
+- AC-1: ["python", "-I", "-m", "unittest", "tests.test_parser"]
+```
+
 - `REVIEW`：要有人看成品。開工前寫明誰看、從哪個角度看、看多大範圍、看哪些常識閘門項目（docs/07）。worker 最多填 `READY_FOR_REVIEW`。
 - `PO`：PO 保留的判定，例如最終驗收。worker 和總監都只填 `PENDING_PO`。
 

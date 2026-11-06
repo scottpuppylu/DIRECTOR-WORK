@@ -958,13 +958,15 @@ def test_evidence(tmp):
     if data["output_tail"] != ["hello"] or len(data["artifacts"]) != 1 or data["artifacts"][0]["sha256"] is None:
         failures.append(f"record content: {data}")
     expect("verify same", *common, 0, "verify", record, says="EVIDENCE_VERIFY: OK integrity=same test=not-rerun artifacts=1 missing=0 rerun=no")
-    expect("verify with rerun", *common, 0, "verify", record, "--rerun", says="EVIDENCE_VERIFY: OK integrity=same test=passed artifacts=1 missing=0 rerun=yes")
+    expect("verify with the recorded command", *common, 0, "verify", record, "--rerun-recorded",
+           says="EVIDENCE_VERIFY: OK integrity=same test=recorded-command-passed artifacts=1 missing=0 rerun=yes source=record",
+           lacks="test=passed")
     art.write_text("changed", encoding="utf-8")
     expect("verify sees a changed artifact", *common, 1, "verify", record, says=["artifact changed: ", "MISMATCH integrity=changed"])
-    expect("rerun rebuilds it", *common, 0, "verify", record, "--rerun", says="OK")
+    expect("rerun rebuilds it", *common, 0, "verify", record, "--rerun-recorded", says="OK")
     art.unlink()
     expect("verify sees a gone artifact", *common, 1, "verify", record, says=["artifact gone: ", "MISMATCH integrity=same test=not-rerun artifacts=1 missing=1"])
-    expect("rerun rebuilds a gone artifact", *common, 0, "verify", record, "--rerun", says="OK")
+    expect("rerun rebuilds a gone artifact", *common, 0, "verify", record, "--rerun-recorded", says="OK")
     shell = out / "shell.json"
     shell.write_text('{"exit_code": 0}', encoding="utf-8")
     expect("verify refuses a record without the fields", *common, 2, "verify", shell, says=["- missing field command", "- missing field artifacts", "NOT_RUN not an evidence record (2 problems)"])
@@ -988,8 +990,9 @@ def test_evidence(tmp):
     expect("missing artifact fails", *common, 3, "run", "--out-dir", out, "--label", "AC-3", "--artifact", tmp / "nope", "--", py, "-c", "0", says="missing=1")
     expect("verify never passes a record whose artifact was missing", *common, 1, "verify", next(out.glob("*-AC-3.json")),
            says=["artifact missing when recorded: ", "MISMATCH integrity=same test=not-rerun artifacts=1 missing=1"])
-    expect("verify never passes a record whose artifact was missing, even rerun", *common, 1, "verify", next(out.glob("*-AC-3.json")), "--rerun",
-           says=["artifact missing when recorded: ", "MISMATCH integrity=same test=passed artifacts=1 missing=1 rerun=yes"])
+    expect("verify never passes a record whose artifact was missing, even rerun", *common, 1, "verify", next(out.glob("*-AC-3.json")),
+           "--rerun-recorded", says=["artifact missing when recorded: ",
+                                     "MISMATCH integrity=same test=recorded-command-passed artifacts=1 missing=1 rerun=yes"])
     expect("verify reports a failing command as test=failed", *common, 1, "verify", next(out.glob("*-AC-2.json")),
            says="MISMATCH integrity=same test=failed(recorded exit 7) artifacts=0 missing=0")
     expect("unknown command", *common, 127, "run", "--out-dir", out, "--label", "AC-4", "--", "no-such-command-xyz")
@@ -1019,6 +1022,121 @@ def test_evidence(tmp):
     expect("folder sees a new file", *common, 1, "verify", rec, says="MISMATCH")
 
 
+def with_checks(order, *lines):
+    """The order with a `CHECKS:` list of lines placed after its acceptance table."""
+    return order.replace("\n- DELIVERABLES", "\nCHECKS:\n" + "".join(f"- {line}\n" for line in lines) + "\n- DELIVERABLES", 1)
+
+
+def test_order_checks(tmp):
+    """v0.13 (A06 A07): the order's CHECKS list. --order checks its form; --match --evidence-dir compares each record's
+    command with the approved one (Strict fails, Standard notes); orders without CHECKS give the same result as before."""
+    global total
+    order = TYPED_ORDER.format(base="abc123")
+    good = '"python", "-c", "0"'
+    gate(tmp, "checks_good", "order", with_checks(order, f"AC-1: [{good}]"), 0)
+    for name, line, says in (("checks_not_json", "AC-1: python -c 0", "CHECKS: `AC-1: python -c 0` is not `AC-n:"),
+                             ("checks_empty_array", "AC-1: []", "CHECKS: `AC-1: []` is not"),
+                             ("checks_review_ac", f"AC-2: [{good}]", "CHECKS: AC-2 is REVIEW; only an AUTO criterion"),
+                             ("checks_unknown_ac", f"AC-9: [{good}]", "CHECKS: AC-9 is not an acceptance criterion")):
+        gate(tmp, name, "order", with_checks(order, line), 1, says=says)
+    strict = order.replace("GOVERNANCE     = Standard", "GOVERNANCE     = Strict")
+    gate(tmp, "checks_strict_missing_noted", "order", strict, 0, says="~ CHECKS: Strict order without an approved check for AUTO AC-1")
+    head = "0123456789abcdef0123456789abcdef01234567"
+    for governance, text in (("Strict", strict), ("Standard", order)):
+        for name, command, code in (("same", ["python", "-c", "0"], 0), ("other", ["python", "-c", "1"], None)):
+            folder = tmp / "order_checks" / governance / name
+            folder.mkdir(parents=True)
+            body = with_checks(text, f"AC-1: [{good}]")
+            digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+            (folder / "WO-001-parser.md").write_text(body, encoding="utf-8")
+            (folder / "log.md").write_text(f"DISPATCH WO-001 rev=1 sha={digest}\n", encoding="utf-8")
+            evidence_file(folder, "e.json", head, command=command)
+            (folder / "report.md").write_text(match_report(list(ACCEPTANCE.values()), "PARTIAL", digest).replace(
+                "/ c / d0d0d0d / yes", f"/ c / {head} / yes", 1), encoding="utf-8")
+            want = "AC-1: e.json: its command is not the order's approved check (CHECKS AC-1)"
+            if code is None:
+                code, says = (1, f"- {want}; Strict") if governance == "Strict" else (0, f"~ {want}")
+            else:
+                says = None
+            expect(f"match CHECKS {governance} {name}", "gate_check.py", code, "--match", folder / "report.md",
+                   folder / "WO-001-parser.md", "--evidence-dir", folder, "--dispatch-log", folder / "log.md",
+                   "--candidate", head, says=says, lacks=None if says else "approved check")
+
+
+def test_trusted_rerun(tmp):
+    """v0.13 (A06 A07): `verify --rerun` runs the order's approved check at the candidate commit, in a clean checkout,
+    and only after the order matches its DISPATCH line. The record's command is compared, never run."""
+    global total
+    root = tmp / "trusted"
+    repo, out = root / "repo", root / "records"
+    repo.mkdir(parents=True)
+    py = sys.executable
+
+    def git(*args):
+        return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args], cwd=repo, check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    (repo / "check.py").write_text("print('checked')\n", encoding="utf-8")
+    git("init", "-q", "-b", "main")
+    git("add", "-A")
+    git("commit", "-q", "-m", "a")
+    first = git("rev-parse", "HEAD")
+    order = root / "WO-001-parser.md"
+    body = with_checks(TYPED_ORDER.format(base=first), f"AC-1: {json.dumps([py, 'check.py'])}")
+    order.write_text(body, encoding="utf-8")
+    digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    log = root / "log.md"
+    log.write_text(f"DISPATCH WO-001 rev=1 sha={digest}\n", encoding="utf-8")
+    expect("trusted: record the approved check", "evidence_record.py", 0, "run", "--out-dir", out, "--label", "AC-1",
+           "--cwd", repo, "--", py, "check.py", says="exit=0")
+    record = next(out.glob("*-AC-1.json"))
+    data = json.loads(record.read_text(encoding="utf-8"))
+
+    def variant(name, **change):
+        path = root / f"{name}.json"
+        path.write_text(json.dumps({**data, **change}), encoding="utf-8")
+        return path
+
+    def verify(name, code, path, says=None, lacks=None, candidate=None, dispatch=log, **flags):
+        args = ["--order", order, "--dispatch-log", dispatch, "--repo", repo, "--candidate", candidate or first]
+        expect(f"trusted: {name}", "evidence_record.py", code, "verify", path, "--rerun", *args, says=says, lacks=lacks)
+
+    verify("approved check at the candidate", 0, record,
+           says=f"EVIDENCE_VERIFY: OK integrity=same test=passed artifacts=0 missing=0 rerun=yes check=AC-1 source=order candidate={first[:12]}")
+    expect("trusted: --rerun alone is refused", "evidence_record.py", 2, "verify", record, "--rerun",
+           says="NOT_RUN --rerun runs the order's approved check and needs --order --dispatch-log --repo --candidate")
+    expect("trusted: --rerun-recorded never says passed", "evidence_record.py", 0, "verify", record, "--rerun-recorded",
+           says="test=recorded-command-passed", lacks="test=passed")
+    expect("trusted: --order needs --rerun", "evidence_record.py", 2, "verify", record, "--order", order)
+    expect("trusted: --candidate needs 40 hex digits", "evidence_record.py", 2, "verify", record, "--rerun", "--order", order,
+           "--dispatch-log", log, "--repo", repo, "--candidate", first[:7])
+    marker = root / "tampered.txt"
+    tampered = variant("tampered", command=[py, "-c", f"open({str(marker)!r}, 'w').write('ran')"])
+    verify("a tampered command is compared, not run", 1, tampered,
+           says=["- record command differs from the approved check", "MISMATCH", "test=passed"])
+    total += 1
+    if marker.exists():
+        failures.append("trusted: the tampered command in the record ran")
+    verify("a label without an approved check", 2, variant("other_label", label="AC-2"),
+           says="NOT_RUN the record's label 'AC-2' names no AC with an approved check")
+    for name, line, says in (("another hash", f"DISPATCH WO-001 rev=1 sha={'0' * 64}", "is not the one logged at dispatch"),
+                             ("another revision", f"DISPATCH WO-001 rev=2 sha={digest}", "logs rev=2, the order is at REVISION 1"),
+                             ("no line", "nothing here", "NOT_RUN no DISPATCH line for WO-001 / WO-001-parser")):
+        other_log = root / f"log_{name.replace(' ', '_')}.md"
+        other_log.write_text(line + "\n", encoding="utf-8")
+        verify(f"DISPATCH {name}", 2, record, says=says, dispatch=other_log)
+    (repo / "stray.txt").write_text("x\n", encoding="utf-8")
+    verify("an untracked file refuses", 2, record, says="has changed or untracked files")
+    (repo / "stray.txt").unlink()
+    (repo / "notes.md").write_text("b\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "b")
+    second = git("rev-parse", "HEAD")
+    verify("the repo is not at the candidate", 2, record, says=f"is at {second[:12]}, not the candidate {first[:12]}")
+    verify("a record from another commit", 1, record, candidate=second,
+           says=[f"- recorded at HEAD {first[:12]}, the candidate is {second[:12]}", "MISMATCH"])
+
+
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="director_work_selftest_")).resolve()
@@ -1040,6 +1158,8 @@ def main():
         test_must_read_size()
         test_hook(tmp)
         test_evidence(tmp)
+        test_order_checks(tmp)
+        test_trusted_rerun(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     for failure in failures:
