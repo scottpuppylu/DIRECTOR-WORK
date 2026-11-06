@@ -1205,6 +1205,29 @@ def test_hook_protect(tmp):
                                   input=json.dumps({"tool_name": "Write", "tool_input": {"file_path": short + "\\orders\\x.md"}}))
             if done.returncode != 2:
                 failures.append(f"hook_guard protect 8.3 name {short}: expected exit 2, got {done.returncode}")
+        # v0.13 batch 3 (H01 H02): extended-length and device prefixes, NTFS stream names, file identity
+        log = str(director / "DIRECTOR_LOG.md")
+        guard("extended-length prefix (H01)", 2, "Write", "\\\\?\\" + log)
+        guard("extended-length prefix and ::$DATA (H01)", 2, "Write", "\\\\?\\" + log + "::$DATA")
+        guard("named stream of an order", 2, "Edit", str(director / "orders" / "WO-001-a.md") + ":note")
+        guard("dot-device prefix of a drive path", 2, "Write", "\\\\.\\" + log)
+        guard("GLOBALROOT device path (H02)", 2, "Write", "\\\\?\\GLOBALROOT\\Device\\HarddiskVolume1\\x.md")
+        guard("extended-length prefix elsewhere", 0, "Write", "\\\\?\\" + str(worker / "src.py"))
+        hard = tmp / "protect" / "log-hardlink.md"
+        try:
+            os.link(director / "DIRECTOR_LOG.md", hard)
+        except OSError as error:
+            print(f"SKIP hook_guard hardlink case: {error}")
+        else:
+            guard("hardlink of DIRECTOR_LOG.md (same file id)", 2, "Write", hard)
+            hard.unlink()
+        drive = os.path.splitdrive(str(director))[0]
+        unc = f"\\\\localhost\\{drive[0]}$" + str(director)[len(drive):] if drive.endswith(":") else None
+        if unc and os.path.isdir(unc):
+            guard("administrative UNC share of an existing order", 2, "Edit", unc + "\\orders\\WO-001-a.md")
+            guard("new file in orders through the UNC share", 2, "Write", unc + "\\orders\\WO-003.md")
+        else:
+            print(f"SKIP hook_guard UNC case: {unc} is not reachable")
 
     repo = tmp / "protect" / "repo"
     repo.mkdir()
@@ -1230,6 +1253,26 @@ def test_hook_protect(tmp):
     total += 1
     if len(entries) != 1 or entries[0]["matcher"] != "Bash|PowerShell" or "--protect" in entries[0]["hooks"][0]["command"]:
         failures.append(f"setup --director-worktree: PreToolUse is {entries}")
+
+    # v0.13 batch 3 (H04): the whole command is compared, and the installed hook is run once to allow, once to block
+    settings = repo / ".claude" / "settings.local.json"
+    expect("a protected install tests the hook", "setup_project_settings.py", 0, *setup, "--protect-director", director,
+           "--apply", says="(hook test: allow=0 block=2 block-write=2)")
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    good = data["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    dead = (tmp / "protect" / "gone" / "hook_guard.py").as_posix()
+    data["hooks"]["PreToolUse"][0]["hooks"][0]["command"] = good.replace((TOOLS / "hook_guard.py").as_posix(), dead)
+    settings.write_text(json.dumps(data), encoding="utf-8")
+    expect("a hook_guard.py that is gone is not OK (H04)", "setup_project_settings.py", 1, *setup, "--protect-director",
+           director, says=["MISSING", "hooks.PreToolUse command"])
+    expect("plain --hooks does not accept it either", "setup_project_settings.py", 1, *setup, "--hooks",
+           says="hooks.PreToolUse command")
+    expect("--apply writes the working command back", "setup_project_settings.py", 0, *setup, "--hooks", "--apply",
+           says=["SET", "block-write=2"])
+    total += 1
+    command = json.loads(settings.read_text(encoding="utf-8"))["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    if command != good:
+        failures.append(f"setup --hooks --apply kept {command!r}, wanted {good!r} (with its --protect)")
 
 
 def test_hook(tmp):

@@ -38,7 +38,11 @@ python -I -X utf8 setup_project_settings.py --protect-director <DIRECTOR> --dire
 - 新開 worktree 後要再跑一次（這個檔案不跟著 git 走）。
 - `--hooks`：加一個 `Bash|PowerShell` 的 PreToolUse hook，用目前的 Python 跑 `hook_guard.py`；已有就不重複加。
 - `--protect-director <DIRECTOR>`（設定檔 `protect_director`，隱含 `--hooks`）：hook 的 matcher 改成 `Bash|PowerShell|Write|Edit`，指令加 `--protect "<DIRECTOR>"`。`--director-worktree`（設定檔 `director_worktree`）指定的總監 worktree 維持原本的 hook，總監照常改工單。
-- 已裝的 hook_guard 項目和要的不同（matcher 或 `--protect` 不同）時，回報 `MISSING (hooks.PreToolUse matcher)`；`--apply` 就地換掉，不另外追加。沒給 `--protect-director` 時，和 v0.12 一樣，有任何 hook_guard 項目就算 OK。
+- 已裝的 hook_guard 項目和要的不同時，`--apply` 就地換掉，不另外追加：
+  - matcher 或 `--protect` 不同：`MISSING (hooks.PreToolUse matcher)`。
+  - 指令不是逐字相同（換了 Python、hook_guard.py 搬走或不存在）：`MISSING (hooks.PreToolUse command)`。
+  - 沒給 `--protect-director` 時，沿用已裝項目的 `--protect`（或沒有）。
+- 項目到位後，實際跑一次 hook：一個要放行的指令（exit 0）、一個要擋的指令（exit 2），有 `--protect` 時再加一個寫進 `orders/` 的 Write（exit 2）。結果印在 OK / SET 那行：`(hook test: allow=0 block=2 block-write=2)`；不對就是 `HOOK_FAIL`，exit 1。
 
 ## hook_guard.py
 
@@ -51,7 +55,9 @@ python -I -X utf8 setup_project_settings.py --protect-director <DIRECTOR> --dire
 - 清理員的 session 不裝這個 hook：它要刪 worktree，而 `worktree remove / prune` 會被擋。
 - 只是安全帶，不是安全邊界：寫在腳本檔裡或執行時才組出來的指令看不到。PO 核准的 push 由 PO 自己執行，或先移除 hook。
 - `--protect <DIRECTOR>`：Write / Edit 的 `file_path` 落在 `<DIRECTOR>/orders/` 底下或就是 `<DIRECTOR>/DIRECTOR_LOG.md` 時 exit 2。相對路徑以 hook 輸入的 `cwd` 為準；兩邊都先 resolve（展開 junction、symlink、`..`），Windows 再展開 8.3 短檔名、不分大小寫比對。
-- `--protect` 只防手誤，擋不到：用 Bash / PowerShell 寫檔、MultiEdit、NotebookEdit、MCP 工具寫檔、hardlink、網路磁碟和 `subst` 磁碟代號，以及 hook 執行時目標還不存在的 junction。
+- Windows 路徑先正規化：去掉 `\\?\` 和 `\\.\` 前綴（磁碟或 UNC 路徑）；NTFS 資料流（`DIRECTOR_LOG.md::$DATA`、`x.md:note`）視為檔案本身。其他裝置路徑（GLOBALROOT、volume GUID）不比對，一律擋下並請改用磁碟或 UNC 路徑。
+- 目標或它的上層資料夾已存在時，再用檔案識別（磁碟序號＋檔案編號）和 `DIRECTOR_LOG.md`、`orders/` 底下的每個檔案和資料夾比對，所以同一個物件換個名字（UNC 別名、既有檔案的 hardlink）也會擋下。
+- `--protect` 只防手誤，擋不到：用 Bash / PowerShell 寫檔、MultiEdit、NotebookEdit、MCP 工具寫檔、經由別名（網路磁碟、`subst` 磁碟代號、UNC 共用）建立還不存在的 `DIRECTOR_LOG.md` 或 `orders/` 資料夾，以及 hook 執行時目標還不存在的 junction。symlink 會先 resolve，但一般帳號沒有建立 symlink 的權限（WinError 1314），selftest 只測 junction。真的要擋，請用作業系統的寫入權限保護 DIRECTOR 資料夾。
 
 ## context_probe.py
 

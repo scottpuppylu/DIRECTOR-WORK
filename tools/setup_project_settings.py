@@ -19,7 +19,11 @@ Plugins that come from the desktop app / claude.ai: whether this setting turns t
 --hooks also adds a PreToolUse hook that runs hook_guard.py (next to this file) before every Bash / PowerShell call.
 --protect-director DIR makes that hook also cover Write / Edit with --protect DIR (no edits to DIR/orders/** and
 DIR/DIRECTOR_LOG.md); the worktree named by --director-worktree keeps the plain hook. An installed hook_guard entry
-that differs from the wanted one shows MISSING (hooks.PreToolUse matcher), and --apply replaces it in place.
+with another matcher or --protect shows MISSING (hooks.PreToolUse matcher); one whose command is not exactly the one
+this copy would write (another Python, a hook_guard.py that moved) shows MISSING (hooks.PreToolUse command). --apply
+replaces it in place. Without --protect-director the installed entry's --protect is kept. A hook that is in place is
+then run twice, on a command it must allow and on one it must block (also a Write into DIR/orders/ when protected);
+a hook that does not answer 0 and 2 is HOOK_FAIL.
 """
 import argparse
 import datetime
@@ -28,6 +32,7 @@ import json
 import os
 import pathlib
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -86,12 +91,40 @@ def protect_arg(command):
     return found.group(1) if found else None
 
 
-def hook_entry_matches(entry, want):
-    """Same matcher and same --protect (or none) as want; the Python path may differ."""
-    commands = [str(h.get("command", "")) for h in entry.get("hooks") or [] if isinstance(h, dict)]
-    guard = [c for c in commands if "hook_guard.py" in c]
-    return (entry.get("matcher") == want["matcher"] and len(guard) == 1
-            and protect_arg(guard[0]) == protect_arg(want["hooks"][0]["command"]))
+def hook_command(entry):
+    """The one hook_guard command of an entry; None when it has none or several."""
+    guard = [str(h.get("command", "")) for h in entry.get("hooks") or []
+             if isinstance(h, dict) and "hook_guard.py" in str(h.get("command", ""))]
+    return guard[0] if len(guard) == 1 else None
+
+
+def hook_entry_matches(entry, want, exact=True):
+    """Same matcher and same --protect (or none) as want; with exact, also the same command, word for word (H04)."""
+    command = hook_command(entry)
+    wanted = want["hooks"][0]["command"]
+    return (entry.get("matcher") == want["matcher"] and command is not None
+            and protect_arg(command) == protect_arg(wanted) and (not exact or command == wanted))
+
+
+def hook_works(command, protect):
+    """Run an installed hook_guard command on calls it must allow (exit 0) and block (exit 2): (ok, detail) (H04)."""
+    try:
+        argv = shlex.split(command)
+    except ValueError as error:
+        return False, f"command does not parse: {error}"
+    calls = [("allow", {"tool_name": "Bash", "tool_input": {"command": "git status"}}, 0),
+             ("block", {"tool_name": "Bash", "tool_input": {"command": "git push"}}, 2)]
+    if protect:
+        calls.append(("block-write", {"tool_name": "Write", "tool_input": {"file_path": str(pathlib.Path(protect) / "orders" / "hook-test.md")}}, 2))
+    results, ok = [], True
+    for name, call, code in calls:
+        try:
+            got = subprocess.run(argv, input=json.dumps(call), capture_output=True, text=True, timeout=60).returncode
+        except (OSError, subprocess.TimeoutExpired) as error:
+            got = type(error).__name__
+        results.append(f"{name}={got}")
+        ok = ok and got == code
+    return ok, " ".join(results)
 
 
 def install_hook(data, want):
@@ -110,6 +143,17 @@ def install_hook(data, want):
     data["hooks"]["PreToolUse"] = kept
 
 
+def tested(wt, label, want):
+    """Print the OK / SET line; with a hook, run it first (H04). Returns 1 when the hook does not work."""
+    if want is None:
+        print(f"{label:11} {wt}")
+        return 0
+    command = want["hooks"][0]["command"]
+    ok, detail = hook_works(command, protect_arg(command))
+    print(f"{label:11} {wt} (hook test: {detail})" if ok else f"HOOK_FAIL   {wt} (hook test: {detail}; expected allow=0 block=2)")
+    return 0 if ok else 1
+
+
 def wanted_missing(data, window, plugins_off, hooks=False, want=None):
     miss = []
     if data.get("autoCompactWindow") != window:
@@ -120,8 +164,10 @@ def wanted_missing(data, window, plugins_off, hooks=False, want=None):
     miss += [f"enabledPlugins.{p}" for p in plugins_off if ep.get(p) is not False]
     if hooks and not has_hook(data):
         miss.append("hooks.PreToolUse")
-    elif hooks and want is not None and not any(hook_entry_matches(e, want) for e in guard_entries(data)):
+    elif hooks and want is not None and not any(hook_entry_matches(e, want, exact=False) for e in guard_entries(data)):
         miss.append("hooks.PreToolUse matcher")
+    elif hooks and want is not None and not any(hook_entry_matches(e, want) for e in guard_entries(data)):
+        miss.append("hooks.PreToolUse command")
     return miss
 
 
@@ -205,11 +251,14 @@ def main():
                   ".gitignore changes the repo and needs the PO)")
             problems += 1
             continue
-        # without --protect-director any hook_guard entry counts, as in v0.12
         want = None if protect is None else hook_entry(None if director_wt and wt.resolve() == director_wt else protect)
+        if hooks and want is None:  # without --protect-director the installed entry keeps its --protect (or none)
+            installed = [hook_command(e) for e in guard_entries(data)]
+            kept = protect_arg(installed[0]) if installed and installed[0] else None
+            want = hook_entry(pathlib.Path(kept) if kept else None)
         miss = wanted_missing(data, window, plugins_off, hooks, want)
         if not miss:
-            print(f"OK          {wt}")
+            problems += tested(wt, "OK", want if hooks else None)
             continue
         if not a.apply:
             print(f"MISSING     {wt} ({', '.join(miss)})")
@@ -235,7 +284,7 @@ def main():
             print(f"FAIL        {wt} (still missing: {', '.join(again)})")
             problems += 1
         else:
-            print(f"SET         {wt}")
+            problems += tested(wt, "SET", want if hooks else None)
     print("RESULT", "OK" if not problems else f"{problems} worktree(s) need attention")
     return 1 if problems else 0
 
