@@ -6,6 +6,44 @@
 - **MINOR**：新增規則、文件、工具或選項，舊檔案照樣通過。
 - **PATCH**：修正文字、修 bug，規則不變。
 
+## 0.13.0 — 2026-11-06
+
+把 Strict 的證據鏈綁在一個候選 commit 上，讓重跑只執行總監核准的檢查，並讓工單版次和 Git 狀態對得上。另外把每輪必讀文件縮小 1,058 bytes。版本照總監派工單定為 MINOR；會讓舊檔案或舊指令不通過的項目列在「對齊初衷」第 5 題和遷移。
+
+- `evidence_record.py verify --rerun` 改成跑工單 `CHECKS:` 裡核准的指令（JSON 字串陣列，不經 shell，工單雜湊包含它，所以派工時的 `DISPATCH` 行已鎖住）。要給 `--order`、`--dispatch-log`、`--repo`、`--candidate`，少一個就 `NOT_RUN`、exit 2。工單雜湊和版次要等於最新的 `DISPATCH` 行，repo 的 HEAD 要等於候選 commit 而且工作樹乾淨。紀錄的指令不同、或不是在候選 commit 記的，都是 `MISMATCH`。舊行為改名 `--rerun-recorded`，結論寫 `test=recorded-command-passed source=record`，絕不印 `test=passed`。
+- `evidence_record.py`：欄位型別不對（例如 `artifacts=42`、`command=[1]`）印 `NOT_RUN not an evidence record`、exit 2，不再丟 traceback（`gate_check.py` 也一樣）。
+- `gate_check.py --order` 查 `CHECKS:` 格式；Strict 工單有 AUTO 條件卻沒有 CHECKS 只提示。`--match --evidence-dir` 時紀錄的指令要和核准的指令相同（Strict 失敗、Standard 提示）。
+- `gate_check.py --match` 新增 `--candidate <40 位>`。Strict 工單少了 `--dispatch-log`、`--candidate`、有 AUTO 列填 PASS 卻沒給 `--evidence-dir`、報告 HEAD 不是完整 40 位、證據是舊紀錄或沒有 git HEAD、紀錄或報告的 HEAD 不等於候選 commit，都失敗。Standard 和 Direct 給了 `--candidate` 才比對。
+- 版次：`DISPATCH` 的 `rev=` 要等於工單的 REVISION；報告 `ORDER:` 行的 REVISION 要等於工單（沒寫：Strict 失敗、Standard 提示）。`templates/GATE_VERDICT.md` 加 `ORDER:` 和 `CANDIDATE_HEAD:` 兩行。`trace_report.py` 的裁決欄只放和選中報告同版次的裁決，對不到版次或 HEAD 的列在「裁決對不到報告版次」。
+- `trace_report.py --decisions 檔案`（選用，可重複）：列出 TRACES_TO 寫了卻不在需求或決定檔裡的編號，以及沒有任何工單追溯的需求。
+- `scope_check.py` 看四種 Git 狀態的聯集：已 commit、已暫存、未暫存、沒被忽略的新檔。已 commit 或已暫存、之後在工作樹改回原樣的修改也看得到。結論行上面多一行 `STATES: committed=n staged=n unstaged=n untracked=n`；結論行格式不變。
+- 工單可加選用的 `REQUIRED_CHANGES:` 清單：`scope_check.py` 對每條沒對到改動的 glob 印 `MISSING`、判越界，結論行多 ` missing=n`（沒有這個清單，輸出和以前一樣）。`gate_check.py --order` 查每條都在 SCOPE 裡、不在 FORBIDDEN 裡。
+- 每輪必讀文件 13,417 → 12,359 bytes（LF，−1,058）。docs/01、03、06、08「為什麼」段裡純理由的 8 條原文逐字搬到 `docs/10` 的「每輪必讀規則的理由」，有規範句的條目留在原處，每份留一行 `- 其他理由見 docs/10。`。docs/06 的 RESUME_STATE 欄位清單改成「照 `templates/RESUME_STATE.md` 逐欄寫齊」（範本已逐欄列出）。「## 規則」段其他部分逐位元組不變。`MUST_READ_LIMIT` 降到 12,359。
+- `docs/11`：Strict 工單的規格審查（`SPEC_REVIEW`）在放上 PO 待決頁之前做完；PO 說「開」的那一輪只寫 `DISPATCH` 行和開 worker。`docs/02`、`templates/SPEC_REVIEW.md` 同步。
+- `setup_project_settings.py --hooks --protect-director <DIRECTOR> [--director-worktree <總監的 worktree>]`（或 config 的 `protect_director`、`director_worktree`）：worker 的 hook matcher 改成 `Bash|PowerShell|Write|Edit`，`hook_guard.py --protect` 擋 Write / Edit 改 `orders/` 和 `DIRECTOR_LOG.md`（處理相對路徑、大小寫、`..`、junction、8.3 短檔名）。總監自己的 worktree 維持舊項目。舊的 hook_guard 項目在 `--apply` 時就地換掉，不重複追加。不加 `--protect-director` 和 v0.12 完全相同。這只是防手誤，不是安全隔離（限制見 `docs/11`、`tools/README.md`）。
+- `selftest.py` 加上面各項的正反案例（285 → 408 項）。
+
+對齊初衷：
+1. 幫到誰：外部稽核（Codex）和 SDD 報告指出的漏洞，先在暫存 fixture 逐項重現才修：Strict 少給旗標只出提示、`--rerun` 會執行紀錄裡被竄改的指令、`artifacts=42` 丟 traceback、DISPATCH 版次不同照收、已暫存後改回的 FORBIDDEN 修改看不到、裁決配到別版的報告。重現腳本修正前 A01–A11 是 exit 0 或 traceback，修正後是 1 或 2。
+2. Desktop：在 Desktop Code 分頁的 worker session 實作，Python 3.11 跑 selftest 全過。junction 和 8.3 短檔名案在 Windows 實跑，沒有 SKIP。`--protect-director` 還沒在真實 worker 資料夾裝過；`CHECKS` 和 `--candidate` 還沒在真實工單上跑過，都是 NOT_VERIFIED。
+3. 服務：成品要真的對（5）：重跑只跑總監核准的檢查，證據、報告、裁決指向同一個 commit。PO 不用盯細節（3）：工具查得出版次和 Git 狀態不一致。零成本（7）：只用標準函式庫。
+4. 核心：每輪必讀變小（13,417 → 12,359 bytes），規則沒有刪，理由搬到 `docs/10`。Direct 不多步驟。PO 不多操作：新參數都是總監下的。
+5. 舊檔案和舊指令：可能新不通過的有四種。Strict 審查少了 `--candidate`、`--dispatch-log` 或 `--evidence-dir`；單獨寫 `verify --rerun` 沒給 `--order`（exit 2）；`scope_check.py` 看到以前漏掉的已暫存或已 commit 修改（當 bug 修，Standard 也會報）；DISPATCH 或報告的版次和工單不同。沒有 `CHECKS` 和 `REQUIRED_CHANGES` 的舊工單，`--order` 結果不變。0.x 升 MAJOR 等於 1.0，要 PO 決定，所以照派工單定為 MINOR。
+
+遷移：
+1. 把 `tools/` 整個重新複製到 `DIRECTOR/tools/`。
+2. Strict 的審查指令補上三個參數：`gate_check.py --match 報告 工單 --dispatch-log DIRECTOR_LOG.md --evidence-dir 證據資料夾 --candidate <git rev-parse worker 分支>`。少一個就失敗。
+3. `CHECKS:` 在 v0.13 只是建議：Strict 工單有 AUTO 條件卻沒寫，只印提示。v0.14 起會變成必要，現在就開始在工單 E 節寫。
+4. `evidence_record.py verify --rerun` 改成執行工單核定的檢查：`verify 紀錄 --rerun --order 工單 --dispatch-log DIRECTOR_LOG.md --repo <候選 commit 的乾淨 worktree> --candidate <40 位>`。舊行為（跑紀錄裡寫的指令）改名 `--rerun-recorded`，不算重跑驗證。重跑會執行候選 commit 的測試碼，在 `git worktree add --detach` 開的乾淨目錄跑。
+5. 報告的 `ORDER:` 行寫 REVISION；裁決加 `ORDER:` 和 `CANDIDATE_HEAD:` 兩行（`templates/GATE_VERDICT.md`）。
+6. 要擋 worker 改工單：重跑 `setup_project_settings.py --hooks --protect-director <DIRECTOR> --director-worktree <總監的 worktree> --apply`，舊的 hook 項目會被換掉。
+
+沒做：
+- 兄弟 repo 共用 `<上層>/DIRECTOR/director_work.json`（稽核 P1-5 / A12）：要設計 config 綁 repo 的欄位，延到 v0.14。
+- hook 不擋 MultiEdit、NotebookEdit 和用 Bash / PowerShell 寫檔：延到 v0.14 評估。
+- `CHECKS` 從提示改成失敗：v0.14。
+- `REQUIRED_CHANGES` 對 SCOPE / FORBIDDEN 的檢查是把每一條當路徑比對，glob 對 glob 只是近似。
+
 ## 0.12.0 — 2026-11-06
 
 補上審查工具查不出來或會誤報的地方：worker 改工單後重算雜湊、只有 `{"exit_code": 0}` 的證據檔、檔名排序選錯報告、沒資料時印 0、檔案被悄悄略過。版本照總監派工單定為 MINOR；會讓舊檔案不通過的項目列在「對齊初衷」第 5 題和遷移。
