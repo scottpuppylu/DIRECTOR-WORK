@@ -6,6 +6,7 @@ UPDATED: <YYYY-MM-DD HH:MM ±TZ，讀 date>
 ## 未關閉
 
 ID: OD-01（要 PO 決定）或 ACT-01（要 PO 動手）
+CREATED: <YYYY-MM-DD HH:MM，讀 date>
 STATUS: open | answered | closed
 QUESTION: <一句話>
 OPTIONS: <A / B / C，各一句影響>

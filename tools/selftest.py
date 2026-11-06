@@ -443,21 +443,43 @@ def test_metrics(tmp):
         "2026-01-03 10:00 +08:00 | RESUMED WO-001 at AC-2; next=run; waiting=NONE; redo=capture.mp4\n"
         "2026-01-02 11:00 +08:00 | BOOTSTRAP_STUCK 第 4 步 tool missing\n"
         "2026-01-02 12:00 +08:00 | SPEC_REVIEW WO-001 tokens=1200 issues=0/1/2 adopted=2\n", encoding="utf-8")
-    (root / "PO_PENDING.md").write_text("ID: OD-1\nSTATUS: open\n\nID: OD-2\nSTATUS: closed\n\nID: ACT-1\nSTATUS: answered\n",
-                                        encoding="utf-8")
+    (root / "PO_PENDING.md").write_text("ID: OD-1\nCREATED: 2026-01-06 09:00\nSTATUS: open\n\nID: OD-2\nCREATED: 2025-12-01 09:00\n"
+                                        "STATUS: closed\n\nID: ACT-1\nSTATUS: answered\n", encoding="utf-8")
     (root / "orders" / "WO-009-old.md").write_text("# WO-009 old style\nGOVERNANCE = Strict\n", encoding="utf-8")
     (root / "orders" / "WO-010.md").write_text(typed.replace("# WO-001", "# WO-010").replace("ISSUED_BY      = director 2026-01-02 10:00",
                                                                                             "ISSUED_BY      = director"), encoding="utf-8")
     expect("metrics counts", "metrics_report.py", 0, "--director", root,
            says=["| 返工次數 | 1（CONTINUE_SAME_WORKER 1、SWITCH_TO_OTHER_WORKER 0）；工單改版 2 次（1 份工單） | 裁決 2 份、工單 3 份 |",
                  "- 像工單但沒有 `ISSUED_BY =` 行，返工和改版都沒算到：1 份：" + str(pathlib.Path("orders", "WO-009-old.md")),
-                 "| 中斷後遺失的工作 | 1 / 恢復 3 次；1 次沒寫 redo= |", "| PO 介入次數 | 3（OD 2、ACT 1），還在等 PO 1 |",
+                 "| 中斷後遺失的工作 | 1 / 恢復 3 次；1 次沒寫 redo= |", "| PO 介入次數 | 3（ACT 1、OD 2），還在等 PO 1；UNDATED 1（沒寫 CREATED） | PO_PENDING.md |",
                  "| 新專案導入卡住 | 1 |", "1 次，tokens 合計 1200，採用的問題 2 個", "UNKNOWN：跑 `usage_report.py`"])
     expect("metrics --since drops older lines", "metrics_report.py", 0, "--director", root, "--since", "2026-01-01",
            says=["| 中斷後遺失的工作 | 1 / 恢復 2 次 |", "範圍：2026-01-01 起"])
     expect("metrics --since drops older orders", "metrics_report.py", 0, "--director", root, "--since", "2026-01-05",
            says=["工單改版 0 次（0 份工單）", "| 新專案導入卡住 | 0 |", "0 次", "| 中斷後遺失的工作 | UNKNOWN：DIRECTOR_LOG 沒有 RESUMED 行",
-                 "照 --since 略過：2 份", "- 工單沒有日期，照算：1 份"])
+                 "照 --since 略過：2 份", "- 工單沒有日期，照算：1 份",
+                 "| PO 介入次數 | 2（ACT 1、OD 1），還在等 PO 1；UNDATED 1（沒寫 CREATED，照算）；--since 前 1 項沒算 |"])
+    elsewhere = tmp / "metrics" / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "DECISIONS_FOR_OWNER.md").write_text(
+        "| ID | 問題 | 狀態 |\n|---|---|---|\n| Q-1 | a | 等待 |\n| Q-2 | b | 已決 |\n", encoding="utf-8")
+    po_cfg = elsewhere / "po.json"
+    po_cfg.write_text(json.dumps({"schema_version": 1, "po_pending_files": ["DECISIONS_FOR_OWNER.md"],
+                                  "po_item_pattern": r"^\|\s*(Q)-\d+", "po_open_pattern": r"等待"}), encoding="utf-8")
+    expect("metrics reads PO entries from the files the config names", "metrics_report.py", 0, "--director", elsewhere,
+           "--config", po_cfg, says="| PO 介入次數 | 2（Q 2），還在等 PO 1；UNDATED 2（沒寫 CREATED） | DECISIONS_FOR_OWNER.md |")
+    (elsewhere / "director_work.json").write_text(po_cfg.read_text(encoding="utf-8"), encoding="utf-8")
+    expect("metrics finds director_work.json in DIRECTOR", "metrics_report.py", 0, "--director", elsewhere, says="2（Q 2）")
+    no_po = tmp / "metrics" / "no_po"
+    no_po.mkdir()
+    expect("metrics without a PO file named in the config", "metrics_report.py", 0, "--director", no_po,
+           "--config", po_cfg, says="UNKNOWN：沒有 DECISIONS_FOR_OWNER.md")
+    po_cfg.write_text(json.dumps({"schema_version": 1, "po_item_pattern": "(unclosed"}), encoding="utf-8")
+    expect("metrics refuses a broken PO pattern", "metrics_report.py", 1, "--director", elsewhere, "--config", po_cfg,
+           says="FAIL config")
+    po_cfg.write_text(json.dumps({"schema_version": 9}), encoding="utf-8")
+    expect("metrics refuses an unknown config version", "metrics_report.py", 1, "--director", elsewhere, "--config", po_cfg,
+           says="schema_version 9 is not 1")
     no_verdict = tmp / "metrics" / "no_verdict"
     shutil.copytree(root / "orders", no_verdict / "orders")
     expect("metrics with orders but no verdict says UNKNOWN, not 0", "metrics_report.py", 0, "--director", no_verdict,
