@@ -10,12 +10,20 @@ verify --rerun --order ORDER --dispatch-log LOG --repo REPO --candidate SHA
           runs the check the Director approved, not the command written in the record:
           1. the order's hash and REVISION must equal its latest DISPATCH line in LOG (exit 2 otherwise);
           2. the record's label names the AC; the order's `CHECKS:` line for that AC is the command (exit 2 if none);
-          3. REPO's HEAD must be the candidate (40 hex digits) and REPO must have no changed or untracked file (exit 2);
-          4. the check runs at REPO's top folder, without a shell. A record made at another commit, or whose command
-             is not the approved one, is a MISMATCH (exit 1); the record's command is only compared, never run.
+          3. REPO's HEAD must be the candidate (40 hex digits); REPO must have no changed or untracked file, no file
+             marked assume-unchanged or skip-worktree and no `refs/replace/` ref (exit 2). Git runs with replace
+             objects off, so a replace ref cannot pass another tree off as the candidate's;
+          4. the program is an absolute path, a path inside the candidate (`./tools/check`) or python / python3 (this
+             Python); a bare name the PATH would resolve is refused (exit 2);
+          5. the candidate's tree is written from git's objects into a new temporary folder, each blob's hash checked,
+             and the check runs there without a shell: never in REPO's working files. A record made at another
+             commit, or whose command is not the approved one, is a MISMATCH (exit 1); the record's command is only
+             compared, never run. Artifacts are hashed again in that folder, at their path relative to the record's
+             cwd; one that comes out different is a MISMATCH;
+          6. after the check REPO is read again: a HEAD, tree, status or flag that changed is a MISMATCH (exit 1).
           The last line adds `check=AC-n source=order candidate=<12 digits>`.
-          This proves the approved check ran at the candidate; it still runs the candidate's own test code, so it is
-          not a sandbox. Rerun in a clean detached worktree: `git worktree add --detach <dir> <candidate>`.
+          The folder holds the committed files only: no .git, no untracked or ignored files. This proves the approved
+          check ran on the candidate's tree; it still runs the candidate's own test code, so it is not a sandbox.
 verify --rerun-recorded
           runs the command written in the record, in its cwd: the old --rerun. Anyone who can edit the record chooses
           what runs, so it reports test=recorded-command-passed source=record, never test=passed.
@@ -34,11 +42,13 @@ import datetime
 import hashlib
 import json
 import locale
+import os
 import pathlib
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -114,10 +124,11 @@ def decode(raw):
         return raw.decode(locale.getpreferredencoding(False), "replace")
 
 
-def execute(command, cwd, tail_lines, timeout, log_path):
-    """Run a command; returns (exit code, timed out, total lines, last lines). Keeps only the tail in memory."""
+def execute(command, cwd, tail_lines, timeout, log_path, program=None):
+    """Run a command; returns (exit code, timed out, total lines, last lines). Keeps only the tail in memory.
+    program: the file to start instead of looking command[0] up in PATH."""
     tail, count = collections.deque(maxlen=tail_lines), [0]
-    program = shutil.which(command[0], path=None) or command[0]
+    program = program or shutil.which(command[0], path=None) or command[0]
     try:
         proc = subprocess.Popen([program, *command[1:]], cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     except OSError as error:
@@ -202,6 +213,125 @@ class Refused(Exception):
     """The trusted rerun cannot start; the message says why. Nothing has run."""
 
 
+PYTHON_NAMES = {"python", "python3", "python.exe", "python3.exe"}
+# git for the trusted rerun: replace objects off, no variables that point git at another repository or index
+GIT_ENV = {key: value for key, value in os.environ.items()
+           if key not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+                          "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_REPLACE_REF_BASE")}
+GIT_ENV["GIT_NO_REPLACE_OBJECTS"] = "1"
+
+
+def git_trusted(repo, *args, raw=False):
+    done = subprocess.run(["git", "-c", "core.useReplaceRefs=false", "-C", str(repo), *args], capture_output=True, env=GIT_ENV)
+    if done.returncode:
+        raise Refused(f"git {' '.join(args)} failed in {repo}: {decode(done.stderr).strip()[:200]}")
+    return done.stdout if raw else decode(done.stdout).strip()
+
+
+def repo_state(repo, commit):
+    """What the trusted rerun requires of REPO, as a list of reasons it is not met (empty when it is)."""
+    out = []
+    head = git_trusted(repo, "rev-parse", "HEAD").lower()
+    if head != commit:
+        out.append(f"{repo} is at {head[:12]}, not the candidate {commit[:12]}; "
+                   f"check it out: git worktree add --detach <dir> {commit}")
+    if git_trusted(repo, "for-each-ref", "--format=%(refname)", "refs/replace/"):
+        out.append(f"{repo} has refs/replace/ refs, which can show another tree under the candidate's name; "
+                   "rerun in a fresh clone without them")
+    if git_trusted(repo, "status", "--porcelain", "--untracked-files=all"):
+        out.append(f"{repo} has changed or untracked files; rerun in a clean checkout of the candidate")
+    flagged = [line[2:] for line in git_trusted(repo, "ls-files", "-v").splitlines() if line[:1] != "H"]
+    if flagged:
+        out.append(f"{repo} marks {len(flagged)} file(s) assume-unchanged or skip-worktree (first: {flagged[0]}), "
+                   "so git status cannot see their changes; clear the flags or rerun in a fresh checkout")
+    return out
+
+
+def check_program(command):
+    """Refuse a program the PATH would choose (R04): it must be absolute, a path inside the candidate or python."""
+    first = command[0]
+    if not (os.path.isabs(first) or "/" in first or "\\" in first or first.lower() in PYTHON_NAMES):
+        raise Refused(f"the approved check starts {first!r}, a bare name the PATH would resolve to some program; write "
+                      "an absolute path, a path inside the candidate such as ./tools/check, or python")
+
+
+def program_in(command, root):
+    """The file the trusted rerun starts for command[0], inside the materialized folder when it is a relative path."""
+    first = command[0]
+    if os.path.isabs(first):
+        return first
+    if first.lower() in PYTHON_NAMES:
+        return sys.executable
+    path = (root / first).resolve()
+    if root not in path.parents or not path.is_file():
+        raise Refused(f"the approved check starts {first!r}, which is not a file inside the candidate")
+    return str(path)
+
+
+def safe_part(part):
+    if part in ("", ".", "..") or part.lower() == ".git":
+        return False
+    return os.name != "nt" or not (set(part) & set('\\:*?"<>|') or part != part.rstrip(" ."))
+
+
+def materialize(repo, commit, dest):
+    """Write the commit's tree from git's objects into dest, checking each blob's hash; returns the file count.
+    A symbolic link is written as a file holding its target, a submodule as an empty folder (as git does without them)."""
+    algorithm = "sha1"
+    try:
+        algorithm = git_trusted(repo, "rev-parse", "--show-object-format") or "sha1"
+    except Refused:
+        pass
+    entries = []
+    for raw in git_trusted(repo, "ls-tree", "-r", "-z", "--full-tree", commit, raw=True).split(b"\0"):
+        if not raw:
+            continue
+        meta, _, name = raw.partition(b"\t")
+        mode, kind, sha = meta.decode("ascii").split()
+        try:
+            path = name.decode("utf-8")
+        except UnicodeDecodeError:
+            raise Refused(f"the candidate has a path that is not UTF-8: {name[:80]!r}")
+        if not all(safe_part(part) for part in path.split("/")):
+            raise Refused(f"the candidate has a path that cannot be written safely here: {path}")
+        entries.append((mode, kind, sha, path))
+    blobs = [entry for entry in entries if entry[1] == "blob"]
+    for mode, kind, sha, path in entries:
+        if kind == "commit":
+            (dest / path).mkdir(parents=True, exist_ok=True)
+    proc = subprocess.Popen(["git", "-c", "core.useReplaceRefs=false", "-C", str(repo), "cat-file", "--batch"],
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=GIT_ENV)
+
+    def feed():
+        try:
+            proc.stdin.write("".join(f"{sha}\n" for _, _, sha, _ in blobs).encode("ascii"))
+        finally:
+            proc.stdin.close()
+
+    writer = threading.Thread(target=feed, daemon=True)
+    writer.start()
+    try:
+        for mode, _, sha, path in blobs:
+            header = proc.stdout.readline().decode("ascii", "replace").split()
+            if len(header) != 3 or header[0] != sha or header[1] != "blob":
+                raise Refused(f"git cat-file could not read {path} ({sha[:12]}): {' '.join(header)}")
+            size = int(header[2])
+            data = proc.stdout.read(size)
+            proc.stdout.read(1)
+            if len(data) != size or hashlib.new(algorithm, b"blob %d\0" % size + data).hexdigest() != sha:
+                raise Refused(f"the object for {path} does not hash to {sha[:12]}")
+            target = dest / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+            if mode == "100755" and os.name != "nt":
+                target.chmod(0o755)
+    finally:
+        proc.stdout.close()
+        proc.wait()
+        writer.join(5)
+    return len(blobs)
+
+
 def approved_check(a, record):
     """(AC, command, folder to run in) for a trusted rerun, after checking the order against its DISPATCH line and the
     repo against the candidate. Raises Refused."""
@@ -236,19 +366,13 @@ def approved_check(a, record):
     if len({json.dumps(checks[name]) for name in names}) > 1:
         raise Refused(f"the record's label names {', '.join(names)}, whose approved checks differ; record once per AC")
 
-    def git(*args):
-        done = subprocess.run(["git", "-C", str(a.repo), *args], capture_output=True)
-        if done.returncode:
-            raise Refused(f"git {' '.join(args)} failed in {a.repo}: {decode(done.stderr).strip()[:200]}")
-        return decode(done.stdout).strip()
-
-    head, wanted = git("rev-parse", "HEAD").lower(), git("rev-parse", "--verify", f"{a.candidate}^{{commit}}").lower()
-    if head != wanted:
-        raise Refused(f"{a.repo} is at {head[:12]}, not the candidate {wanted[:12]}; "
-                      f"check it out: git worktree add --detach <dir> {wanted}")
-    if git("status", "--porcelain", "--untracked-files=all"):
-        raise Refused(f"{a.repo} has changed or untracked files; rerun in a clean checkout of the candidate")
-    return names[0], checks[names[0]], git("rev-parse", "--show-toplevel")
+    approved = checks[names[0]]
+    check_program(approved)
+    wanted = git_trusted(a.repo, "rev-parse", "--verify", f"{a.candidate}^{{commit}}").lower()
+    problems = repo_state(a.repo, wanted)
+    if problems:
+        raise Refused(problems[0])
+    return names[0], approved, wanted, git_trusted(a.repo, "rev-parse", f"{wanted}^{{tree}}")
 
 
 def cmd_verify(a):
@@ -273,27 +397,24 @@ def cmd_verify(a):
     if "schema" not in record:
         print("  ~ legacy record without `schema`: only command, exit_code and artifacts checked")
     artifacts, command, cwd, expected = record["artifacts"], record["command"], record.get("cwd", "."), record["exit_code"]
-    lines, changed, missing, extra = [], 0, 0, ""
+    lines, extra = [], ""
     test = "not-rerun" if expected == 0 else f"failed(recorded exit {expected})"
     if a.rerun:
+        root = None
         try:
-            ac, approved, top = approved_check(a, record)
+            ac, approved, candidate, tree = approved_check(a, record)
+            root = pathlib.Path(tempfile.mkdtemp(prefix="dw-rerun-")).resolve()
+            count = materialize(a.repo, candidate, root)
+            program = program_in(approved, root)
         except Refused as why:
+            if root:
+                shutil.rmtree(root, ignore_errors=True)
             print(f"EVIDENCE_VERIFY: NOT_RUN {why}")
             return 2
-        recorded = ((record.get("git") or {}).get("head") or "").lower()
-        candidate = a.candidate.lower()
-        if recorded != candidate:
-            lines.append(f"recorded at HEAD {recorded[:12] or 'none'}, the candidate is {candidate[:12]}")
-        if command != approved:
-            lines.append(f"record command differs from the approved check: {json.dumps(command, ensure_ascii=False)} "
-                         f"!= {json.dumps(approved, ensure_ascii=False)}")
-        print(f"rerun {ac} in {top}: {approved}")
-        code = execute(approved, top, 1, a.timeout, None)[0]
-        if code != expected:
-            lines.append(f"exit code {expected} -> {code}")
-        test = "passed" if code == 0 else f"failed(rerun exit {code})"
-        extra = f" check={ac} source=order candidate={candidate[:12]}"
+        try:
+            return finish_rerun(a, record, ac, approved, candidate, tree, root, count, program)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
     elif a.rerun_recorded:
         print(f"rerun the recorded command in {cwd}: {command}")
         code = execute(command, cwd, 1, a.timeout, None)[0]
@@ -301,18 +422,60 @@ def cmd_verify(a):
             lines.append(f"exit code {expected} -> {code}")
         test = "recorded-command-passed" if code == 0 else f"failed(rerun exit {code})"
         extra = " source=record"
+    return report(a, artifacts, lines, test, extra)
+
+
+def finish_rerun(a, record, ac, approved, candidate, tree, root, count, program):
+    """Run the approved check in the materialized folder root, then read REPO again and hash the artifacts in root."""
+    lines, expected, command = [], record["exit_code"], record["command"]
+    recorded = ((record.get("git") or {}).get("head") or "").lower()
+    if recorded != candidate:
+        lines.append(f"recorded at HEAD {recorded[:12] or 'none'}, the candidate is {candidate[:12]}")
+    if command != approved:
+        lines.append(f"record command differs from the approved check: {json.dumps(command, ensure_ascii=False)} "
+                     f"!= {json.dumps(approved, ensure_ascii=False)}")
+    print(f"rerun {ac} in a new folder holding the {count} committed files of {candidate[:12]} (not {a.repo}): {approved}")
+    code = execute(approved, str(root), 1, a.timeout, None, program)[0]
+    if code != expected:
+        lines.append(f"exit code {expected} -> {code}")
+    try:
+        after = repo_state(a.repo, candidate)
+        if not after and git_trusted(a.repo, "rev-parse", f"{candidate}^{{tree}}") != tree:
+            after = [f"the candidate's tree is no longer {tree[:12]}"]
+    except Refused as why:
+        after = [str(why)]
+    lines += [f"the repo changed while the check ran: {why}" for why in after]
+    test = "passed" if code == 0 else f"failed(rerun exit {code})"
+    return report(a, record["artifacts"], lines, test, f" check={ac} source=order candidate={candidate[:12]}",
+                  root, pathlib.Path(record.get("cwd") or "."))
+
+
+def report(a, artifacts, lines, test, extra, root=None, base=None):
+    """Hash the artifacts again (in root, at their path relative to base, after a trusted rerun) and print the result."""
+    changed = missing = 0
     for item in artifacts:
         if item["sha256"] is None:
             missing += 1
             lines.append(f"artifact missing when recorded: {item['path']}")
             continue
-        now_hash = hash_artifact(item["path"])["sha256"]
+        path = pathlib.Path(item["path"])
+        if root is not None:
+            try:
+                path = (root / (path.relative_to(base) if path.is_absolute() else path)).resolve()
+            except ValueError:
+                path = None
+            if path is None or (path != root and root not in path.parents):
+                changed += 1
+                lines.append(f"artifact outside the record's cwd, so the rerun cannot make it: {item['path']}")
+                continue
+        now_hash = hash_artifact(path)["sha256"]
+        where = f" (in the rerun folder: {path.relative_to(root).as_posix()})" if root is not None else ""
         if now_hash is None:
             missing += 1
-            lines.append(f"artifact gone: {item['path']}")
+            lines.append(f"artifact gone: {item['path']}{where}")
         elif now_hash != item["sha256"]:
             changed += 1
-            lines.append(f"artifact changed: {item['path']}")
+            lines.append(f"artifact changed: {item['path']}{where}")
     for line in lines:
         print(f"  - {line}")
     ok = not lines and not test.startswith("failed")
@@ -341,7 +504,7 @@ def main():
     how.add_argument("--rerun-recorded", action="store_true", help="run the command written in the record (never test=passed)")
     verify.add_argument("--order", help="with --rerun: the work order whose CHECKS hold the approved command")
     verify.add_argument("--dispatch-log", help="with --rerun: the log with the order's DISPATCH line")
-    verify.add_argument("--repo", help="with --rerun: a clean checkout of the candidate to run the check in")
+    verify.add_argument("--repo", help="with --rerun: a clean checkout of the candidate; the check runs in a copy of its tree")
     verify.add_argument("--candidate", help="with --rerun: the commit under review, 40 hex digits (git rev-parse <branch>)")
     verify.add_argument("--timeout", type=float, help="seconds before the rerun is killed")
     a = ap.parse_args()

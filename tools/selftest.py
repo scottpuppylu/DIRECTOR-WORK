@@ -1388,6 +1388,94 @@ def test_trusted_rerun(tmp):
            says=[f"- recorded at HEAD {first[:12]}, the candidate is {second[:12]}", "MISMATCH"])
 
 
+def test_trusted_isolation(tmp):
+    """v0.13 (R02-R06): the trusted rerun refuses hidden index flags, replace refs and PATH-chosen programs, runs the
+    check in a copy of the candidate's tree, hashes artifacts there, and reads REPO again after the check."""
+    global total
+    root = tmp / "isolation"
+    repo = root / "repo"
+    repo.mkdir(parents=True)
+    py = sys.executable
+
+    def git(*args):
+        return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args], cwd=repo, check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    (repo / "check.py").write_text("from pathlib import Path\nPath('build.txt').write_bytes(b'new\\n')\n"
+                                   "raise SystemExit(0 if Path('payload.txt').read_text() == 'A\\n' else 3)\n", encoding="utf-8")
+    (repo / "payload.txt").write_text("A\n", encoding="utf-8")
+    (repo / ".gitignore").write_text("build.txt\n", encoding="utf-8")
+    git("init", "-q", "-b", "main")
+    git("add", "-A")
+    git("commit", "-q", "-m", "a")
+    first = git("rev-parse", "HEAD")
+    git("checkout", "-q", "-b", "other")
+    (repo / "payload.txt").write_text("B\n", encoding="utf-8")
+    git("commit", "-q", "-am", "b")
+    second = git("rev-parse", "HEAD")
+    git("checkout", "-q", "main")
+    (repo / "build.txt").write_text("stale\n", encoding="utf-8")
+    out = root / "records"
+    expect("isolation: record the check", "evidence_record.py", 0, "run", "--out-dir", out, "--label", "AC-1", "--cwd", repo,
+           "--", py, "check.py", says="exit=0")
+    data = json.loads(next(out.glob("*-AC-1.json")).read_text(encoding="utf-8"))
+    (repo / "build.txt").write_text("stale\n", encoding="utf-8")
+
+    def sha(text):
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    def case(name, code, says, command=None, artifacts=(), lacks=None):
+        command = command or [py, "check.py"]
+        folder = root / name
+        folder.mkdir()
+        body = with_checks(TYPED_ORDER.format(base=first), f"AC-1: {json.dumps(command)}")
+        order = folder / "WO-001-parser.md"
+        order.write_text(body, encoding="utf-8")
+        log = folder / "log.md"
+        log.write_text(f"DISPATCH WO-001 rev=1 sha={sha(body)}\n", encoding="utf-8")
+        record = folder / "record.json"
+        record.write_text(json.dumps({**data, "command": command, "artifacts": list(artifacts)}), encoding="utf-8")
+        expect(f"isolation: {name}", "evidence_record.py", code, "verify", record, "--rerun", "--order", order,
+               "--dispatch-log", log, "--repo", repo, "--candidate", first, says=says, lacks=lacks)
+
+    def artifact(path, text):
+        return {"path": str(path), "kind": "file", "size": len(text), "sha256": sha(text)}
+
+    case("the check runs in a copy of the tree", 0, ["in a new folder holding the 3 committed files", "test=passed"])
+    (repo / "payload.txt").write_text("changed\n", encoding="utf-8")
+    git("update-index", "--assume-unchanged", "payload.txt")
+    case("an assume-unchanged file refuses (R02)", 2, "marks 1 file(s) assume-unchanged or skip-worktree (first: payload.txt)")
+    git("update-index", "--no-assume-unchanged", "payload.txt")
+    git("update-index", "--skip-worktree", "payload.txt")
+    case("a skip-worktree file refuses", 2, "assume-unchanged or skip-worktree")
+    git("update-index", "--no-skip-worktree", "payload.txt")
+    git("checkout", "-q", "--", "payload.txt")
+    git("replace", first, second)
+    case("a replace ref refuses (R03)", 2, "has refs/replace/ refs")
+    git("replace", "-d", first)
+    case("a bare program name refuses (R04)", 2, "a bare name the PATH would resolve", command=["git", "--version"])
+    case("a relative program outside the tree refuses", 2, "which is not a file inside the candidate",
+         command=["./missing.exe"])
+    case("the artifact is hashed in the rerun folder (R05)", 0, "artifacts=1 missing=0",
+         artifacts=[artifact(repo / "build.txt", "new\n")])
+    case("the artifact made by the rerun differs (R05)", 1,
+         ["- artifact changed:", "(in the rerun folder: build.txt)", "MISMATCH integrity=changed"],
+         artifacts=[artifact(repo / "build.txt", "stale\n")])
+    case("an artifact outside the record's cwd", 1, "- artifact outside the record's cwd, so the rerun cannot make it",
+         artifacts=[artifact(root / "elsewhere.txt", "x")])
+    late = repo / "late.txt"
+    case("a file written into the repo during the check (R06)", 1,
+         ["- the repo changed while the check ran:", "has changed or untracked files", "MISMATCH"],
+         command=[py, "-c", f"open({str(late)!r}, 'w').write('x')"])
+    late.unlink()
+    case("HEAD moved during the check (R06)", 1, [f"- the repo changed while the check ran: {repo} is at {second[:12]}", "MISMATCH"],
+         command=[py, "-c", f"import subprocess; subprocess.run(['git', '-C', {str(repo)!r}, 'checkout', '-q', 'other'])"])
+    git("checkout", "-q", "main")
+    total += 1
+    if (repo / "build.txt").read_text(encoding="utf-8") != "stale\n":
+        failures.append("isolation: the rerun wrote build.txt in REPO instead of the copy")
+
+
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="director_work_selftest_")).resolve()
@@ -1415,6 +1503,7 @@ def main():
         test_evidence(tmp)
         test_order_checks(tmp)
         test_trusted_rerun(tmp)
+        test_trusted_isolation(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     for failure in failures:

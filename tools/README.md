@@ -167,10 +167,12 @@ python -I -X utf8 evidence_record.py verify <紀錄.json> --rerun-recorded   # �
 - `--rerun` 跑的是總監核准的檢查，不是紀錄裡寫的指令，四個參數都要給，少一個就 `NOT_RUN`、exit 2，什麼都不跑：
   1. 工單的雜湊和 REVISION 要等於 LOG 裡這張工單最新的 DISPATCH 行，不同就 exit 2。
   2. 用紀錄的 label 找 AC，取工單 `CHECKS:` 裡那條 AC 的指令；沒有就 exit 2。
-  3. `--repo` 的 HEAD 要是 `--candidate`（40 位），而且沒有任何修改或未追蹤檔，否則 exit 2。
-  4. 在 repo 根目錄跑核准的指令。紀錄的 git HEAD 不是候選 commit、或紀錄的 command 和核准的不同，都是 `MISMATCH`、exit 1；紀錄的 command 只拿來比對，不會執行。
+  3. `--repo` 的 HEAD 要是 `--candidate`（40 位）；不能有修改或未追蹤檔、不能有標成 assume-unchanged 或 skip-worktree 的檔（git status 看不到它們的修改）、不能有 `refs/replace/`（它能讓別的 tree 冒用候選 commit 的名字），否則 exit 2。git 一律關掉 replace 物件來讀。
+  4. 指令的程式要是絕對路徑、候選 commit 裡的檔（`./tools/check`）或 `python` / `python3`（就是跑這支工具的 Python）；只寫程式名、要靠 PATH 找的一律 exit 2，避免 PATH 換掉程式。
+  5. 從 git 物件把候選 commit 的 tree 寫進新的暫存資料夾，每個檔案都核對雜湊，在那裡跑核准的指令，不在 `--repo` 的工作樹裡跑。紀錄的 git HEAD 不是候選 commit、或紀錄的 command 和核准的不同，都是 `MISMATCH`、exit 1；紀錄的 command 只拿來比對，不會執行。產物在暫存資料夾裡、照它相對紀錄 cwd 的路徑重新算雜湊，不同就是 `MISMATCH`。
+  6. 跑完再讀一次 `--repo`：HEAD、tree、狀態或旗標有變，就是 `MISMATCH`、exit 1。
   結論行最後加 `check=AC-1 source=order candidate=<12 位>`。
-- 這證明「跑的是總監核准的檢查、在候選 commit 上」，但檢查仍會執行候選 commit 裡 worker 寫的測試碼，不是沙箱。建議在乾淨的目錄重跑：`git worktree add --detach <目錄> <候選 commit>`（只新增 worktree，不刪別的）。工作樹裡有沒被忽略的 build 產物也會被擋，所以用新開的 worktree。
+- 暫存資料夾只有已 commit 的檔，沒有 `.git`、未追蹤檔和被忽略的檔，跑完就刪。這證明「跑的是總監核准的檢查、在候選 commit 的 tree 上」，但檢查仍會執行候選 commit 裡 worker 寫的測試碼，不是沙箱。`--repo` 仍要乾淨，建議用 `git worktree add --detach <目錄> <候選 commit>` 新開（只新增 worktree，不刪別的）。
 - `--rerun-recorded` 是 v0.12 的 `--rerun`：在紀錄的 cwd 跑紀錄寫的指令。能改紀錄的人就能決定跑什麼，所以結論是 `test=recorded-command-passed source=record`，永遠不印 `test=passed`。v0.12 只寫 `--rerun` 的指令現在會 exit 2，改成上面的完整寫法。
 
 ## selftest.py
