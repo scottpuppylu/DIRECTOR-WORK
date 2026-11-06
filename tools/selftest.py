@@ -530,7 +530,8 @@ def test_evidence_match(tmp):
         expect(name, "gate_check.py", code, "--match", report, against, "--evidence-dir", folder, *bind, says=says, lacks=lacks)
         return report
 
-    ev("ev_ok", 0, {}, "OK   match", "  ~ ")  # AC-2 (REVIEW) names out.txt: only AUTO rows are read
+    bound = {"order": {"id": "WO-001", "rev": 1, "sha": sha}}  # what `run --order` writes (G03b); unbound records get a WARN
+    ev("ev_ok", 0, bound, "OK   match", "  ~ ")  # AC-2 (REVIEW) names out.txt: only AUTO rows are read
     ev("ev_short_head", 0, {}, "OK   match", title=f"/ c / {head[:7]} / yes")
     ev("ev_exit", 1, {"exit_code": 3}, "AC-1: e.json: the command exited 3")
     ev("ev_timeout", 1, {"exit_code": 124, "timed_out": True}, "(timed out)")
@@ -542,8 +543,8 @@ def test_evidence_match(tmp):
        rows=["| AC-1 | exit 0 | log.txt | PASS |"] + good[1:])
     ev("ev_missing_record", 1, {}, "AC-1: gone.json is not an evidence_record file",
        rows=["| AC-1 | exit 0 | gone.json | PASS |"] + good[1:])
-    ev("ev_head_line", 0, {}, "OK   match", "  ~ ", title=None, extra=f"HEAD: {head}\n")
-    ev("ev_branch_slash", 0, {}, "OK   match", "  ~ ", title=f"/ feature/x / c / {head} / yes")
+    ev("ev_head_line", 0, bound, "OK   match", "  ~ ", title=None, extra=f"HEAD: {head}\n")
+    ev("ev_branch_slash", 0, bound, "OK   match", "  ~ ", title=f"/ feature/x / c / {head} / yes")
     ev("ev_no_head", 0, {"head": "fedcba9876543210fedcba9876543210fedcba98"},
        ["~ HEAD: pending is not a commit hash (7 to 40 hex digits)", "~ HEAD: the report names no commit hash (see above); evidence HEAD not compared"],
        title="/ c / pending / yes")
@@ -1491,6 +1492,13 @@ def test_preflight(tmp):
     (new / "WO-001-parser.md").write_text(body, encoding="utf-8")
     (new / "log.md").write_text(f"# DIRECTOR_LOG\nDISPATCH WO-001 rev=2 sha={digest}\n", encoding="utf-8")
     evidence_file(new, "e.json", head)
+    flags = ("--evidence-dir", new, "--dispatch-log", new / "log.md")
+    (new / "report.md").write_text(match_report(list(ACCEPTANCE.values()), "PARTIAL", digest).replace(
+        "/ c / d0d0d0d / yes", f"/ c / {head} / yes", 1).replace("REVISION 1", "REVISION 2", 1), encoding="utf-8")
+    expect("preflight lists a REVISION 2 record without an order binding (G03b)", "gate_check.py", 1, "--preflight",
+           new / "report.md", new / "WO-001-parser.md", *flags,
+           says="LACKS EVIDENCE e.json: no `order` binding and the order is at REVISION 2 (run --order)")
+    evidence_file(new, "e.json", head, order={"id": "WO-001", "rev": 2, "sha": digest})
     (new / "report.md").write_text(match_report(list(ACCEPTANCE.values()), "PARTIAL", digest).replace(
         "/ c / d0d0d0d / yes", f"/ c / {head} / yes", 1).replace("REVISION 1", "REVISION 2", 1), encoding="utf-8")
     flags = ("--evidence-dir", new, "--dispatch-log", new / "log.md")
@@ -1498,6 +1506,107 @@ def test_preflight(tmp):
            new / "WO-001-parser.md", *flags, says="(GOVERNANCE Strict): nothing lacking; only read", lacks=["LACKS", "NOT_CHECKED"])
     expect("the migrated review passes the Strict --match", "gate_check.py", 0, "--match", new / "report.md",
            new / "WO-001-parser.md", *flags, "--candidate", head)
+
+
+def test_order_binding(tmp):
+    """v0.13 batch 4 (G03b): a record names the order it answers (`evidence_record.py run --order`): ID, REVISION and the
+    hash `--hash` prints for the DISPATCH line. --match --evidence-dir accepts a bound record for this order at this
+    revision and hash, or one an EVIDENCE_EQUIVALENT whole line in the log carries over; the line is read like DISPATCH,
+    so a quoted, fenced, indented or NOTE copy does not count. An unbound record: REVISION 1 is a WARN; from REVISION 2
+    Strict fails and Standard notes it."""
+    global total
+    head = "0123456789abcdef0123456789abcdef01234567"
+
+    def text_of(governance, rev):
+        return (TYPED_ORDER.format(base="abc123").replace("GOVERNANCE     = Standard", f"GOVERNANCE     = {governance}")
+                .replace("REVISION       = 1", f"REVISION       = {rev}"))
+
+    def digest_of(text):
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    if text_of("Strict", 2) == text_of("Strict", 1):
+        failures.append("test_order_binding: TYPED_ORDER has no `REVISION       = 1` line; update text_of()")
+
+    def case(name, code, says=None, lacks=None, governance="Strict", rev=2, order="unbound", log_extra=""):
+        """order: "unbound", "current" (this order now), "old" (REVISION 1 of the same order) or a dict to write."""
+        folder = tmp / "binding" / governance / name
+        folder.mkdir(parents=True)
+        text = text_of(governance, rev)
+        digest, old = digest_of(text), digest_of(text_of(governance, 1))
+        path = folder / "WO-001-parser.md"
+        path.write_bytes(text.encode("utf-8"))
+        field = {"unbound": None, "current": {"id": "WO-001", "rev": rev, "sha": digest},
+                 "old": {"id": "WO-001", "rev": 1, "sha": old}}.get(order, order) if isinstance(order, str) else order
+        evidence_file(folder, "e.json", head, **({} if field is None else {"order": field}))
+        (folder / "log.md").write_text(f"# DIRECTOR_LOG\n2026-01-02 10:00 +08:00 | DISPATCH WO-001 rev={rev} sha={digest}\n"
+                                       + log_extra.format(old=old), encoding="utf-8")
+        report = folder / "report.md"
+        report.write_text(match_report(list(ACCEPTANCE.values()), "PARTIAL", digest).replace(
+            "/ c / d0d0d0d / yes", f"/ c / {head} / yes", 1).replace("REVISION 1", f"REVISION {rev}", 1), encoding="utf-8")
+        expect(f"binding {governance} {name}", "gate_check.py", code, "--match", report, path, "--evidence-dir", folder,
+               "--dispatch-log", folder / "log.md", "--candidate", head, says=says, lacks=lacks)
+
+    equivalent = "EVIDENCE_EQUIVALENT WO-001 rev=1 sha={old} to rev=2"
+    case("unbound_rev2", 1, "- AC-1: e.json: not bound to an order revision and the order is at REVISION 2, so it may "
+         "answer an earlier one; Strict: record again with `evidence_record.py run --order")
+    case("bound_current", 0, "OK   match", ["  - ", "WARN"], order="current")
+    case("bound_old_revision", 1, ["- AC-1: e.json: recorded for WO-001 REVISION 1 (sha ", "the order is REVISION 2",
+                                   "EVIDENCE_EQUIVALENT WO-001 rev=1 sha="], order="old")
+    case("equivalent_dated_line", 0, "OK   match", "  - ", order="old",
+         log_extra="2026-01-03 09:00 +08:00 | " + equivalent + " | AC-1 unchanged by rev 2\n")
+    case("equivalent_bare_line", 0, "OK   match", "  - ", order="old", log_extra=equivalent + "\n")
+    for name, extra in (("equivalent_quoted", "> " + equivalent + "\n"),
+                        ("equivalent_in_code_fence", "```text\n" + equivalent + "\n```\n"),
+                        ("equivalent_in_tilde_fence", "~~~\n" + equivalent + "\n~~~\n"),
+                        ("equivalent_indented", "    " + equivalent + "\n"),
+                        ("equivalent_in_note", "NOTE: " + equivalent + "\n"),
+                        ("equivalent_mid_sentence", "the Director may write " + equivalent + " later\n"),
+                        ("equivalent_other_target", equivalent.replace("to rev=2", "to rev=3") + "\n"),
+                        ("equivalent_other_sha", "EVIDENCE_EQUIVALENT WO-001 rev=1 sha=" + "e" * 64 + " to rev=2\n"),
+                        ("equivalent_other_order", equivalent.replace("WO-001", "WO-002") + "\n")):
+        case(name, 1, "recorded for WO-001 REVISION 1 (sha ", order="old", log_extra=extra)
+    case("bound_other_order", 1, "- AC-1: e.json: recorded for order WO-002, this order is WO-001",
+         order={"id": "WO-002", "rev": 2, "sha": "a" * 64})
+    case("unbound_rev1_warns", 0, ["OK   match", "~ AC-1: e.json: WARN evidence not bound to the order (recorded without "
+                                   "--order); from the next MAJOR version `evidence_record.py run --order` is required"],
+         "  - ", rev=1)
+    case("unbound_rev2", 0, ["OK   match", "~ AC-1: e.json: not bound to an order revision and the order is at REVISION 2"],
+         "Strict:", governance="Standard")
+    case("bound_old_revision", 0, ["OK   match", "~ AC-1: e.json: recorded for WO-001 REVISION 1 (sha "],
+         governance="Standard", order="old")
+    case("malformed_order_field", 1, "order: needs id (text), rev (a whole number from 1) and sha (64 lower-case hex digits)",
+         governance="Standard", order={"id": "WO-001", "rev": "2", "sha": "not-a-hash"})
+
+    # run --order writes the same hash --hash prints for the DISPATCH line, also for a CRLF order (condition 4)
+    base = tmp / "binding" / "run"
+    work = base / "work"
+    work.mkdir(parents=True)
+    crlf = text_of("Strict", 2).replace("\n", "\r\n").encode("utf-8")
+    order = base / "WO-001-parser.md"
+    order.write_bytes(crlf)
+    expect("run --order names the order in the EVIDENCE line", "evidence_record.py", 0, "run", "--out-dir", base / "out",
+           "--label", "AC-1", "--order", order, "--cwd", work, "--", sys.executable, "-c", "print('ok')",
+           says="order=WO-001@rev2 file=")
+    total += 1
+    records = list((base / "out").glob("*.json"))
+    written = json.loads(records[0].read_text(encoding="utf-8")).get("order") if records else None
+    _, hashed = run("gate_check.py", "--hash", order)
+    logged = re.search(r"DISPATCH WO-001 rev=2 sha=([0-9a-f]{64})", hashed)
+    if not (written and logged and written.get("id") == "WO-001" and written.get("rev") == 2
+            and written.get("sha") == logged.group(1) == digest_of(text_of("Strict", 2))):
+        failures.append(f"run --order: the record's order {written} is not the DISPATCH hash {logged and logged.group(1)}")
+    expect("verify reads a record bound to an order", "evidence_record.py", 0, "verify", records[0] if records else base / "none")
+    mixed = base / "WO-002-other.md"
+    mixed.write_bytes(crlf)
+    expect("run --order refuses an order whose title and file name differ", "evidence_record.py", 2, "run", "--out-dir",
+           base / "out2", "--label", "AC-1", "--order", mixed, "--cwd", work, "--", sys.executable, "-c", "print('ok')",
+           says="EVIDENCE: NOT_RUN order: the title names WO-001, the file name WO-002-other.md names WO-002")
+    expect("run --order needs a readable order", "evidence_record.py", 2, "run", "--out-dir", base / "out3", "--label", "AC-1",
+           "--order", base / "gone.md", "--cwd", work, "--", sys.executable, "-c", "print('ok')",
+           says="EVIDENCE: NOT_RUN cannot read --order")
+    total += 1
+    if (base / "out2").exists() or (base / "out3").exists():
+        failures.append("run --order: a refused run still wrote a record")
 
 
 def test_trusted_rerun(tmp):
@@ -1695,6 +1804,7 @@ def main():
         test_evidence(tmp)
         test_order_checks(tmp)
         test_preflight(tmp)
+        test_order_binding(tmp)
         test_trusted_rerun(tmp)
         test_trusted_isolation(tmp)
     finally:

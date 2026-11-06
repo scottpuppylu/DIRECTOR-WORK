@@ -29,6 +29,10 @@ evidence and the product is still the Director's job (docs/02, docs/07).
              git HEAD, uncommitted changes or a label naming another AC fail a Strict order and are noted otherwise.
              The report's HEAD must be 7 to 40 hex digits: Strict fails, Standard and --report note it. When the order
              has CHECKS, a record's command must be the approved one for its AC: Strict fails, Standard notes it.
+             A record's `order` field (`evidence_record.py run --order`) must name this order at its REVISION and
+             hash, unless --dispatch-log has the whole line `EVIDENCE_EQUIVALENT <WO-ID> rev=<old> sha=<old hash>
+             to rev=<new>` (read like a DISPATCH line). A record without one gets a WARN at REVISION 1; from
+             REVISION 2 it fails Strict and is noted otherwise.
              The records are read, not rerun: only `evidence_record.py verify --rerun --order ...` runs a check again
   --dispatch-log LOG
              with --match: the order's hash now must equal the one the Director logged at dispatch, as a line
@@ -98,8 +102,11 @@ EVIDENCE_FILE = re.compile(r"[\w.-]+\.json\b")
 SHA = re.compile(r"[0-9a-fA-F]{7,40}")
 # a DISPATCH event is a whole line: optionally the log's `<date [time] [zone]> |` column first, then the event, then
 # optionally `| <basis>`; the same words inside another line (a NOTE, backticks, a `>` quote) are data, not an event
-DISPATCH = re.compile(r"(?:\d{4}-\d{2}-\d{2}(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?(?:[ \t]*(?:[+-]\d{2}:?\d{2}|Z))?[ \t]*\|[ \t]*)?"
-                      r"DISPATCH[ \t]+([^\s|`]+?)(?:\.md)?[ \t]+rev=(\d+)[ \t]+sha=([0-9a-fA-F]{64})[ \t]*(?:\|[^`]*)?")
+LOG_DATE = r"(?:\d{4}-\d{2}-\d{2}(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?(?:[ \t]*(?:[+-]\d{2}:?\d{2}|Z))?[ \t]*\|[ \t]*)?"
+DISPATCH = re.compile(LOG_DATE + r"DISPATCH[ \t]+([^\s|`]+?)(?:\.md)?[ \t]+rev=(\d+)[ \t]+sha=([0-9a-fA-F]{64})[ \t]*(?:\|[^`]*)?")
+# the Director's ruling that evidence recorded for an older revision still holds: a whole line, read like DISPATCH
+EQUIVALENT = re.compile(LOG_DATE + r"EVIDENCE_EQUIVALENT[ \t]+([^\s|`]+?)(?:\.md)?[ \t]+rev=(\d+)[ \t]+"
+                        r"sha=([0-9a-fA-F]{64})[ \t]+to[ \t]+rev=(\d+)[ \t]*(?:\|[^`]*)?")
 FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
 ORDER_ID = re.compile(r"[A-Za-z]+-\d+")
 TOO_BROAD = ("*", "**", "**/*", ".", "./", "/")
@@ -308,12 +315,11 @@ def order_checks(text, problems=None):
     return checks
 
 
-def dispatch_records(text):
-    """{order id: (rev, sha)} from DISPATCH event lines, in log order (a later line for an id moves it to the end, so
-    the last item for any of an order's names is its latest dispatch). An event is a whole line,
-    `DISPATCH <WO-ID> rev=<n> sha=<64 hex>`, optionally after the log's `<date> |` column and before a `| basis`
-    column. The same words quoted inside another line, an indented line and lines inside a ``` or ~~~ fence are data."""
-    records, fence = {}, None
+def log_lines(text):
+    """The lines of a log that may be events: every line outside a ``` or ~~~ fence, right-stripped. An event must
+    then match its pattern as a whole line, so the same words quoted inside another line, after `>` or indented
+    are data."""
+    fence = None
     for line in text.splitlines():
         mark = FENCE.match(line)
         if mark and fence is None:
@@ -323,11 +329,41 @@ def dispatch_records(text):
             if mark and mark.group(1)[0] == fence[0] and len(mark.group(1)) >= len(fence) and not mark.group(2).strip():
                 fence = None
             continue
-        m = DISPATCH.fullmatch(line.rstrip())
+        yield line.rstrip()
+
+
+def dispatch_records(text):
+    """{order id: (rev, sha)} from DISPATCH event lines, in log order (a later line for an id moves it to the end, so
+    the last item for any of an order's names is its latest dispatch). An event is a whole line,
+    `DISPATCH <WO-ID> rev=<n> sha=<64 hex>`, optionally after the log's `<date> |` column and before a `| basis`
+    column. The same words quoted inside another line, an indented line and lines inside a ``` or ~~~ fence are data."""
+    records = {}
+    for line in log_lines(text):
+        m = DISPATCH.fullmatch(line)
         if m:
             records.pop(m.group(1), None)
             records[m.group(1)] = (m.group(2), m.group(3).lower())
     return records
+
+
+def equivalent_records(text):
+    """[(order id, old rev, old sha, new rev)] from whole `EVIDENCE_EQUIVALENT <WO-ID> rev=<old> sha=<64 hex> to
+    rev=<new>` lines, read by the same rules as DISPATCH lines (log_lines): the Director's ruling that evidence
+    recorded for the old revision still answers the new one (G03b)."""
+    return [(m.group(1), int(m.group(2)), m.group(3).lower(), int(m.group(4)))
+            for m in (EQUIVALENT.fullmatch(line) for line in log_lines(text)) if m]
+
+
+def order_binding(data, path=None):
+    """(binding, problem): what `evidence_record.py run --order` writes into a record's `order` field, {"id", "rev",
+    "sha", "path"}. sha is order_hash of the file's bytes, the hash `--hash` prints for the DISPATCH line, so a record
+    and a dispatch name an order the same way (G03b). problem: the order has no ID, or its title and file name differ."""
+    text = data.decode("utf-8-sig", errors="replace")
+    ids, problem = order_identity(text, path)
+    if problem or not ids:
+        return None, problem or "order: no title or file name to take its ID from"
+    return {"id": order_key(ids), "rev": int(order_revision(text)), "sha": order_hash(data),
+            "path": str(pathlib.Path(path).resolve()) if path is not None else None}, None
 
 
 def dispatch_for(dispatch, ids):
@@ -558,12 +594,42 @@ def evidence_module():
     return module
 
 
-def check_evidence(ac, evidence, folder, head, problems, notes, strict=False, candidate=None, approved=None):
+def check_binding(ac, name, record, binding, problems, notes, strict):
+    """The record's `order` field (evidence_record.py run --order) against the order now (G03b). binding: {"ids", "rev",
+    "sha", "path", "equivalent"} of the order and the log's EVIDENCE_EQUIVALENT lines. A bound record must be for this
+    order at this revision and hash, or an EVIDENCE_EQUIVALENT line must carry it over. An unbound record is accepted
+    with a warning at REVISION 1; from REVISION 2 it may answer an earlier revision, which fails Strict."""
+    bound, rev, now, ids = record.get("order"), binding["rev"], binding["sha"], binding["ids"]
+    key, fix = order_key(ids) or "<WO-ID>", f"evidence_record.py run --order {binding['path'] or '<order>'}"
+    out = problems if strict else notes
+    if bound is None:
+        if rev == 1:
+            notes.append(f"{ac}: {name}: WARN evidence not bound to the order (recorded without --order); "
+                         "from the next MAJOR version `evidence_record.py run --order` is required")
+        else:
+            out.append(f"{ac}: {name}: not bound to an order revision and the order is at REVISION {rev}, so it may "
+                       f"answer an earlier one; " + ("Strict: " if strict else "") + f"record again with `{fix}`")
+        return
+    same_order = bound["id"] in ids or bool(id_prefixes([bound["id"]]) & id_prefixes(ids))
+    if not same_order:
+        out.append(f"{ac}: {name}: recorded for order {bound['id']}, this order is {key}; record again with `{fix}`")
+        return
+    if (bound["rev"], bound["sha"]) == (rev, now):
+        return
+    carried = any((eid in ids or id_prefixes([eid]) & id_prefixes(ids)) and (old_rev, old_sha, new_rev) == (bound["rev"], bound["sha"], rev)
+                  for eid, old_rev, old_sha, new_rev in binding["equivalent"])
+    if not carried:
+        out.append(f"{ac}: {name}: recorded for {bound['id']} REVISION {bound['rev']} (sha {bound['sha'][:12]}), the order "
+                   f"is REVISION {rev} (sha {now[:12]}); record again with `{fix}`, or the Director logs the whole line "
+                   f"`EVIDENCE_EQUIVALENT {key} rev={bound['rev']} sha={bound['sha']} to rev={rev}`")
+
+
+def check_evidence(ac, evidence, folder, head, problems, notes, strict=False, candidate=None, approved=None, binding=None):
     """An AUTO row marked PASS against the evidence_record.py files its 證據 cell names.
     strict: uncommitted changes, a label naming another AC, a legacy record, a record without git HEAD and a command
     other than the approved one fail instead of being noted. candidate: the commit under review; the record's HEAD is
     compared with it instead of the report's (exactly for a Strict order, as a prefix otherwise). approved: the order's
-    CHECKS command for this AC, or None."""
+    CHECKS command for this AC, or None. binding: the order's identity for check_binding, or None."""
     names = EVIDENCE_FILE.findall(evidence)
     if not names:
         problems.append(f"{ac}: PASS names no evidence_record file (.json) in 證據")
@@ -632,14 +698,20 @@ def check_evidence(ac, evidence, folder, head, problems, notes, strict=False, ca
         if label is not None and ac not in re.split(r"[\s,;/+]+", str(label)):
             (problems if strict else notes).append(
                 f"{ac}: {name}: its label is {label}, not {ac}" + ("; Strict: record once per AC, or label both" if strict else ""))
+        if binding is not None:
+            check_binding(ac, name, record, binding, problems, notes, strict)
 
 
-def check_match(report, order, notes, evidence_dir=None, dispatch=None, order_path=None, log_name=None, candidate=None):
+def check_match(report, order, notes, evidence_dir=None, dispatch=None, order_path=None, log_name=None, candidate=None,
+                equivalent=None):
     """The report's ACCEPTANCE rows against the order's acceptance criteria and its hash.
     dispatch: the records of --dispatch-log (None when the flag is absent), order_path: the order file's path,
-    candidate: the commit under review (40 hex digits, lower-case) from --candidate, or None."""
+    candidate: the commit under review (40 hex digits, lower-case) from --candidate, or None, equivalent: the
+    EVIDENCE_EQUIVALENT lines of --dispatch-log."""
     problems = []
     order_text = order.decode("utf-8-sig")
+    binding = {"ids": order_ids(order_text, order_path), "rev": int(order_revision(order_text)), "sha": order_hash(order),
+               "path": str(order_path) if order_path is not None else None, "equivalent": equivalent or []}
     order_problems = []
     wanted, got = ac_table(order_text, order_problems), ac_table(report, problems)
     checks = order_checks(order_text, order_problems) or {}
@@ -680,7 +752,7 @@ def check_match(report, order, notes, evidence_dir=None, dispatch=None, order_pa
         if status == "PASS" and (blank(evidence) or evidence.upper().startswith("NONE")):
             problems.append(f"{ac}: PASS without evidence")
         elif status == "PASS" and kind == "AUTO" and evidence_dir:
-            check_evidence(ac, evidence, evidence_dir, head, problems, notes, strict, candidate, checks.get(ac))
+            check_evidence(ac, evidence, evidence_dir, head, problems, notes, strict, candidate, checks.get(ac), binding)
         if status in ("PASS", "FAIL") and blank(row.get("actual", "")):
             problems.append(f"{ac}: {status} with 實際 empty")
     for ac in sorted(got.keys() - wanted.keys()):
@@ -804,6 +876,8 @@ def preflight(report, order, order_path, evidence_dir=None, dispatch=None, log_n
             missing.append(f"git.head is {head or 'missing'}, not 40 hex digits")
         if not bad and git.get("dirty") is not False:
             missing.append(f"git.dirty is {json.dumps(git.get('dirty'))}, not false")
+        if not bad and rev != "1" and record.get("order") is None:
+            missing.append(f"no `order` binding and the order is at REVISION {rev} (run --order)")
         if missing:
             lacks.append(f"EVIDENCE {name}: {'; '.join(missing)}; record again with this evidence_record.py run (or verify "
                          "--rerun) at the candidate; keep the old file with a closed review as it was")
@@ -923,7 +997,9 @@ def main():
     if a.candidate and not re.fullmatch(r"[0-9a-fA-F]{40}", a.candidate):
         ap.error(f"--candidate takes the full commit, 40 hex digits (git rev-parse <branch>), got: {a.candidate}")
     candidate = a.candidate.lower() if a.candidate else None
-    dispatch = dispatch_records(pathlib.Path(a.dispatch_log).read_text(encoding="utf-8-sig")) if a.dispatch_log else None
+    log_text = pathlib.Path(a.dispatch_log).read_text(encoding="utf-8-sig") if a.dispatch_log else None
+    dispatch = dispatch_records(log_text) if log_text is not None else None
+    equivalent = equivalent_records(log_text) if log_text is not None else []
     matched = [(pathlib.Path(o).read_text(encoding="utf-8-sig"), pathlib.Path(o)) for _, o in a.match if pathlib.Path(o).is_file()]
 
     failed = skipped = undated = 0
@@ -960,7 +1036,7 @@ def main():
             problems = ["file not found"]
         elif kind == "match":
             problems = check_match(text, files[1].read_bytes(), notes, a.evidence_dir, dispatch, files[1], a.dispatch_log,
-                                   candidate)
+                                   candidate, equivalent)
         else:
             problems = CHECKS[kind](text, notes)
             if kind == "verdict" and (a.match or candidate):

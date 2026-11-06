@@ -1,7 +1,10 @@
 """Keep a small, re-checkable record of a verification: command, exit code, end of the output, git HEAD and the SHA-256 of
 what it produced. The full output stays out of the record and out of the conversation.
 
-  run     run a command and write <out-dir>/<time>-<label>.json; never overwrites a record
+  run     run a command and write <out-dir>/<time>-<label>.json; never overwrites a record. With --order ORDER the
+          record's `order` field holds the order's ID, REVISION and hash (the hash gate_check.py --hash prints for
+          its DISPATCH line), so gate_check --match can tell evidence for an older revision (required from the next
+          MAJOR version; exit 2 NOT_RUN when the order cannot be read or its title and file name name two IDs)
   verify  check the record's fields, hash the artifacts again and compare. The last line reports three things apart:
           integrity (artifacts unchanged), test (passed only when the approved check reruns with exit 0; not-rerun
           otherwise) and artifacts (a missing one is never OK)
@@ -57,7 +60,8 @@ SHA = re.compile(r"[0-9a-fA-F]{7,40}")
 # field: type a record written by `run` has; a record missing one, or with another type, is not evidence
 SCHEMAS = (1,)  # record versions this tool writes and reads
 RECORD_FIELDS = {"schema": int, "label": str, "command": (list, str), "cwd": str, "started": str, "finished": str,
-                 "exit_code": int, "timed_out": bool, "git": dict, "artifacts": list}
+                 "exit_code": int, "timed_out": bool, "git": dict, "artifacts": list, "order": dict}
+OPTIONAL_FIELDS = ("order",)  # `run --order` only; null or absent means the record is not bound to an order (G03b)
 CORE_FIELDS = ("command", "exit_code", "artifacts")  # a record without `schema` (legacy) must still have these
 
 
@@ -67,7 +71,7 @@ def record_problems(record):
     if not isinstance(record, dict):
         return ["not a JSON object"]
     out = []
-    required = CORE_FIELDS if "schema" not in record else RECORD_FIELDS
+    required = CORE_FIELDS if "schema" not in record else [key for key in RECORD_FIELDS if key not in OPTIONAL_FIELDS]
     for key, kind in RECORD_FIELDS.items():  # a field a legacy record does have must still have the right type
         names = " or ".join(k.__name__ for k in (kind if isinstance(kind, tuple) else (kind,)))
         if key not in record or (record[key] is None and key not in required):
@@ -82,6 +86,12 @@ def record_problems(record):
     git = record.get("git")
     if isinstance(git, dict) and git.get("head") is not None and not (isinstance(git["head"], str) and SHA.fullmatch(git["head"])):
         out.append(f"git.head is not a commit hash: {git['head']}")
+    order = record.get("order")
+    if isinstance(order, dict) and not (isinstance(order.get("id"), str) and order["id"].strip()
+                                        and isinstance(order.get("rev"), int) and not isinstance(order["rev"], bool)
+                                        and order["rev"] >= 1 and isinstance(order.get("sha"), str)
+                                        and re.fullmatch(r"[0-9a-f]{64}", order["sha"])):
+        out.append("order: needs id (text), rev (a whole number from 1) and sha (64 lower-case hex digits)")
     artifacts = record.get("artifacts")
     for n, item in enumerate(artifacts if isinstance(artifacts, list) else [], 1):  # another type is reported above
         if not isinstance(item, dict) or not isinstance(item.get("path"), str) or "sha256" not in item:
@@ -176,6 +186,17 @@ def cmd_run(a):
     if not command:
         print("EVIDENCE: NOT_RUN no command after --")
         return 2
+    binding = None
+    if a.order:  # the same hash a DISPATCH line logs: gate_check.order_hash of the file's bytes (G03b)
+        try:
+            data = pathlib.Path(a.order).read_bytes()
+        except OSError as error:
+            print(f"EVIDENCE: NOT_RUN cannot read --order: {error}")
+            return 2
+        binding, problem = gate_module().order_binding(data, a.order)
+        if problem:
+            print(f"EVIDENCE: NOT_RUN {problem}")
+            return 2
     cwd = str(pathlib.Path(a.cwd).resolve())
     started, clock = now(), time.monotonic()
     code, timed_out, lines, tail = execute(command, cwd, a.tail, a.timeout, a.log)
@@ -183,7 +204,8 @@ def cmd_run(a):
     missing = sum(1 for item in artifacts if item["sha256"] is None)
     record = {"schema": 1, "label": a.label, "command": command, "cwd": cwd, "started": started, "finished": now(),
               "seconds": round(time.monotonic() - clock, 1), "exit_code": code, "timed_out": timed_out,
-              "git": git_state(cwd), "output_lines": lines, "output_tail": tail, "log": a.log, "artifacts": artifacts}
+              "git": git_state(cwd), "output_lines": lines, "output_tail": tail, "log": a.log, "artifacts": artifacts,
+              "order": binding}
 
     out_dir = pathlib.Path(a.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -198,7 +220,8 @@ def cmd_run(a):
             continue
     if a.verbose:
         print("\n".join(tail))
-    print(f"EVIDENCE: exit={code} lines={lines} artifacts={len(artifacts)} missing={missing} file={path}")
+    bound = f" order={binding['id']}@rev{binding['rev']}" if binding else ""
+    print(f"EVIDENCE: exit={code} lines={lines} artifacts={len(artifacts)} missing={missing}{bound} file={path}")
     return 3 if code == 0 and missing else code
 
 
@@ -491,6 +514,8 @@ def main():
     run = sub.add_parser("run", help="run a command and write a record")
     run.add_argument("--out-dir", required=True, help="folder for the records (outside the repo)")
     run.add_argument("--label", required=True, help="what this verifies, for example AC-1")
+    run.add_argument("--order", help="the work order this answers; its ID, REVISION and hash go into the record "
+                                     "(required from the next MAJOR version)")
     run.add_argument("--artifact", action="append", default=[], help="file or folder to hash; repeatable")
     run.add_argument("--cwd", default=".", help="folder to run in (default: current folder)")
     run.add_argument("--tail", type=int, default=40, help="last output lines to keep (default 40)")

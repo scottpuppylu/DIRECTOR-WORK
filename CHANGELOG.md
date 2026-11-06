@@ -36,6 +36,7 @@
   - `hook_guard.py --protect`（Windows）：去掉磁碟或 UNC 路徑的 `\\?\`、`\\.\` 前綴，NTFS 資料流算檔案本身，其他裝置路徑（GLOBALROOT、volume GUID）一律擋（H01、H02）。目標或它的上層資料夾已存在時，再用檔案識別（磁碟序號＋檔案編號）和 `DIRECTOR_LOG.md`、`orders/` 底下每個項目比對，UNC 別名和既有檔案的 hardlink 也擋得到。
   - `setup_project_settings.py`：已裝的 hook_guard 指令和這份工具要寫的不是逐字相同，就是 `MISSING (hooks.PreToolUse command)`，`--apply` 換掉。項目到位後實際跑一次 hook（一筆要放行、一筆要擋，有 `--protect` 時再加一筆寫進 `orders/` 的 Write），答得不對是 `HOOK_FAIL`、exit 1（H04）。
   - `gate_check.py --preflight 報告 工單`（只讀）：舊版本做的審查要照現在的 Strict 重審前，一項一行 `LACKS` 列出缺什麼，並給補法（M01–M03，見遷移第 7 步）。
+  - 證據綁工單（G03b）：`evidence_record.py run --order 工單` 把工單 ID、REVISION 和雜湊寫進紀錄的 `order` 欄；雜湊就是 `gate_check.py --hash` 印給 DISPATCH 行的那一個（同一個函式、同樣讀工單檔的位元組）。`--match --evidence-dir` 時，有綁的紀錄要和工單現在的 ID、版次、雜湊相同，或 `--dispatch-log` 有總監寫的整行 `EVIDENCE_EQUIVALENT <WO-ID> rev=<舊> sha=<舊雜湊> to rev=<新>`（和 DISPATCH 用同一套整行規則：引文、縮排、code fence、寫在 NOTE 句子裡的都不算）。沒綁的紀錄：REVISION 1 照收，印 `WARN evidence not bound to the order`；REVISION 2 以上 Strict 失敗、Standard 提示。`--preflight` 對 REVISION 2 以上沒綁的紀錄印 `LACKS`。
 - `selftest.py` 加上面各項的正反案例（285 → 486 項）。
 
 對齊初衷：
@@ -43,7 +44,7 @@
 2. Desktop：在 Desktop Code 分頁的 worker session 實作，Python 3.11 跑 selftest 全過。junction 和 8.3 短檔名案在 Windows 實跑，沒有 SKIP；一般帳號沒有建立 symlink 的權限（WinError 1314），symlink 沒測。`--protect-director` 還沒在真實 worker 資料夾裝過；`CHECKS` 和 `--candidate` 還沒在真實工單上跑過，都是 NOT_VERIFIED。
 3. 服務：成品要真的對（5）：重跑只跑總監核准的檢查，證據、報告、裁決指向同一個 commit。PO 不用盯細節（3）：工具查得出版次和 Git 狀態不一致。零成本（7）：只用標準函式庫。
 4. 核心：每輪必讀變小（13,417 → 12,392 bytes），規則沒有刪，理由搬到 `docs/10`。Direct 不多步驟。PO 不多操作：新參數都是總監下的。
-5. 舊檔案和舊指令：可能新不通過的有四種。Strict 審查少了 `--candidate`、`--dispatch-log` 或 `--evidence-dir`；單獨寫 `verify --rerun` 沒給 `--order`（exit 2）；`scope_check.py` 看到以前漏掉的已暫存或已 commit 修改（當 bug 修，Standard 也會報）；DISPATCH 或報告的版次和工單不同。審查修正後再加四種：LOG 裡引用、縮排或放在 code fence 的 DISPATCH 不再算派工；報告 header 欄位重複；Strict 證據的 `git.dirty` 沒寫或 schema 不認得；候選裡有 assume-unchanged / skip-worktree 檔案或 `refs/replace/` 時重跑拒跑。沒有 `CHECKS` 和 `REQUIRED_CHANGES` 的舊工單，`--order` 結果不變。這些照本檔政策是 MAJOR；0.x 升 MAJOR 等於 1.0，由 Owner 決定，所以先寫 Unreleased（候選 1.0.0-rc.1）。
+5. 舊檔案和舊指令：可能新不通過的有四種。Strict 審查少了 `--candidate`、`--dispatch-log` 或 `--evidence-dir`；單獨寫 `verify --rerun` 沒給 `--order`（exit 2）；`scope_check.py` 看到以前漏掉的已暫存或已 commit 修改（當 bug 修，Standard 也會報）；DISPATCH 或報告的版次和工單不同。審查修正後再加四種：LOG 裡引用、縮排或放在 code fence 的 DISPATCH 不再算派工；報告 header 欄位重複；Strict 證據的 `git.dirty` 沒寫或 schema 不認得；候選裡有 assume-unchanged / skip-worktree 檔案或 `refs/replace/` 時重跑拒跑；REVISION 2 以上的 Strict 工單，證據沒用 `--order` 綁版次（G03b）。沒有 `CHECKS` 和 `REQUIRED_CHANGES` 的舊工單，`--order` 結果不變。這些照本檔政策是 MAJOR；0.x 升 MAJOR 等於 1.0，由 Owner 決定，所以先寫 Unreleased（候選 1.0.0-rc.1）。
 
 遷移：
 1. 把 `tools/` 整個重新複製到 `DIRECTOR/tools/`。
@@ -57,13 +58,19 @@
    - 只用 `--match` 比對格式不需要 `CHECKS`，舊工單照樣相容（M02）。要用核准重跑（`verify --rerun`），總監要先寫 `CHECKS:`、升 REVISION、記新的 DISPATCH 行，worker 在新版次重新收證。
    - 證據紀錄沒有 `schema`、`git.head` 不是 40 位或 `git.dirty` 不是 false（M03）：在候選 commit 用這版 `evidence_record.py` 重新收證（或 `verify --rerun`）。已結案的審查保留原檔不動。
 8. `DIRECTOR_LOG.md` 的 DISPATCH 行頂格寫成一整行（`gate_check.py --hash` 印的那行）；引用、縮排、放進 code fence 的不算派工。報告和裁決的 header 欄位各寫一次。
+9. 證據綁工單（G03b）：worker 收證一律加 `--order`。REVISION 2 以上的 Strict 工單，沒綁的舊證據要在候選 commit 重新收，例如：
+   `python -I -X utf8 DIRECTOR/tools/evidence_record.py run --out-dir <證據資料夾> --label AC-1 --order DIRECTOR/orders/WO-001-parser.md -- python -I -m unittest tests.test_parser`
+   舊版次的證據確定仍然有效時，總監改在 `DIRECTOR_LOG.md` 頂格寫一整行 `EVIDENCE_EQUIVALENT WO-001 rev=1 sha=<紀錄 order 欄的 sha> to rev=2`，不必重收。
+   Codex 重現腳本的 M-C05（對照組，REVISION 2 配沒綁的紀錄）因此從 0 變 1：這是預期變更（G03b 優先），不是退步。
+
+Deprecated：
+- 證據未綁工單，下個 MAJOR 起必填 `--order`。現在 `evidence_record.py run` 不加 `--order` 仍可用；REVISION 1 的工單照收，但 `gate_check.py --match --evidence-dir` 會印 WARN。
 
 沒做：
 - 兄弟 repo 共用 `<上層>/DIRECTOR/director_work.json`（稽核 P1-5 / A12）：要設計 config 綁 repo 的欄位，延到 v0.14。
 - hook 不擋 MultiEdit、NotebookEdit 和用 Bash / PowerShell 寫檔：延到 v0.14 評估。
 - `CHECKS` 從提示改成失敗：v0.14。
 - `REQUIRED_CHANGES` 對 SCOPE / FORBIDDEN 的檢查是把每一條當路徑比對，glob 對 glob 只是近似。
-- 證據綁工單（審查 G03b，PARTIAL）：證據紀錄只用 `git.head` 綁候選 commit，沒有寫工單 ID、版次和派工雜湊；舊證據要重用，仍靠總監判斷等效。
 - `hook_guard.py --protect` 的已知限制（審查 H03、H05）：經由別名（網路磁碟、`subst`、UNC 共用）建立還不存在的 `DIRECTOR_LOG.md` 或 `orders/` 資料夾、hook 執行時目標還不存在的 junction、沒權限建立而沒測的 symlink、MultiEdit、NotebookEdit 都擋不到。真的要擋，請用作業系統的寫入權限保護 DIRECTOR 資料夾。
 - 清單項目沒包反引號時，` #` 之後仍是註解（設計如此，S02）；檔名含 ` #` 請用反引號包起來。
 
