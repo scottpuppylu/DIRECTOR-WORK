@@ -11,6 +11,7 @@ import pathlib
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -2743,6 +2744,211 @@ def test_review(tmp):
     expect("setup review kept on rerun without the option", "setup_project_settings.py", 0, *setup, says="OK")
 
 
+def test_doctor(tmp):
+    """1.1.0 batch 2: setup --runtime-guard writes what templates/settings.runtime-guard.json shows; doctor.py reports
+    what is in force (fake claude executables, settings layers in temp folders, never the real claude)."""
+    global total
+    folder = tmp / "doctor"
+    folder.mkdir()
+    main_repo, wt, home, empty_root = folder / "main", folder / "wt", folder / "home", folder / "root"
+    for path in (main_repo, home / ".claude", empty_root, folder / "audit"):
+        path.mkdir(parents=True)
+
+    def git_in(repo, *args):
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args], cwd=repo, check=True,
+                       capture_output=True)
+
+    git_in(main_repo, "init", "-q")
+    git_in(main_repo, "commit", "-q", "--allow-empty", "-m", "init")
+    git_in(main_repo, "worktree", "add", "-q", "--detach", str(wt))
+    (main_repo / ".git" / "info" / "exclude").write_text(".claude/settings.local.json\n", encoding="utf-8")
+
+    def fake(name, version):
+        path = folder / f"{name}.py"
+        path.write_text("import sys\nprint('" + version + " (Claude Code)' if sys.argv[1:] == ['--version'] else 'no')\n",
+                        encoding="utf-8")
+        return path
+
+    new, old, mid = fake("claude_new", "2.1.317"), fake("claude_old", "2.1.291"), fake("claude_mid", "2.1.300")
+    fake_token = "".join(["dw", "fake", "Q7x" * 10])  # built at run time: a value that must never be printed
+    spec = importlib.util.spec_from_file_location("doctor_for_test", TOOLS / "doctor.py")
+    doctor = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(doctor)
+    clean_env = {k: v for k, v in os.environ.items() if not doctor.CREDENTIAL_NAME.search(k) and not doctor.PROXY_NAME.match(k)
+                 and k not in ("CLAUDE_CODE_EXECPATH", "CLAUDE_PID", "CLAUDE_CODE_GIT_BASH_PATH")}
+    outputs = []
+
+    def doc(*args, repo=wt, path_claude=(new,), env_change=None, fs_root=empty_root):
+        env = dict(clean_env, CLAUDE_CODE_EXECPATH=str(new))
+        env.update(env_change or {})
+        env = {k: v for k, v in env.items() if v is not None}
+        argv = [sys.executable, "-I", "-X", "utf8", str(TOOLS / "doctor.py"), "--repo", str(repo), "--home", str(home),
+                "--managed", str(folder / "managed.json"), "--fs-root", str(fs_root)]
+        argv += [x for p in path_claude for x in ("--path-claude", str(p))] + [str(x) for x in args]
+        done = subprocess.run(argv, capture_output=True, encoding="utf-8", env=env)
+        outputs.append(done.stdout + done.stderr)
+        return done
+
+    def check(name, ok, detail=""):
+        global total
+        total += 1
+        if not ok:
+            failures.append(f"doctor {name}: {detail[-600:]}")
+
+    def line(done, name):
+        found = [x for x in done.stdout.splitlines() if re.match(r"\w+ +" + re.escape(name) + ":", x)]
+        return found[0] if found else ""
+
+    # setup --runtime-guard
+    log = folder / "audit" / "wt.jsonl"
+    pause = folder / "PAUSE"
+    setup = ("--repo", wt, "--only-this", "--pause-flag", pause)
+    expect("setup plain first", "setup_project_settings.py", 0, *setup, "--apply", says="SET")
+    expect("setup --runtime-guard default log is in the git common dir", "setup_project_settings.py", 1, *setup,
+           "--runtime-guard", says=["runtime_guard=on", "guard_profile=worker", "director-audit/{worktree}.jsonl",
+                                    "env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"])
+    guard = setup + ("--runtime-guard", "--audit-log", (folder / "audit" / "{worktree}.jsonl").as_posix())
+    expect("setup --runtime-guard written and tested", "setup_project_settings.py", 0, *guard, "--apply",
+           says=["SET", "block-rule=2"])
+    expect("setup --runtime-guard rerun is OK", "setup_project_settings.py", 0, *guard, says="OK")
+    settings_file = wt / ".claude" / "settings.local.json"
+    written = json.loads(settings_file.read_text(encoding="utf-8"))
+    backups = list((main_repo / ".git" / "director-settings-backup").glob("*.settings.local.json"))
+    check("one entry per hook event and a backup of the file before", [len(written["hooks"][e]) for e in
+          ("PreToolUse", "PostToolUse", "PostToolUseFailure")] == [1, 1, 1] and len(backups) == 1, json.dumps(written["hooks"]))
+    template = (TEMPLATES / "settings.runtime-guard.json").read_text(encoding="utf-8")
+    template = template.replace("<PYTHON>", pathlib.Path(sys.executable).as_posix()).replace("<DW>/tools", TOOLS.as_posix())
+    template = json.loads(template.replace("<PAUSE_FLAG>", pause.resolve().as_posix()).replace("<AUDIT_LOG>", log.resolve().as_posix()))
+    check("the template is what setup --runtime-guard writes", template == {"hooks": written["hooks"],
+          "permissions": written["permissions"], "env": {"CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": written["env"].get("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB")}},
+          json.dumps(template)[:300] + " | " + json.dumps(written)[:300])
+    good = settings_file.read_text(encoding="utf-8")
+
+    # the full set
+    done = doc()
+    check("full set: hook, Monitor and worktree ENFORCED, log not yet written, isolation NOT_ENFORCED", done.returncode == 1
+          and line(done, "hook_guard").startswith("ENFORCED") and "onFailure block, claude 2.1.317" in line(done, "hook_guard")
+          and line(done, "Monitor commands").startswith("ENFORCED") and line(done, "audit_log").startswith("CONFIGURED_NOT_VERIFIED")
+          and line(done, "permissions").startswith("CONFIGURED_NOT_VERIFIED") and line(done, "env_scrub").startswith("CONFIGURED_NOT_VERIFIED")
+          and line(done, "isolation").startswith("NOT_ENFORCED") and line(done, "worktree").startswith("ENFORCED")
+          and "INFO                     pause: off" in done.stdout and "review:" not in done.stdout
+          and "DOCTOR: enforced=" in (done.stdout.splitlines() or [""])[-1], done.stdout + done.stderr)
+    subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), "--rules", str(TOOLS / "guard_rules.json"),
+                    "--profile", "worker", "--audit", str(log)], input=json.dumps({"tool_name": "Bash", "tool_input":
+                    {"command": "git push"}}), capture_output=True, encoding="utf-8")
+    done = doc()
+    check("a log that verifies is ENFORCED", line(done, "audit_log").startswith("ENFORCED") and "entries=1" in line(done, "audit_log"), done.stdout)
+    log.write_text(log.read_text(encoding="utf-8").replace("git push", "git pull"), encoding="utf-8")
+    done = doc()
+    check("a broken log chain is NOT_ENFORCED", line(done, "audit_log").startswith("NOT_ENFORCED"), done.stdout)
+    log.unlink()
+
+    # versions
+    done = doc(path_claude=(new, old))
+    check("versions: effective via CLAUDE_CODE_EXECPATH, every PATH claude listed, an old one is a WARN",
+          "effective 2.1.317 via CLAUDE_CODE_EXECPATH" in done.stdout and "PATH 2.1.291" in done.stdout
+          and line(done, "old claude on PATH").startswith("WARN") and "warn=1" in done.stdout, done.stdout)
+    done = doc(path_claude=(old, new), env_change={"CLAUDE_CODE_EXECPATH": None})
+    check("without CLAUDE_CODE_EXECPATH the first PATH claude is the effective one", "effective 2.1.291 via PATH" in done.stdout
+          and line(done, "hook_guard").startswith("NOT_ENFORCED") and "< 2.1.295" in line(done, "hook_guard")
+          and line(done, "Monitor commands").startswith("NOT_ENFORCED"), done.stdout)
+    done = doc(path_claude=(old,), env_change={"CLAUDE_CODE_EXECPATH": None, "CLAUDE_PID": str(os.getpid())})
+    check("CLAUDE_PID names the effective executable", "via CLAUDE_PID" in done.stdout
+          and pathlib.Path(sys.executable).name.lower() in done.stdout.lower(), done.stdout)
+    done = doc(env_change={"CLAUDE_CODE_EXECPATH": str(mid), "CLAUDE_CODE_GIT_BASH_PATH": ""})
+    check("2.1.300: Monitor NOT_ENFORCED; on Windows without Git Bash the hook item too",
+          line(done, "Monitor commands").startswith("NOT_ENFORCED") and line(done, "hook_guard").startswith("ENFORCED")
+          and (os.name != "nt" or line(done, "hook without Git Bash").startswith("NOT_ENFORCED")), done.stdout)
+    if os.name == "nt":
+        done = doc(env_change={"CLAUDE_CODE_EXECPATH": str(mid), "CLAUDE_CODE_GIT_BASH_PATH": str(new)})
+        check("2.1.300 with Git Bash found", line(done, "hook without Git Bash").startswith("ENFORCED"), done.stdout)
+
+    # settings layers
+    user_settings = home / ".claude" / "settings.json"
+    for layer, path in (("user", user_settings), ("managed", folder / "managed.json")):
+        path.write_text('{"disableAllHooks": true}', encoding="utf-8")
+        done = doc()
+        check(f"disableAllHooks in the {layer} layer turns the hooks off", line(done, "hook_guard").startswith("NOT_ENFORCED")
+              and f"in the {layer} settings" in line(done, "hook_guard") and line(done, "audit_log").startswith("NOT_ENFORCED"), done.stdout)
+        path.unlink()
+    user_settings.write_text(json.dumps({"hooks": written["hooks"]}), encoding="utf-8")
+    settings_file.write_text(json.dumps({k: v for k, v in written.items() if k != "hooks"}), encoding="utf-8")
+    done = doc()
+    check("hooks in the user layer count for the worktree", line(done, "hook_guard").startswith("ENFORCED"), done.stdout)
+    user_settings.unlink()
+    (wt / ".claude" / "settings.json").write_text('{"env": {"CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": "1"}}', encoding="utf-8")
+    settings_file.write_text(json.dumps(dict(written, env={"CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": "0"})), encoding="utf-8")
+    done = doc()
+    check("an env key in the local layer wins over the project layer", line(done, "env_scrub").startswith("MISSING"), done.stdout)
+    (wt / ".claude" / "settings.json").unlink()
+
+    # broken or partial hooks
+    def variant(name, change, status, says):
+        data = json.loads(good)
+        change(data)
+        settings_file.write_text(json.dumps(data), encoding="utf-8")
+        done = doc()
+        check(name, done.returncode == 1 and line(done, says[0]).startswith(status) and all(s in done.stdout for s in says[1:]), done.stdout)
+
+    def pre(data):
+        return data["hooks"]["PreToolUse"][0]
+
+    variant("a matcher that is not * is MISSING", lambda d: pre(d).update(matcher="Bash"), "MISSING", ["hook_guard", "matcher 'Bash'"])
+    variant("no onFailure is MISSING", lambda d: pre(d)["hooks"][0].pop("onFailure"), "MISSING", ["hook_guard", "onFailure None"])
+    variant("a hook_guard.py that is not there is NOT_ENFORCED", lambda d: pre(d)["hooks"][0].update(
+        command=pre(d)["hooks"][0]["command"].replace("tools/hook_guard.py", "gone/hook_guard.py")), "NOT_ENFORCED",
+        ["hook_guard", "did not answer"])
+    variant("no PostToolUse is MISSING", lambda d: d["hooks"].pop("PostToolUse"), "MISSING", ["audit_log", "PostToolUse"])
+    variant("a missing deny rule is MISSING", lambda d: d["permissions"]["deny"].pop(), "MISSING", ["permissions", "1 of permissions.deny"])
+    variant("defaultMode bypassPermissions is a WARN", lambda d: d["permissions"].update(defaultMode="bypassPermissions"),
+            "WARN", ["permission mode"])
+    settings_file.write_text(good, encoding="utf-8")
+
+    # names only, never values
+    fake_name = "DW_FAKE_TOKEN"
+    fake_env = {fake_name: fake_token, "HTTPS_PROXY": "http://u" + ":" + fake_token + "@proxy.invalid:8080"}
+    done = doc("--probe", env_change=fake_env)
+    check("--probe lists credential-like names and a proxy with a password, not their values",
+          line(done, "env_scrub").startswith("NOT_ENFORCED") and "DW_FAKE_TOKEN" in done.stdout and "HTTPS_PROXY" in done.stdout, done.stdout)
+    done = doc("--probe")
+    check("--probe with no credential-like names is ENFORCED", line(done, "env_scrub").startswith("ENFORCED"), done.stdout)
+
+    # isolation, worktree, pause, review
+    container = folder / "container"
+    (container / "proc" / "1").mkdir(parents=True)
+    (container / "proc" / "1" / "cgroup").write_text("0::/docker/0123abcd\n", encoding="utf-8")
+    done = doc(fs_root=container)
+    check("a container cgroup without --probe is CONFIGURED_NOT_VERIFIED", line(done, "isolation").startswith("CONFIGURED_NOT_VERIFIED"), done.stdout)
+    closed = socket.socket()
+    closed.bind(("127.0.0.1", 0))
+    port = closed.getsockname()[1]
+    closed.close()
+    done = doc("--probe", "--director", folder, "--egress", f"127.0.0.1:{port}", fs_root=container,
+               env_change={fake_name: fake_token})
+    check("container --probe: a writable root and DIRECTOR and a credential name fail, a refused connection passes",
+          line(done, "isolation").startswith("NOT_ENFORCED") and "root read-only FAIL" in done.stdout
+          and "DIRECTOR read-only FAIL" in done.stdout and f"no connection to 127.0.0.1:{port} ok" in done.stdout
+          and "no credential names FAIL" in done.stdout, done.stdout)
+    (empty_root / ".dockerenv").write_text("", encoding="utf-8")
+    done = doc()
+    check("/.dockerenv means a container", line(done, "isolation").startswith("CONFIGURED_NOT_VERIFIED"), done.stdout)
+    (empty_root / ".dockerenv").unlink()
+    done = doc(repo=main_repo)
+    check("the main checkout is not a worker's worktree", line(done, "worktree").startswith("NOT_ENFORCED")
+          and line(done, "hook_guard").startswith("MISSING"), done.stdout)
+    pause.write_text("paused by the selftest\n", encoding="utf-8")
+    done = doc()
+    check("the pause flag is shown", "pause: on: paused by the selftest" in done.stdout, done.stdout)
+    pause.unlink()
+    expect("setup --runtime-guard --guard-review", "setup_project_settings.py", 0, *guard, "--guard-review", "--apply", says="SET")
+    done = doc()
+    check("review on is shown with its quota use", "review: on" in done.stdout and "quota" in done.stdout
+          and line(done, "hook_guard").startswith("ENFORCED"), done.stdout)
+    done = doc(repo=folder)
+    check("outside a git repo exit 2", done.returncode == 2 and "not inside a git repo" in done.stderr, done.stderr)
+    check("no doctor run printed the fake credential value", all(fake_token not in out for out in outputs), "value leaked")
+
+
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="director_work_selftest_")).resolve()
@@ -2773,6 +2979,7 @@ def main():
         test_auto_pause(tmp)
         test_audit(tmp)
         test_review(tmp)
+        test_doctor(tmp)
         test_evidence(tmp)
         test_order_checks(tmp)
         test_preflight(tmp)

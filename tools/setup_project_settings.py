@@ -44,6 +44,11 @@ toward an auto-pause. Without --audit-log an installed --audit is kept.
 --guard-review (config guard_review: true) gives guarded entries hook_guard --review: asks of the rules' review
 categories go to a second model first (claude -p, uses quota). Without it an installed --review is kept. The hook
 test drops --review, so a test call never starts a review.
+--runtime-guard (config runtime_guard: true) writes what templates/settings.runtime-guard.json shows: --guard-profile
+worker unless another profile is given, --audit-log <git common dir>/director-audit/{worktree}.jsonl unless another
+log is given, and env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB = "1" (subprocesses get no Anthropic / cloud credentials from
+the environment; GITHUB_TOKEN, GH_TOKEN, proxy credentials and GIT_CONFIG_* are kept by design). A missing one shows
+MISSING (env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB). doctor.py then reports what is really in force.
 """
 import argparse
 import datetime
@@ -61,6 +66,7 @@ import sys
 REL = pathlib.Path(".claude") / "settings.local.json"
 CONFIG_VERSION = 1  # director_work.json without schema_version counts as 1
 ENV_KEY = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
+SCRUB_KEY = "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"
 GUARD = pathlib.Path(__file__).resolve().parent / "hook_guard.py"
 RULES = GUARD.parent / "guard_rules.json"
 AUDIT = GUARD.parent / "audit_log.py"
@@ -300,12 +306,14 @@ def tested(wt, label, want):
     return 0 if ok else 1
 
 
-def wanted_missing(data, window, plugins_off, hooks=False, want=None, perms=None, audit=None):
+def wanted_missing(data, window, plugins_off, hooks=False, want=None, perms=None, audit=None, scrub=False):
     miss = []
     if data.get("autoCompactWindow") != window:
         miss.append("autoCompactWindow")
     if (data.get("env") or {}).get(ENV_KEY) != str(window):
         miss.append("env." + ENV_KEY)
+    if scrub and (data.get("env") or {}).get(SCRUB_KEY) != "1":
+        miss.append("env." + SCRUB_KEY)
     ep = data.get("enabledPlugins") or {}
     miss += [f"enabledPlugins.{p}" for p in plugins_off if ep.get(p) is not False]
     if hooks and not has_hook(data):
@@ -341,6 +349,9 @@ def main():
                     "categories go to a second model first, which uses claude -p quota (config: guard_review)")
     ap.add_argument("--audit-log", help="action log for audit_log.py hooks; {worktree} becomes the worktree folder "
                     "name (config: audit_log)")
+    ap.add_argument("--runtime-guard", action="store_true", help="write the runtime guard set: worker profile (unless "
+                    "--guard-profile), an action log per worktree (unless --audit-log) and env "
+                    "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 (config: runtime_guard)")
     ap.add_argument("--only-this", action="store_true", help="only the worktree given by --repo, not all worktrees")
     ap.add_argument("--skip", action="append", default=[], help="skip worktrees whose path contains this text (repeatable)")
     ap.add_argument("--apply", action="store_true", help="write; without it nothing is written")
@@ -370,26 +381,28 @@ def main():
     protect = pathlib.Path(protect).resolve() if protect else None
     director_wt = a.director_worktree or cfg.get("director_worktree")
     director_wt = pathlib.Path(director_wt).resolve() if director_wt else None
-    profile = a.guard_profile or cfg.get("guard_profile")
+    runtime = a.runtime_guard or cfg.get("runtime_guard") is True
+    common = pathlib.Path(git(["rev-parse", "--git-common-dir"], repo).stdout.strip())
+    common = (common if common.is_absolute() else repo / common).resolve()
+    profile = a.guard_profile or cfg.get("guard_profile") or ("worker" if runtime else None)
     if profile is not None and profile not in PROFILES:
         sys.exit(f"guard_profile {profile!r} is not one of {', '.join(PROFILES)}")
     rules = load_guard_rules() if profile else None
     pause = a.pause_flag or cfg.get("pause_flag")
     pause = pathlib.Path(pause).resolve() if pause else None
-    audit = a.audit_log or cfg.get("audit_log")
+    audit = a.audit_log or cfg.get("audit_log") or ((common / "director-audit" / "{worktree}.jsonl").as_posix() if runtime else None)
     review = a.guard_review or cfg.get("guard_review") is True
     hooks = a.hooks or cfg.get("hooks") is True or protect is not None or profile is not None or bool(audit)
 
     if a.backup_dir or cfg.get("backup_dir"):
         backup = pathlib.Path(a.backup_dir or cfg["backup_dir"])
     else:
-        common = pathlib.Path(git(["rev-parse", "--git-common-dir"], repo).stdout.strip())
-        backup = (common if common.is_absolute() else repo / common).resolve() / "director-settings-backup"
+        backup = common / "director-settings-backup"
 
     print(f"repo={repo} window={window} plugins_off={plugins_off or 'none'} config={cfg_path or 'none'} "
           f"hooks={'on' if hooks else 'off'}{f' protect={protect.as_posix()}' if protect else ''}"
           f"{f' guard_profile={profile}' if profile else ''}{f' pause_flag={pause.as_posix()}' if pause else ''}"
-          f"{f' audit_log={audit}' if audit else ''}{' guard_review=on' if review else ''} "
+          f"{f' audit_log={audit}' if audit else ''}{' guard_review=on' if review else ''}{' runtime_guard=on' if runtime else ''} "
           f"mode={'APPLY' if a.apply else 'REPORT'}")
     home = pathlib.Path.home().resolve()
     targets = [repo] if a.only_this else list(worktrees(repo))
@@ -442,7 +455,7 @@ def main():
                               pathlib.Path(kept_pause) if kept_pause else None, wt_audit_arg,
                               review or bool(installed and review_arg(installed)))
         perms = wanted_permissions(rules, wt_profile) if wt_profile else None
-        miss = wanted_missing(data, window, plugins_off, hooks, want, perms, wt_audit)
+        miss = wanted_missing(data, window, plugins_off, hooks, want, perms, wt_audit, runtime)
         if not miss:
             problems += tested(wt, "OK", want if hooks else None)
             continue
@@ -456,6 +469,8 @@ def main():
             shutil.copy2(path, backup / f"{wt.name}-{tag}-{stamp}.settings.local.json")
         data["autoCompactWindow"] = window
         data.setdefault("env", {})[ENV_KEY] = str(window)
+        if runtime:
+            data["env"][SCRUB_KEY] = "1"
         if plugins_off:
             data.setdefault("enabledPlugins", {}).update({p: False for p in plugins_off})
         if hooks and any(m.startswith("hooks.PreToolUse") for m in miss):
@@ -470,7 +485,8 @@ def main():
         with open(tmp, "w", encoding="utf-8", newline="\n") as fh:  # Path.write_text(newline=) needs 3.10
             fh.write(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
         os.replace(tmp, path)
-        again = wanted_missing(json.loads(path.read_text(encoding="utf-8")), window, plugins_off, hooks, want, perms, wt_audit)
+        again = wanted_missing(json.loads(path.read_text(encoding="utf-8")), window, plugins_off, hooks, want, perms, wt_audit,
+                               runtime)
         if again:
             print(f"FAIL        {wt} (still missing: {', '.join(again)})")
             problems += 1
