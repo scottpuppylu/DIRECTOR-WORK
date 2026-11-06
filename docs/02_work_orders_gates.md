@@ -24,7 +24,7 @@
 - Worker 不改工單的驗收條件和規格。發現條件做不到、互相矛盾或有錯，回報 `BLOCKED` 並寫明原因，由總監裁決後改工單。
 - 總監改工單時 `REVISION` 加 1，在 H 節記一列（誰改、原因、影響的 AC）。派工時用 `gate_check.py --hash` 印出工單雜湊，把它印的 `DISPATCH <WO-ID> rev=<n> sha=<雜湊>` 那行原樣寫進 `DIRECTOR_LOG`（同一工單以最新一行為準）；worker 在報告填 `ORDER_SHA256`。審查時 `--match ... --dispatch-log DIRECTOR_LOG.md` 拿派工紀錄比對：工單被改過再重算雜湊也會被查出；沒有紀錄時 Strict 失敗、Standard 提示、Direct 不查。這是事後查出，不是事前防止：誰都還是改得動工單。
 - 發工單前想清楚需求、現有結構、相依、邊界條件、測試方法，一次給完整。
-- 規格審查：Strict 工單派工前必做，Standard 選用，Direct 不做。總監開一個短上下文、只讀的 subagent，照 `templates/SPEC_REVIEW.md` 審工單；結果只給總監參考，不增加 PO 的工作。每次在 `DIRECTOR_LOG` 記下花費（subagent 回報的 token）和抓到的問題；花費高過它省下的返工，就降回選用。
+- 規格審查：Strict 工單放上待決頁前必做（Desktop 的做法見 `docs/11`），Standard 選用，Direct 不做。總監開一個短上下文、只讀的 subagent，照 `templates/SPEC_REVIEW.md` 審工單；結果只給總監參考，不增加 PO 的工作。每次在 `DIRECTOR_LOG` 記下花費（subagent 回報的 token）和抓到的問題；花費高過它省下的返工，就降回選用。
 
 ### Gate 與回報
 
