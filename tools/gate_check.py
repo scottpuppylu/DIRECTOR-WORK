@@ -202,6 +202,16 @@ def order_revision(text):
     return m.group(1) if m else "1"
 
 
+def order_line(text):
+    """(rest of the line, revision or None) of a report's or verdict's `ORDER: WO-file.md REVISION n` line;
+    None when there is no ORDER: line. `rev=n` and `REVISION: n` are read too."""
+    line = re.search(r"^\s*ORDER\s*:\s*(.+)$", text, re.M)
+    if not line:
+        return None
+    rev = re.search(r"(?:REVISION|\brev)\s*[=:]?\s*(\d+)", line.group(1), re.I)
+    return line.group(1), (int(rev.group(1)) if rev else None)
+
+
 def dispatch_records(text):
     """{order id: (rev, sha)} from `DISPATCH <WO-ID> rev=<n> sha=<hash>` lines; the last line for an id wins."""
     return {m.group(1): (m.group(2), m.group(3).lower()) for m in DISPATCH.finditer(text)}
@@ -221,6 +231,9 @@ def check_dispatch(order_text, order_path, now, dispatch, log_name, problems, no
         (problems if governance == "Strict" else notes).append(text)
         return
     name, (rev, sha) = hits[-1]
+    if rev != order_revision(order_text):
+        problems.append(f"DISPATCH: the latest line for {name} logs rev={rev}, the order is at REVISION "
+                        f"{order_revision(order_text)}; log a DISPATCH line for this revision when dispatching it")
     if sha != now:
         problems.append(f"DISPATCH: the order's hash now ({now[:12]}) is not the one logged at dispatch "
                         f"({sha[:12]}, {name} rev={rev}); the order changed after dispatch: compare its 變更紀錄, "
@@ -455,6 +468,14 @@ def check_match(report, order, notes, evidence_dir=None, dispatch=None, order_pa
         open_rows = sorted(ac for ac, row in got.items() if row.get("status", "") in UNFINISHED)
         if open_rows:
             problems.append(f"RESULT PASS with {' / '.join(UNFINISHED)} rows: {', '.join(open_rows)}")
+    named, wanted_rev = order_line(report), int(order_revision(order_text))
+    if named is None or named[1] is None:
+        (problems if strict else notes).append(
+            f"ORDER: the report names no order revision; write `ORDER: {pathlib.Path(order_path).name if order_path else 'WO-file.md'} "
+            f"REVISION {wanted_rev}`")
+    elif named[1] != wanted_rev:
+        problems.append(f"ORDER: the report is for REVISION {named[1]}, the order is at REVISION {wanted_rev}; "
+                        "the report answers an older or newer order")
     claimed = re.search(r"^\s*ORDER_SHA256\s*[:=]\s*([0-9a-fA-F]{64})\b", report, re.M)
     now = order_hash(order)
     if not claimed:

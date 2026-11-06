@@ -335,6 +335,44 @@ def test_dispatch(tmp):
     expect("--hash prints the DISPATCH line to log", "gate_check.py", 0, "--hash", order, says=f"\n  DISPATCH WO-001 rev=1 sha={sha}")
 
 
+def test_revision(tmp):
+    """v0.13: the DISPATCH line, the order and the report's ORDER line name the same REVISION (A03, A11); a report
+    without one is a problem for a Strict order and a note otherwise."""
+    typed = TYPED_ORDER.format(base="abc123")
+    rev2 = typed.replace("REVISION       = 1", "REVISION       = 2") + (
+        "\n| 版本 | 時間 | 誰改 | 原因 | 影響的 AC |\n|---|---|---|---|---|\n| 2 | 2026-01-03 | director | split AC-1 | AC-1 |\n")
+    if rev2.startswith(typed):
+        failures.append("test_revision: TYPED_ORDER has no `REVISION       = 1` line; update the replace()")
+
+    def case(name, code, text, says=None, lacks=None, log_line=None, edit=None, governance="Standard"):
+        folder = tmp / "revision" / name
+        folder.mkdir(parents=True)
+        text = text.replace("GOVERNANCE     = Standard", f"GOVERNANCE     = {governance}")
+        order = folder / "WO-001-parser.md"
+        order.write_bytes(text.encode("utf-8"))
+        sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        report = folder / "report.md"
+        report_text = match_report(list(ACCEPTANCE.values()), "PASS", sha)
+        report.write_text(edit(report_text) if edit else report_text, encoding="utf-8")
+        extra = ()
+        if log_line:
+            (folder / "log.md").write_text(f"# DIRECTOR_LOG\n2026-01-02 10:00 +08:00 | {log_line.format(sha=sha)}\n", encoding="utf-8")
+            extra = ("--dispatch-log", folder / "log.md")
+        expect(name, "gate_check.py", code, "--match", report, order, *extra, says=says, lacks=lacks)
+
+    case("rev_dispatch_same", 0, typed, "OK   match", "  ~ ", log_line="DISPATCH WO-001 rev=1 sha={sha}")
+    case("rev_dispatch_other_rev", 1, typed, "- DISPATCH: the latest line for WO-001 logs rev=99, the order is at REVISION 1",
+         log_line="DISPATCH WO-001 rev=99 sha={sha}")
+    case("rev_report_older", 1, rev2, "- ORDER: the report is for REVISION 1, the order is at REVISION 2")
+    case("rev_report_matches_rev2", 0, rev2, "OK   match", "  - ", log_line="DISPATCH WO-001 rev=2 sha={sha}",
+         edit=lambda r: r.replace("REVISION 1", "REVISION 2"))
+    no_rev = lambda r: r.replace("ORDER: WO-001-parser.md REVISION 1", "ORDER: WO-001-parser.md")
+    case("rev_report_none_standard", 0, typed, "~ ORDER: the report names no order revision; write `ORDER: WO-001-parser.md REVISION 1`",
+         edit=no_rev)
+    case("rev_report_none_strict", 1, typed, "- ORDER: the report names no order revision", edit=no_rev, governance="Strict",
+         log_line="DISPATCH WO-001 rev=1 sha={sha}")
+
+
 def evidence_file(folder, name, head, exit_code=0, timed_out=False, dirty=False, label="AC-1", sha256="ab" * 32, drop=(), **override):
     """An evidence_record.py file with every field `run` writes, written directly so the case does not depend on git.
     drop: field names to leave out; override: field values to replace."""
@@ -565,8 +603,9 @@ def test_trace(tmp):
     config.write_text(json.dumps({"schema_version": 1, "trace_id_pattern": r"^(DD|OD)-\d+$"}), encoding="utf-8")
     base = ("--orders", root / "orders", "--reports", root / "reports")
     expect("trace table", "trace_report.py", 0, *base, "--verdicts", root / "reviews", "--config", config,
-           says=["| DD-1 | WO-001 | AC-2 | REVIEW | READY_FOR_REVIEW | out.txt | PASS_WITH_WARNINGS |",
-                 "| DD-1 | WO-001 | AC-1 | AUTO | PASS | e.json | PASS_WITH_WARNINGS |",
+           says=["| DD-1 | WO-001 | AC-2 | REVIEW | READY_FOR_REVIEW | out.txt | PASS_WITH_WARNINGS（未標版次） |",
+                 "| DD-1 | WO-001 | AC-1 | AUTO | PASS | e.json | PASS_WITH_WARNINGS（未標版次） |",
+                 "## 裁決對不到報告版次\n- 無",
                  "| REQ7 | WO-003 | AC-1 | AUTO | 沒有報告 |", "## 沒有 TRACES_TO 的工單\n- WO-002",
                  "## 編號格式不符 trace_id_pattern\n- WO-003: REQ7", "stray.md", "沒計入的檔案 3 份，列在文末。",
                  "工單資料夾裡沒有 `ISSUED_BY =` 行的檔案（沒算成工單）：1 份\n- ", "WO-004-old.md",
@@ -601,6 +640,35 @@ def test_trace(tmp):
            says="## 同一工單有多份報告（依 REVISION、ATTEMPT、日期選，不看檔名）\n- 無")
     expect("trace with a missing folder", "trace_report.py", 1, "--orders", root / "nope", "--reports", root / "reports",
            says="folder not found")
+
+    # v0.13 (A09): a verdict is shown only next to the report of its own REVISION
+    paired = tmp / "trace_verdicts"
+    for folder in ("reports", "reviews"):
+        (paired / folder).mkdir(parents=True)
+    shutil.copytree(root / "orders", paired / "orders")
+    (paired / "reports" / "r2.md").write_text(failed.replace("REVISION 1", "REVISION 2"), encoding="utf-8")
+
+    def verdict(name, verdict_word, rev, extra=""):
+        text = VERDICT.format(verdict=verdict_word, step="ACCEPT_AND_CLOSE").replace(
+            "# GATE VERDICT", f"# GATE VERDICT WO-001\nORDER: WO-001-parser.md REVISION {rev}\n{extra}")
+        (paired / "reviews" / name).write_text(text, encoding="utf-8")
+
+    verdict("v1.md", "PASS", 1)
+    trace_paired = ("--orders", paired / "orders", "--reports", paired / "reports", "--verdicts", paired / "reviews")
+    expect("trace does not put a revision 1 verdict next to a revision 2 report", "trace_report.py", 0, *trace_paired,
+           says=["| DD-1 | WO-001 | AC-1 | AUTO | FAIL | e.json | 沒有 REVISION 2 的裁決 |", "## 裁決對不到報告版次\n- WO-001：",
+                 "v1.md 是 REVISION 1，表內報告是 REVISION 2"], lacks="| FAIL | e.json | PASS |")
+    verdict("v2a.md", "FAIL", 2, "2026-01-05 10:00\n")
+    verdict("v2b.md", "REWORK", 2, "2026-01-05 10:00\n")
+    expect("trace takes neither of two verdicts it cannot order", "trace_report.py", 0, *trace_paired,
+           says="| DD-1 | WO-001 | AC-1 | AUTO | FAIL | e.json | 多份裁決分不出先後 |")
+    verdict("v2b.md", "REWORK", 2, "2026-01-06 10:00\nCANDIDATE_HEAD: abcdef0123\n")
+    expect("trace takes the later verdict of the report's revision and lists a CANDIDATE_HEAD that is not the report's",
+           "trace_report.py", 0, *trace_paired,
+           says=["| DD-1 | WO-001 | AC-1 | AUTO | FAIL | e.json | REWORK |", "v2b.md 的 CANDIDATE_HEAD abcdef0123 不是報告的 HEAD d0d0d0d"])
+    verdict("v2b.md", "REWORK", 2, "2026-01-06 10:00\nCANDIDATE_HEAD: d0d0d0d\n")
+    expect("trace accepts a CANDIDATE_HEAD equal to the report's HEAD", "trace_report.py", 0, *trace_paired,
+           says="| REWORK |", lacks="不是報告的 HEAD")
 
 
 def test_purpose():
@@ -885,6 +953,7 @@ def main():
         test_acceptance(tmp)
         test_table(tmp)
         test_dispatch(tmp)
+        test_revision(tmp)
         test_evidence_match(tmp)
         test_one_fault(tmp)
         test_trace(tmp)

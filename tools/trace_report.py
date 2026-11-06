@@ -10,8 +10,11 @@ file in one of the folders that is not what that folder holds is listed by name 
 When several reports belong to one order, the table uses the newest, never the last by file name: the higher order
 REVISION on the `ORDER:` line, then the higher `ATTEMPT: n`, then the later first date (YYYY-MM-DD[ HH:MM]) in the
 report. HEAD is listed but cannot order commits without git. When the best two tie on all three, the table takes
-neither and says so. Every such order is listed with all its reports, the chosen one marked. When several verdicts
-match, the last by path is shown. `trace_id_pattern` in the config (a regex) flags IDs written in another format;
+neither and says so. Every such order is listed with all its reports, the chosen one marked. A verdict is paired with
+the chosen report by the REVISION on its `ORDER:` line: only a verdict for that revision is shown (the later date
+first; neither when two tie). With none, a sole verdict that names no revision is shown marked 未標版次, else the cell
+says no verdict has that revision. Verdicts for other revisions, and a `CANDIDATE_HEAD:` that is not the report's HEAD,
+are listed under 裁決對不到報告版次. `trace_id_pattern` in the config (a regex) flags IDs written in another format;
 without it every ID is accepted. Exit 0, or 1 when a folder is missing.
 """
 import argparse
@@ -61,15 +64,56 @@ def owner(orders, text, by_name):
     return hit[-1] if hit else None
 
 
+def first_date(text):
+    when = re.search(r"(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2}))?", text)
+    return " ".join(g for g in when.groups() if g) if when else None
+
+
+def verdict_info(path, text):
+    """A verdict's first line of section A, the order REVISION and CANDIDATE_HEAD it names, and its first date."""
+    section = re.search(r"^##\s*A\b.*?$(.*?)(?=^##\s|\Z)", text, re.M | re.S)
+    lines = [line.strip() for line in section.group(1).splitlines() if line.strip()] if section else []
+    named = gate.order_line(text)
+    head = re.search(r"^\s*CANDIDATE_HEAD\s*:\s*([0-9a-fA-F]{7,40})\b", text, re.M)
+    return {"path": path, "verdict": lines[0] if lines else "—", "rev": named[1] if named else None,
+            "head": head.group(1).lower() if head else None, "when": first_date(text)}
+
+
+def pick_verdict(order, problems):
+    """The verdict cell for an order: the verdict for the chosen report's REVISION, else a sole verdict that names no
+    revision (marked 未標版次). Verdicts for other revisions and a CANDIDATE_HEAD unlike the report's HEAD go to problems."""
+    verdicts, report = order["verdicts"], (order["reports"][0] if order["reports"] and not order["tie"] else None)
+    if not verdicts:
+        return None
+    rev = report["rev"] if report else None
+    if rev is None:
+        same = verdicts
+    else:
+        same = [v for v in verdicts if v["rev"] == rev]
+        problems += [f"{order['id']}：{v['path']} 是 REVISION {v['rev']}，表內報告是 REVISION {rev}"
+                     for v in verdicts if v["rev"] is not None and v["rev"] != rev]
+    if not same:
+        unmarked = [v for v in verdicts if v["rev"] is None]
+        if len(unmarked) == 1:
+            return unmarked[0]["verdict"] + "（未標版次）"
+        return f"沒有 REVISION {rev} 的裁決"
+    same.sort(key=lambda v: (-1 if v["rev"] is None else v["rev"], v["when"] or ""), reverse=True)
+    if len(same) > 1 and (same[0]["rev"], same[0]["when"]) == (same[1]["rev"], same[1]["when"]):
+        return "多份裁決分不出先後"
+    chosen = same[0]
+    head = report["head"].lower() if report and report["head"] and gate.SHA.fullmatch(report["head"]) else None
+    if chosen["head"] and head and not (chosen["head"].startswith(head) or head.startswith(chosen["head"])):
+        problems.append(f"{order['id']}：{chosen['path']} 的 CANDIDATE_HEAD {chosen['head'][:12]} 不是報告的 HEAD {head[:12]}")
+    return chosen["verdict"] + ("（未標版次）" if chosen["rev"] is None else "")
+
+
 def report_info(path, text):
     """What tells one report for an order from another: order revision, attempt, first date, HEAD."""
-    line = re.search(r"^\s*ORDER\s*:\s*(.+)$", text, re.M)
-    rev = re.search(r"(?:REVISION|\brev)\s*[=:]?\s*(\d+)", line.group(1), re.I) if line else None
+    named = gate.order_line(text)
     attempt = re.search(r"^\s*ATTEMPT\s*[:=]\s*(\d+)", text, re.M | re.I)
-    when = re.search(r"(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2}))?", text)
     info = {"path": path, "table": gate.ac_table(text), "head": gate.report_head_value(text),
-            "rev": int(rev.group(1)) if rev else None, "attempt": int(attempt.group(1)) if attempt else None,
-            "when": " ".join(g for g in when.groups() if g) if when else None}
+            "rev": named[1] if named else None, "attempt": int(attempt.group(1)) if attempt else None,
+            "when": first_date(text)}
     info["key"] = (-1 if info["rev"] is None else info["rev"], -1 if info["attempt"] is None else info["attempt"],
                    info["when"] or "")
     return info
@@ -110,7 +154,7 @@ def main():
         m = re.search(r"^\s*TRACES_TO\s*=\s*([^#\n]*)", text, re.M)
         ids = [i for i in re.split(r"[\s,，、]+", m.group(1)) if i and i.upper() != "NONE"] if m else None
         orders.append({"path": path, "id": first_id(text, path.stem), "traces": ids, "acs": gate.ac_table(text),
-                       "reports": [], "report": None, "tie": False, "verdict": None})
+                       "reports": [], "report": None, "tie": False, "verdicts": [], "verdict": None})
     stray = []
     for path, text in files(a.reports, r"^\s*TASK_ID\b", slots[1]):
         order = owner(orders, text, by_name=True)
@@ -126,10 +170,11 @@ def main():
             order["report"] = order["reports"][0]["table"]
     for path, text in files(a.verdicts, r"^##\s*A\b", slots[2]) if a.verdicts else []:
         order = owner(orders, text, by_name=False)
-        section = re.search(r"^##\s*A\b.*?$(.*?)(?=^##\s|\Z)", text, re.M | re.S)
-        lines = [line.strip() for line in section.group(1).splitlines() if line.strip()] if section else []
         if order:
-            order["verdict"] = lines[0] if lines else "—"
+            order["verdicts"].append(verdict_info(path, text))
+    unpaired = []
+    for order in orders:
+        order["verdict"] = pick_verdict(order, unpaired)
 
     rows = []
     for order in orders:
@@ -148,7 +193,7 @@ def main():
     untraced = [o["id"] for o in orders if o["traces"] is None]
     odd = [f"{o['id']}: {i}" for o in orders for i in o["traces"] or [] if pattern and not pattern.fullmatch(i)]
     for title, items in (("沒有 TRACES_TO 的工單", untraced), ("編號格式不符 trace_id_pattern", odd),
-                         ("對不到工單的報告", [str(p) for p in stray])):
+                         ("對不到工單的報告", [str(p) for p in stray]), ("裁決對不到報告版次", unpaired)):
         print(f"\n## {title}\n" + ("\n".join(f"- {i}" for i in items) if items else "- 無"))
     several = [o for o in orders if len(o["reports"]) > 1]
     print("\n## 同一工單有多份報告（依 REVISION、ATTEMPT、日期選，不看檔名）")
