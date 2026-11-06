@@ -212,11 +212,13 @@ def approved_check(a, record):
     except OSError as error:
         raise Refused(f"cannot read: {error}")
     text, now = data.decode("utf-8-sig", errors="replace"), gate.order_hash(data)
-    ids, dispatch = gate.order_ids(text, a.order), gate.dispatch_records(log)
-    hits = [name for name in ids if name in dispatch]
-    if not hits:
+    (ids, identity), dispatch = gate.order_identity(text, a.order), gate.dispatch_records(log)
+    if identity:
+        raise Refused(identity)
+    hit = gate.dispatch_for(dispatch, ids)
+    if hit is None:
         raise Refused(f"no DISPATCH line for {' / '.join(ids)} in {a.dispatch_log}")
-    rev, sha = dispatch[hits[-1]]
+    rev, sha = hit[1]
     if rev != gate.order_revision(text):
         raise Refused(f"the latest DISPATCH line logs rev={rev}, the order is at REVISION {gate.order_revision(text)}")
     if sha != now:

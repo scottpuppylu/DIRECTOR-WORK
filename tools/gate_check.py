@@ -12,7 +12,9 @@ evidence and the product is still the Director's job (docs/02, docs/07).
              criterion and no check is noted. An optional `REQUIRED_CHANGES:` list (globs the work must change, read
              by scope_check.py) must lie inside SCOPE and outside FORBIDDEN, or the order cannot be done
   --report   required fields filled in; RESULT in the vocabulary; PASS is refused with NOT_RUN tests or a scope violation
-  --verdict  verdict and next step in the vocabulary; status split by aspect; stop state written
+  --verdict  verdict and next step in the vocabulary; status split by aspect; stop state written. With --match, the
+             verdict's `ORDER: <file> REVISION n` line must name a matched order at its REVISION; with --candidate, its
+             `CANDIDATE_HEAD:` must be that commit (exactly for Strict). A missing line fails Strict and is noted otherwise
   --match REPORT ORDER
              the report's ACCEPTANCE table against the order, one row per AC: no AC missing or added; each status
              allowed for its type (a worker cannot write PASS on a REVIEW or PO criterion); PASS needs evidence;
@@ -31,11 +33,13 @@ evidence and the product is still the Director's job (docs/02, docs/07).
   --dispatch-log LOG
              with --match: the order's hash now must equal the one the Director logged at dispatch, as a line
              `DISPATCH <WO-ID> rev=<n> sha=<64 hex>` in LOG (the last line for an order wins; the ID is the order's
-             title or file name), and rev must be the order's REVISION. No line for the order: Strict fails,
-             Standard notes it, Direct does not look.
+             title or file name), and rev must be the order's REVISION. The line is the whole line, optionally after
+             a `<date> |` column and before a `| <basis>` column; a DISPATCH quoted in a note, indented, after `>` or
+             inside a ``` / ~~~ fence is not one. No line for the order fails in every governance mode. The title's
+             ID and the file name's ID must agree, and the report's ORDER line must name this order.
              Without this flag the hash is only compared with the order as it is now, which a worker can rewrite.
   --candidate SHA
-             with --match: the commit under review, 40 hex digits, which the Director reads with
+             with --match or --verdict: the commit under review, 40 hex digits, which the Director reads with
              `git rev-parse <worker branch>`. The report's HEAD must be it (a prefix is enough outside Strict) and every
              evidence record must be recorded at it (exactly for Strict).
   Strict binds the review to one commit: a Strict --match fails without --candidate, without --dispatch-log, without
@@ -84,7 +88,12 @@ PLACEHOLDER = re.compile(r"<[^<>@\n]+>")  # <name@host> is an address, not a pla
 CODE = re.compile(r"`[^`\n]*`")  # <...> inside a code span is format text, not a placeholder
 EVIDENCE_FILE = re.compile(r"[\w.-]+\.json\b")
 SHA = re.compile(r"[0-9a-fA-F]{7,40}")
-DISPATCH = re.compile(r"\bDISPATCH\s+(\S+?)(?:\.md)?\s+rev=(\d+)\s+sha=([0-9a-fA-F]{64})\b")
+# a DISPATCH event is a whole line: optionally the log's `<date [time] [zone]> |` column first, then the event, then
+# optionally `| <basis>`; the same words inside another line (a NOTE, backticks, a `>` quote) are data, not an event
+DISPATCH = re.compile(r"(?:\d{4}-\d{2}-\d{2}(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?(?:[ \t]*(?:[+-]\d{2}:?\d{2}|Z))?[ \t]*\|[ \t]*)?"
+                      r"DISPATCH[ \t]+([^\s|`]+?)(?:\.md)?[ \t]+rev=(\d+)[ \t]+sha=([0-9a-fA-F]{64})[ \t]*(?:\|[^`]*)?")
+FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
+ORDER_ID = re.compile(r"[A-Za-z]+-\d+")
 TOO_BROAD = ("*", "**", "**/*", ".", "./", "/")
 
 
@@ -200,15 +209,37 @@ def order_hash(data):
     return hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest()
 
 
-def order_ids(text, path=None):
-    """The names a dispatch line may call this order: the first word of its title and its file name without .md."""
-    ids = []
+def order_identity(text, path=None):
+    """(names a dispatch line may call this order, problem or None). The names are the first word of its title, its
+    file name without .md and that name's leading `WO-n` ID. The problem: the title and the file name give two IDs."""
     title = re.search(r"^#\s+(\S+)", text, re.M)
-    if title:
-        ids.append(title.group(1))
-    if path is not None:
-        ids.append(pathlib.Path(path).stem)
-    return ids
+    title = title.group(1) if title else None
+    stem = pathlib.Path(path).stem if path is not None else None
+    file_id, title_id = (ORDER_ID.match(name) if name else None for name in (stem, title))
+    ids = []
+    for name in (title, stem, file_id.group(0) if file_id else None):
+        if name and name not in ids:
+            ids.append(name)
+    problem = None
+    if file_id and title_id and file_id.group(0).upper() != title_id.group(0).upper():
+        problem = (f"order: the title names {title_id.group(0)}, the file name {pathlib.Path(path).name} names "
+                   f"{file_id.group(0)}; one order has one ID")
+    return ids, problem
+
+
+def order_ids(text, path=None):
+    """The names a dispatch line may call this order (see order_identity)."""
+    return order_identity(text, path)[0]
+
+
+def order_key(ids):
+    """The `WO-n` ID among an order's names (the first one that is only an ID), else its first name, else None."""
+    return next((name for name in ids if ORDER_ID.fullmatch(name)), ids[0] if ids else None)
+
+
+def id_prefixes(names):
+    """The leading `WO-n` IDs of names, upper-case."""
+    return {m.group(0).upper() for m in (ORDER_ID.match(name) for name in names) if m}
 
 
 def order_revision(text):
@@ -255,24 +286,45 @@ def order_checks(text, problems=None):
 
 
 def dispatch_records(text):
-    """{order id: (rev, sha)} from `DISPATCH <WO-ID> rev=<n> sha=<hash>` lines; the last line for an id wins."""
-    return {m.group(1): (m.group(2), m.group(3).lower()) for m in DISPATCH.finditer(text)}
+    """{order id: (rev, sha)} from DISPATCH event lines, in log order (a later line for an id moves it to the end, so
+    the last item for any of an order's names is its latest dispatch). An event is a whole line,
+    `DISPATCH <WO-ID> rev=<n> sha=<64 hex>`, optionally after the log's `<date> |` column and before a `| basis`
+    column. The same words quoted inside another line, an indented line and lines inside a ``` or ~~~ fence are data."""
+    records, fence = {}, None
+    for line in text.splitlines():
+        mark = FENCE.match(line)
+        if mark and fence is None:
+            fence = mark.group(1)
+            continue
+        if fence is not None:
+            if mark and mark.group(1)[0] == fence[0] and len(mark.group(1)) >= len(fence) and not mark.group(2).strip():
+                fence = None
+            continue
+        m = DISPATCH.fullmatch(line.rstrip())
+        if m:
+            records.pop(m.group(1), None)
+            records[m.group(1)] = (m.group(2), m.group(3).lower())
+    return records
+
+
+def dispatch_for(dispatch, ids):
+    """(name, (rev, sha)) of the latest DISPATCH line for any of an order's names, or None."""
+    hits = [(name, value) for name, value in dispatch.items() if name in ids]
+    return hits[-1] if hits else None
 
 
 def check_dispatch(order_text, order_path, now, dispatch, log_name, problems, notes):
-    """The order's hash now against the hash the Director logged when dispatching it."""
-    governance = re.search(r"^\s*GOVERNANCE\s*=\s*(\S+)", order_text, re.M)
-    governance = governance.group(1) if governance else "Standard"
+    """The order's hash now against the hash the Director logged when dispatching it. Given a log, an order with no
+    DISPATCH line fails in every governance: GOVERNANCE, REVISION and the ID are the order's own claim until its hash
+    equals a dispatched one, so a worker cannot lower the mode or rename the order to skip the check."""
     ids = order_ids(order_text, order_path)
-    hits = [(name, dispatch[name]) for name in ids if name in dispatch]
-    if not hits:
-        if governance == "Direct":
-            return
-        line = f"DISPATCH {ids[0] if ids else '<WO-ID>'} rev={order_revision(order_text)} sha={now}"
-        text = f"DISPATCH: no line for {' / '.join(ids) or order_path} in {log_name}; log `{line}` when dispatching"
-        (problems if governance == "Strict" else notes).append(text)
+    hit = dispatch_for(dispatch, ids)
+    if hit is None:
+        line = f"DISPATCH {order_key(ids) or '<WO-ID>'} rev={order_revision(order_text)} sha={now}"
+        problems.append(f"DISPATCH: no line for {' / '.join(ids) or order_path} in {log_name}; an order the log does not "
+                        f"show as dispatched is not reviewed against it (the Director logs `{line}` when dispatching)")
         return
-    name, (rev, sha) = hits[-1]
+    name, (rev, sha) = hit
     if rev != order_revision(order_text):
         problems.append(f"DISPATCH: the latest line for {name} logs rev={rev}, the order is at REVISION "
                         f"{order_revision(order_text)}; log a DISPATCH line for this revision when dispatching it")
@@ -583,6 +635,13 @@ def check_match(report, order, notes, evidence_dir=None, dispatch=None, order_pa
     elif named[1] != wanted_rev:
         problems.append(f"ORDER: the report is for REVISION {named[1]}, the order is at REVISION {wanted_rev}; "
                         "the report answers an older or newer order")
+    ids, identity = order_identity(order_text, order_path)
+    if identity:
+        problems.append(identity)
+    named_ids, order_id_set = id_prefixes([named[0].strip()] if named else []), id_prefixes(ids)
+    if named_ids and order_id_set and not named_ids & order_id_set:
+        problems.append(f"ORDER: the report names {named[0].split()[0]}, the order is {order_key(ids)}; "
+                        "the report answers another order")
     claimed = re.search(r"^\s*ORDER_SHA256\s*[:=]\s*([0-9a-fA-F]{64})\b", report, re.M)
     now = order_hash(order)
     if not claimed:
@@ -616,6 +675,42 @@ def check_verdict(text, notes):
     return problems
 
 
+def verdict_binding(text, orders, candidate, notes):
+    """With --match or --candidate: the verdict must answer a --match order at its REVISION and judge the candidate.
+    orders: [(order text, order path)] of the --match pairs; candidate: 40 hex digits, lower-case, or None."""
+    problems, named = [], order_line(text)
+    named_ids = id_prefixes([named[0].strip()]) if named else set()
+    hits = [(t, p) for t, p in orders if named_ids & id_prefixes(order_ids(t, p))]
+    if not hits and not named_ids and len(orders) == 1:
+        hits = orders
+    strict = any(re.search(r"^\s*GOVERNANCE\s*=\s*Strict\b", t, re.M) for t, _ in (hits or orders))
+    if orders and not named_ids:
+        (problems if strict else notes).append(
+            "ORDER: the verdict names no order; write `ORDER: <order file> REVISION n` at the top")
+    elif orders and not hits:
+        problems.append(f"ORDER: the verdict names {named[0].split()[0]}, which is none of the --match orders; "
+                        "the verdict judges another order")
+    for order_text, order_path in hits[:1]:
+        wanted = int(order_revision(order_text))
+        if named is None or named[1] is None:
+            (problems if strict else notes).append(f"ORDER: the verdict names no REVISION; the order is at REVISION {wanted}")
+        elif named[1] != wanted:
+            problems.append(f"ORDER: the verdict is for REVISION {named[1]}, the order is at REVISION {wanted}; "
+                            "the verdict judges an older or newer order")
+    if candidate:
+        head = re.search(r"^\s*CANDIDATE_HEAD\s*[:=]\s*(\S*)", text, re.M)
+        value = head.group(1).strip("`").lower() if head else ""
+        if not value:
+            (problems if strict else notes).append(
+                f"CANDIDATE_HEAD: the verdict names no commit; write `CANDIDATE_HEAD: {candidate}`")
+        elif not re.fullmatch(r"[0-9a-f]{7,40}", value):
+            problems.append(f"CANDIDATE_HEAD: not a commit hash (7 to 40 hex digits): {value}")
+        elif not (value == candidate if strict else candidate.startswith(value)):
+            problems.append(f"CANDIDATE_HEAD: the verdict is for {value[:12]}, the candidate is {candidate[:12]}; "
+                            "the verdict judged another commit")
+    return problems
+
+
 CHECKS = {"resume": check_resume, "order": check_order, "report": check_report, "verdict": check_verdict}
 
 
@@ -646,8 +741,10 @@ def main():
             continue
         data = pathlib.Path(path).read_bytes()
         text, digest = data.decode("utf-8-sig", errors="replace"), order_hash(data)
-        ids = order_ids(text, path)
-        print(f"{digest}  {path}\n  DISPATCH {ids[0] if ids else pathlib.Path(path).stem} rev={order_revision(text)} sha={digest}")
+        ids, identity = order_identity(text, path)
+        print(f"{digest}  {path}\n  DISPATCH {order_key(ids) or pathlib.Path(path).stem} rev={order_revision(text)} sha={digest}")
+        if identity:
+            print(f"  - {identity}")
     if not jobs and a.hash:
         return 1 if missing else 0
     if not jobs:
@@ -662,12 +759,13 @@ def main():
         ap.error("--dispatch-log works with --match")
     if a.dispatch_log and not pathlib.Path(a.dispatch_log).is_file():
         ap.error(f"--dispatch-log: file not found: {a.dispatch_log}")
-    if a.candidate and not a.match:
-        ap.error("--candidate works with --match")
+    if a.candidate and not (a.match or a.verdict):
+        ap.error("--candidate works with --match or --verdict")
     if a.candidate and not re.fullmatch(r"[0-9a-fA-F]{40}", a.candidate):
         ap.error(f"--candidate takes the full commit, 40 hex digits (git rev-parse <branch>), got: {a.candidate}")
     candidate = a.candidate.lower() if a.candidate else None
     dispatch = dispatch_records(pathlib.Path(a.dispatch_log).read_text(encoding="utf-8-sig")) if a.dispatch_log else None
+    matched = [(pathlib.Path(o).read_text(encoding="utf-8-sig"), pathlib.Path(o)) for _, o in a.match if pathlib.Path(o).is_file()]
 
     failed = skipped = undated = 0
     for kind, path in jobs:
@@ -691,6 +789,8 @@ def main():
                                    candidate)
         else:
             problems = CHECKS[kind](text, notes)
+            if kind == "verdict" and (a.match or candidate):
+                problems += verdict_binding(text, matched, candidate, notes)
         failed += bool(problems)
         print(f"{('WARN' if a.warn else 'FAIL') if problems else 'OK  '} {kind} {name}")
         for line in [f"  - {p}" for p in problems] + [f"  ~ {n}" for n in notes]:

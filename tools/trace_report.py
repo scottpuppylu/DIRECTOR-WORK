@@ -15,7 +15,7 @@ neither and says so. Every such order is listed with all its reports, the chosen
 the chosen report by the REVISION on its `ORDER:` line: only a verdict for that revision is shown (the later date
 first; neither when two tie). With none, a sole verdict that names no revision is shown marked 未標版次, else the cell
 says no verdict has that revision. Verdicts for other revisions, and a `CANDIDATE_HEAD:` that is not the report's HEAD,
-are listed under 裁決對不到報告版次. `trace_id_pattern` in the config (a regex) flags IDs written in another format;
+are never shown in the table (with none left the cell says 未配對) and are listed under 裁決對不到報告版次. `trace_id_pattern` in the config (a regex) flags IDs written in another format;
 without it every ID is accepted. `--decisions FILE` (repeatable) reads the IDs (`XX-number`) in the first column of the
 Markdown table rows of the project's requirement or decision files: a TRACES_TO ID found in none of them is listed under
 TRACES_TO 找不到的編號, and an ID there that no order traces under 沒有工單的需求. Without the flag the output is the
@@ -85,7 +85,8 @@ def verdict_info(path, text):
 
 def pick_verdict(order, problems):
     """The verdict cell for an order: the verdict for the chosen report's REVISION, else a sole verdict that names no
-    revision (marked 未標版次). Verdicts for other revisions and a CANDIDATE_HEAD unlike the report's HEAD go to problems."""
+    revision (marked 未標版次). Verdicts for other revisions and a CANDIDATE_HEAD unlike the report's HEAD go to problems
+    and are never shown: with none left the cell says 未配對."""
     verdicts, report = order["verdicts"], (order["reports"][0] if order["reports"] and not order["tie"] else None)
     if not verdicts:
         return None
@@ -101,13 +102,17 @@ def pick_verdict(order, problems):
         if len(unmarked) == 1:
             return unmarked[0]["verdict"] + "（未標版次）"
         return f"沒有 REVISION {rev} 的裁決"
+    head = report["head"].lower() if report and report["head"] and gate.SHA.fullmatch(report["head"]) else None
+    other = [v for v in same if v["head"] and head and not (v["head"].startswith(head) or head.startswith(v["head"]))]
+    problems += [f"{order['id']}：{v['path']} 的 CANDIDATE_HEAD {v['head'][:12]} 不是報告的 HEAD {head[:12]}"
+                 for v in other]
+    same = [v for v in same if v not in other]
+    if not same:
+        return f"未配對：沒有 HEAD {head[:12]} 的裁決"
     same.sort(key=lambda v: (-1 if v["rev"] is None else v["rev"], v["when"] or ""), reverse=True)
     if len(same) > 1 and (same[0]["rev"], same[0]["when"]) == (same[1]["rev"], same[1]["when"]):
         return "多份裁決分不出先後"
     chosen = same[0]
-    head = report["head"].lower() if report and report["head"] and gate.SHA.fullmatch(report["head"]) else None
-    if chosen["head"] and head and not (chosen["head"].startswith(head) or head.startswith(chosen["head"])):
-        problems.append(f"{order['id']}：{chosen['path']} 的 CANDIDATE_HEAD {chosen['head'][:12]} 不是報告的 HEAD {head[:12]}")
     return chosen["verdict"] + ("（未標版次）" if chosen["rev"] is None else "")
 
 

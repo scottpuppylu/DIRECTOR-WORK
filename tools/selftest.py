@@ -273,7 +273,7 @@ def test_table(tmp):
     piped = typed.replace("| run test_parser |", "| run `cat a.txt \\| grep -E \"x\\|y\"` and `a | b`, then `c` |")
     if piped == typed:
         failures.append("test_table: TYPED_ORDER has no `run test_parser` cell; update the replace()")
-    pipe_order = tmp / "WO-011-pipe.md"
+    pipe_order = tmp / "WO-001-pipe.md"
     pipe_order.write_text(piped, encoding="utf-8")
     pipe_sha = hashlib.sha256(piped.encode("utf-8")).hexdigest()
     expect("a `|` inside backticks does not split the order's cell", "gate_check.py", 0, "--order", pipe_order, lacks=["cells", "  ~ "])
@@ -328,10 +328,13 @@ def test_dispatch(tmp):
     retyped.write_text(typed.replace("| AC-2 | REVIEW |", "| AC-2 | AUTO |"), encoding="utf-8")
     match("dispatch_review_to_auto_rehashed", 1, against=retyped, rows=[good[0], "| AC-2 | reads right | e.json | PASS |", good[2]],
           says="the order changed after dispatch", dispatch_log=logged)
-    for governance, code, mark in (("Strict", 1, "  - DISPATCH: no line for WO-001 / WO-001-"), ("Standard", 0, "  ~ DISPATCH: no line for"), ("Direct", 0, None)):
+    # v0.13 (G01): given a log, an order it does not show as dispatched fails in every governance, so lowering the mode
+    # in the order (Strict -> Direct) does not skip the check
+    for governance, code, mark in (("Strict", 1, "  - DISPATCH: no line for WO-001 / WO-001-"), ("Standard", 1, "  - DISPATCH: no line for"),
+                                   ("Direct", 1, "  - DISPATCH: no line for")):
         other = tmp / f"WO-001-{governance}.md"
         other.write_text(typed.replace("GOVERNANCE     = Standard", f"GOVERNANCE     = {governance}"), encoding="utf-8")
-        match(f"dispatch_no_record_{governance}", code, against=other, says=mark, lacks=None if mark else "DISPATCH",
+        match(f"dispatch_no_record_{governance}", code, against=other, says=mark,
               dispatch_log=log("log_other", f"DISPATCH WO-999 rev=1 sha={'1' * 64}"))
     strict = tmp / "WO-001-Strict.md"
     match("strict_without_dispatch_log_fails", 1, against=strict, says="- DISPATCH: Strict order checked without --dispatch-log")
@@ -379,6 +382,101 @@ def test_revision(tmp):
          log_line="DISPATCH WO-001 rev=1 sha={sha}")
 
 
+def test_verdict_binding(tmp):
+    """v0.13 (G04): with --match the verdict's ORDER line names a matched order at its REVISION; with --candidate its
+    CANDIDATE_HEAD is the commit under review. A missing line fails Strict and is a note otherwise."""
+    typed = TYPED_ORDER.format(base="abc123")
+    candidate = "d0d0d0d" + "0" * 33
+
+    def case(name, code, verdict_head, says=None, lacks=None, candidate_flag=True, match=True, governance="Standard"):
+        folder = tmp / "verdict_binding" / name
+        folder.mkdir(parents=True)
+        text = typed.replace("GOVERNANCE     = Standard", f"GOVERNANCE     = {governance}")
+        order = folder / "WO-001-parser.md"
+        order.write_bytes(text.encode("utf-8"))
+        report = folder / "report.md"
+        report.write_text(match_report(list(ACCEPTANCE.values()), "PASS", hashlib.sha256(text.encode("utf-8")).hexdigest()),
+                          encoding="utf-8")
+        verdict = folder / "verdict.md"
+        verdict.write_text(VERDICT.format(verdict="PASS", step="ACCEPT_AND_CLOSE").replace(
+            "# GATE VERDICT", "# GATE VERDICT WO-001\n" + verdict_head), encoding="utf-8")
+        args = ["--verdict", verdict] + (["--match", report, order] if match else [])
+        args += ["--candidate", candidate] if candidate_flag else []
+        expect(name, "gate_check.py", code, *args, says=says, lacks=lacks)
+
+    case("verdict_bound", 0, f"ORDER: WO-001-parser.md REVISION 1\nCANDIDATE_HEAD: {candidate}\n", "OK   verdict", "  - ")
+    case("verdict_wrong_commit", 1, f"ORDER: WO-001-parser.md REVISION 1\nCANDIDATE_HEAD: {'d' * 40}\n",
+         "- CANDIDATE_HEAD: the verdict is for dddddddddddd, the candidate is d0d0d0d00000; the verdict judged another commit")
+    case("verdict_wrong_commit_without_match", 1, f"CANDIDATE_HEAD: {'d' * 40}\n", "- CANDIDATE_HEAD: the verdict is for",
+         match=False)
+    case("verdict_old_revision", 1, f"ORDER: WO-001-parser.md REVISION 2\nCANDIDATE_HEAD: {candidate}\n",
+         "- ORDER: the verdict is for REVISION 2, the order is at REVISION 1")
+    case("verdict_other_order", 1, f"ORDER: WO-777-other.md REVISION 1\nCANDIDATE_HEAD: {candidate}\n",
+         "- ORDER: the verdict names WO-777-other.md, which is none of the --match orders")
+    case("verdict_no_lines_standard", 0, "", ["~ ORDER: the verdict names no order", "~ CANDIDATE_HEAD: the verdict names no commit"])
+    case("verdict_no_head_strict", 1, "ORDER: WO-001-parser.md REVISION 1\n",
+         "- CANDIDATE_HEAD: the verdict names no commit", governance="Strict")
+    case("verdict_short_head_strict", 1, f"ORDER: WO-001-parser.md REVISION 1\nCANDIDATE_HEAD: {candidate[:12]}\n",
+         "- CANDIDATE_HEAD: the verdict is for d0d0d0d00000", governance="Strict")
+    case("verdict_alone_unchanged", 0, "", "OK   verdict", "  ~ ", candidate_flag=False, match=False)
+
+
+def test_dispatch_events(tmp):
+    """v0.13 (R01 G01 G02): only a whole DISPATCH line is a dispatch event; the same words in a NOTE, backticks, a quote,
+    an indented line or a fence are data. The order's title, file name and the report's ORDER line name one order."""
+    typed = TYPED_ORDER.format(base="abc123")
+    if "# WO-001" not in typed:
+        failures.append("test_dispatch_events: TYPED_ORDER has no `# WO-001` title; update the replace()")
+    root = tmp / "events"
+    root.mkdir()
+    sha, other = hashlib.sha256(typed.encode("utf-8")).hexdigest(), "1" * 64
+
+    def case(name, code, lines, says=None, lacks=None, text=typed, edit=None):
+        folder = root / name
+        folder.mkdir()
+        order = folder / "WO-001-parser.md"
+        order.write_bytes(text.encode("utf-8"))
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        report = match_report(list(ACCEPTANCE.values()), "PASS", digest)
+        (folder / "report.md").write_text(edit(report) if edit else report, encoding="utf-8")
+        (folder / "log.md").write_text("# DIRECTOR_LOG\n" + "".join(line.format(sha=sha, digest=digest, other=other) + "\n"
+                                                                   for line in lines), encoding="utf-8")
+        expect(name, "gate_check.py", code, "--match", folder / "report.md", order, "--dispatch-log", folder / "log.md",
+               says=says, lacks=lacks)
+        return order
+
+    stale = "not the one logged at dispatch"
+    case("event_bare_line", 0, ["DISPATCH WO-001 rev=1 sha={digest}"], says="OK   match", lacks="  ~ ")
+    case("event_date_and_basis_columns", 0, ["2026-01-02 10:00 +08:00 | DISPATCH WO-001 rev=1 sha={digest} | DD-1 PO said 開"],
+         says="OK   match")
+    case("event_quoted_in_note_ignored", 1, ["2026-01-02 10:00 +08:00 | DISPATCH WO-001 rev=1 sha={other}",
+                                             "2026-01-03 10:00 +08:00 | NOTE: rejected proposal `DISPATCH WO-001 rev=1 sha={digest}`"],
+         says=stale)
+    case("event_in_note_column_ignored", 1, ["DISPATCH WO-001 rev=1 sha={other}",
+                                             "2026-01-03 10:00 +08:00 | NOTE: rejected | DISPATCH WO-001 rev=1 sha={digest}"], says=stale)
+    case("event_in_backtick_fence_ignored", 1, ["DISPATCH WO-001 rev=1 sha={other}", "```text", "DISPATCH WO-001 rev=1 sha={digest}", "```"],
+         says=stale)
+    case("event_in_tilde_fence_ignored", 1, ["DISPATCH WO-001 rev=1 sha={other}", "~~~", "DISPATCH WO-001 rev=1 sha={digest}", "~~~"],
+         says=stale)
+    case("event_in_quote_ignored", 1, ["DISPATCH WO-001 rev=1 sha={other}", "> DISPATCH WO-001 rev=1 sha={digest}"], says=stale)
+    case("event_indented_ignored", 1, ["DISPATCH WO-001 rev=1 sha={other}", "    DISPATCH WO-001 rev=1 sha={digest}"], says=stale)
+    case("event_after_closed_fence_counts", 0, ["```", "DISPATCH WO-001 rev=1 sha={other}", "```", "DISPATCH WO-001 rev=1 sha={digest}"],
+         says="OK   match")
+    case("event_only_quoted_is_no_line", 1, ["2026-01-03 10:00 +08:00 | NOTE: `DISPATCH WO-001 rev=1 sha={digest}`"],
+         says="- DISPATCH: no line for WO-001")
+    case("event_latest_across_names", 1, ["DISPATCH WO-001-parser rev=1 sha={digest}", "DISPATCH WO-001 rev=1 sha={other}"], says=stale)
+    # G01: the worker renames the order in its title and lowers Strict to Direct; the log still has the real dispatch
+    renamed = typed.replace("# WO-001", "# WO-999").replace("GOVERNANCE     = Standard", "GOVERNANCE     = Direct")
+    order = case("order_title_renamed_and_direct", 1, ["DISPATCH WO-001 rev=1 sha={sha}"], text=renamed,
+                 says=["- order: the title names WO-999, the file name WO-001-parser.md names WO-001", stale])
+    expect("--hash shows a title / file name mismatch", "gate_check.py", 0, "--hash", order,
+           says=["DISPATCH WO-999 rev=1", "- order: the title names WO-999"])
+    # G02: the report answers another order
+    case("report_names_another_order", 1, ["DISPATCH WO-001 rev=1 sha={digest}"],
+         edit=lambda r: r.replace("ORDER: WO-001-parser.md", "ORDER: WO-999-other.md"),
+         says="- ORDER: the report names WO-999-other.md, the order is WO-001")
+
+
 def evidence_file(folder, name, head, exit_code=0, timed_out=False, dirty=False, label="AC-1", sha256="ab" * 32, drop=(), **override):
     """An evidence_record.py file with every field `run` writes, written directly so the case does not depend on git.
     drop: field names to leave out; override: field values to replace."""
@@ -406,11 +504,11 @@ def test_evidence_match(tmp):
     strict_text = typed.replace("GOVERNANCE     = Standard", "GOVERNANCE     = Strict")
     if strict_text == typed:
         failures.append("TYPED_ORDER has no `GOVERNANCE     = Standard` line; update test_evidence_match")
-    strict = tmp / "WO-003-strict.md"
+    strict = tmp / "WO-001-strict.md"
     strict.write_bytes(strict_text.encode("utf-8"))
     strict_sha = hashlib.sha256(strict_text.encode("utf-8")).hexdigest()
     strict_log = tmp / "strict_log.md"
-    strict_log.write_text(f"# DIRECTOR_LOG\n2026-01-02 10:00 +08:00 | DISPATCH WO-003-strict rev=1 sha={strict_sha}\n", encoding="utf-8")
+    strict_log.write_text(f"# DIRECTOR_LOG\n2026-01-02 10:00 +08:00 | DISPATCH WO-001-strict rev=1 sha={strict_sha}\n", encoding="utf-8")
 
     def ev(name, code, record=None, says=None, lacks=None, rows=good, title=f"/ c / {head} / yes", extra="", result="PASS",
            against=order, digest=sha):
@@ -756,9 +854,14 @@ def test_trace(tmp):
     expect("trace takes neither of two verdicts it cannot order", "trace_report.py", 0, *trace_paired,
            says="| DD-1 | WO-001 | AC-1 | AUTO | FAIL | e.json | 多份裁決分不出先後 |")
     verdict("v2b.md", "REWORK", 2, "2026-01-06 10:00\nCANDIDATE_HEAD: abcdef0123\n")
-    expect("trace takes the later verdict of the report's revision and lists a CANDIDATE_HEAD that is not the report's",
+    expect("trace never shows a verdict whose CANDIDATE_HEAD is not the report's (G04b), even when it is later",
            "trace_report.py", 0, *trace_paired,
-           says=["| DD-1 | WO-001 | AC-1 | AUTO | FAIL | e.json | REWORK |", "v2b.md 的 CANDIDATE_HEAD abcdef0123 不是報告的 HEAD d0d0d0d"])
+           says=["| DD-1 | WO-001 | AC-1 | AUTO | FAIL | e.json | FAIL |", "v2b.md 的 CANDIDATE_HEAD abcdef0123 不是報告的 HEAD d0d0d0d"],
+           lacks="| REWORK |")
+    (paired / "reviews" / "v2a.md").rename(paired / "v2a.md")
+    expect("trace marks the cell 未配對 when the only verdict of the revision judged another commit (G04b)",
+           "trace_report.py", 0, *trace_paired, says="| FAIL | e.json | 未配對：沒有 HEAD d0d0d0d 的裁決 |", lacks="| REWORK |")
+    (paired / "v2a.md").rename(paired / "reviews" / "v2a.md")
     verdict("v2b.md", "REWORK", 2, "2026-01-06 10:00\nCANDIDATE_HEAD: d0d0d0d\n")
     expect("trace accepts a CANDIDATE_HEAD equal to the report's HEAD", "trace_report.py", 0, *trace_paired,
            says="| REWORK |", lacks="不是報告的 HEAD")
@@ -1264,7 +1367,12 @@ def test_trusted_rerun(tmp):
            says="NOT_RUN the record's label 'AC-2' names no AC with an approved check")
     for name, line, says in (("another hash", f"DISPATCH WO-001 rev=1 sha={'0' * 64}", "is not the one logged at dispatch"),
                              ("another revision", f"DISPATCH WO-001 rev=2 sha={digest}", "logs rev=2, the order is at REVISION 1"),
-                             ("no line", "nothing here", "NOT_RUN no DISPATCH line for WO-001 / WO-001-parser")):
+                             ("no line", "nothing here", "NOT_RUN no DISPATCH line for WO-001 / WO-001-parser"),
+                             # R01b: a quoted DISPATCH with the new hash is data, not a newer dispatch
+                             ("quoted line", f"DISPATCH WO-001 rev=1 sha={'0' * 64}\n2026-01-03 10:00 +08:00 | NOTE: rejected "
+                              f"proposal `DISPATCH WO-001 rev=1 sha={digest}`", "is not the one logged at dispatch"),
+                             ("fenced line", f"DISPATCH WO-001 rev=1 sha={'0' * 64}\n```\nDISPATCH WO-001 rev=1 sha={digest}\n```",
+                              "is not the one logged at dispatch")):
         other_log = root / f"log_{name.replace(' ', '_')}.md"
         other_log.write_text(line + "\n", encoding="utf-8")
         verify(f"DISPATCH {name}", 2, record, says=says, dispatch=other_log)
@@ -1289,6 +1397,8 @@ def main():
         test_table(tmp)
         test_dispatch(tmp)
         test_revision(tmp)
+        test_dispatch_events(tmp)
+        test_verdict_binding(tmp)
         test_evidence_match(tmp)
         test_candidate(tmp)
         test_one_fault(tmp)
