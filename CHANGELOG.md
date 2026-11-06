@@ -18,7 +18,7 @@
 - `metrics_report.py`：沒有裁決時返工印 `UNKNOWN`，沒有 `RESUMED` 行時中斷重做印 `UNKNOWN`，不再印 0。像工單卻沒算進去的檔案、`--since` 略過的和沒有日期的工單，列在文末「沒計入的檔案」。PO 介入的來源可在 `director_work.json` 設 `po_pending_files`、`po_item_pattern`、`po_open_pattern`，加 `--config`；每項的 `CREATED:` 給 `--since` 用，沒寫的照算並標 `UNDATED`。設定或規則式寫壞時印 FAIL、exit 1。
 - `trace_report.py`：沒算進去的檔案列在文末。同一工單多份報告時，依 `ORDER:` 行的 REVISION、`ATTEMPT: n`、報告裡第一個日期取最新的，不看檔名；全部相同就都不取並寫明。另列每份報告和選了哪份。
 - `templates/PO_PENDING.md` 加 `CREATED:`；`director_work.example.json` 加三個 `po_` 欄位（選用，`schema_version` 不變）。
-- `selftest.py` 加上面各項的正反案例（共 274 項）。
+- `selftest.py` 加上面各項的正反案例（共 285 項）。另一組照外部稽核的跑法同時加 `--order`、`--report`、`--match`、`--evidence-dir`：紀錄由 `evidence_record.py run` 寫出、欄位完整，每案只改壞一項（報告 HEAD、紀錄 HEAD、未提交改動、label）。Strict 每項單獨 exit 1 且只有這一條問題；Standard 下紀錄 HEAD 不符仍 exit 1，其他三項只提示。
 
 對齊初衷：
 1. 幫到誰：外部深度分析報告和總監的對抗測試找到的漏洞，在隔離 fixture 逐項重現後才修。worker 放寬或刪掉驗收條件再重算雜湊會通過（對抗測試 T7–T9）。只有 `{"exit_code": 0}` 的檔案能當證據。`report-9.md` 會蓋過 `report-10.md`。真實專案 21 份工單只算 17 份，沒有說明。沒有裁決時返工印 0。

@@ -428,6 +428,53 @@ def test_evidence_match(tmp):
     expect("--evidence-dir folder missing", "gate_check.py", 2, "--match", plain, order, "--evidence-dir", tmp / "nope")
 
 
+def test_one_fault(tmp):
+    """v0.12: one fault at a time in an otherwise complete record, run the way an outside audit runs gate_check
+    (--order, --report, --match and --evidence-dir together). The record starts as what `evidence_record.py run` wrote,
+    so no case stops early at a missing field. Strict: each fault alone exits 1 with that one problem. Standard: a record
+    from another commit still fails; uncommitted changes, another AC's label and a report HEAD that is not a hash are notes."""
+    global total
+    base = tmp / "one_fault"
+    work = base / "work"
+    work.mkdir(parents=True)
+    expect("one fault: recording the base record", "evidence_record.py", 0, "run", "--out-dir", base / "out", "--label", "AC-1",
+           "--cwd", work, "--", sys.executable, "-c", "print('ok')", says="exit=0")
+    written = json.loads(next((base / "out").glob("*.json")).read_text(encoding="utf-8"))
+    head = "0123456789abcdef0123456789abcdef01234567"
+    written["git"] = {"head": head, "dirty": False}  # run outside git leaves both None; set them, change nothing else
+    faults = {
+        "clean": ({}, head, None),
+        "report_head_not_hash": ({}, "not-a-commit", "HEAD: not-a-commit is not a commit hash"),
+        "record_from_other_commit": ({"git": {"head": "f" * 40, "dirty": False}}, head, "recorded at HEAD ffffffffffff"),
+        "dirty": ({"git": {"head": head, "dirty": True}}, head, "recorded with uncommitted changes"),
+        "other_label": ({"label": "AC-OTHER"}, head, "its label is AC-OTHER, not AC-1"),
+    }
+    fails_in_standard = {"record_from_other_commit"}
+    for governance in ("Strict", "Standard"):
+        text = TYPED_ORDER.format(base="a" * 40).replace("GOVERNANCE     = Standard", f"GOVERNANCE     = {governance}")
+        for case, (change, report_head, problem) in faults.items():
+            folder = base / governance / case
+            folder.mkdir(parents=True)
+            order = folder / "WO-001-parser.md"
+            order.write_bytes(text.encode("utf-8"))
+            (folder / "e.json").write_text(json.dumps({**written, **change}), encoding="utf-8")
+            report = folder / "report.md"
+            report.write_text(match_report(list(ACCEPTANCE.values()), "PARTIAL", hashlib.sha256(text.encode("utf-8")).hexdigest())
+                              .replace("/ c / d0d0d0d / yes", f"/ c / {report_head} / yes", 1), encoding="utf-8")
+            code, out = run("gate_check.py", "--order", order, "--report", report, "--match", report, order, "--evidence-dir", folder)
+            problems = [line for line in out.splitlines() if line.startswith("  - ")]
+            notes = [line for line in out.splitlines() if line.startswith("  ~ ") and problem and problem in line]
+            if problem is None:
+                ok = code == 0 and not problems
+            elif governance == "Strict" or case in fails_in_standard:
+                ok = code == 1 and len(problems) == 1 and problem in problems[0]
+            else:
+                ok = code == 0 and not problems and notes
+            total += 1
+            if not ok:
+                failures.append(f"one fault {governance} {case}: exit {code}, problems {problems}, notes {notes}: {out.strip()[-300:]}")
+
+
 def test_metrics(tmp):
     """metrics_report.py counts PURPOSE.md's numbers from the Director's files; a missing source is UNKNOWN, not 0."""
     root = tmp / "metrics" / "DIRECTOR"
@@ -809,6 +856,7 @@ def main():
         test_table(tmp)
         test_dispatch(tmp)
         test_evidence_match(tmp)
+        test_one_fault(tmp)
         test_trace(tmp)
         test_metrics(tmp)
         test_purpose()
