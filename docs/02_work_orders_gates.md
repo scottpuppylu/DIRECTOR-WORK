@@ -30,7 +30,7 @@
 
 - Worker 在 gate 完成、卡住、需要裁決、要偏離工單時回報，一個 gate 只送**一則完整**的 TASK REPORT（`templates/TASK_REPORT.md`）。
 - 交件前 worker 跑三支工具，把結論行貼進 TASK REPORT：`tools/scope_check.py`（改動有沒有超出工單）、`tools/gate_check.py`（欄位和用詞）、`tools/evidence_record.py`（驗收指令留下重跑指令和產物雜湊）。AUTO 條件在最後一次 commit 之後記錄，ACCEPTANCE 表的證據欄寫紀錄的 `.json` 檔名；總監用 `gate_check.py --match 報告 工單 --evidence-dir 證據資料夾` 核對紀錄真的 exit 0、HEAD 相同。
-- 總監審查時自己重跑 `scope_check.py`、`evidence_record.py verify --rerun` 和 `gate_check.py --match 報告 工單 --dispatch-log DIRECTOR_LOG.md`，不只看報告怎麼寫。只有 `verify --rerun` 才算重跑驗證；`--match --evidence-dir` 和不加 `--rerun` 的 `verify` 只是讀 worker 自己寫的紀錄。`--match` 檢查每條驗收條件都有結果、狀態符合類型、PASS 附證據、工單雜湊和派工紀錄相符；不給 `--dispatch-log` 就只能和工單現在的樣子比。工具通過只代表格式、範圍和檔案對得上，不代表做對了；下面四階段照做。
+- 總監審查時自己重跑 `scope_check.py`、`evidence_record.py verify --rerun` 和 `gate_check.py --match 報告 工單 --dispatch-log DIRECTOR_LOG.md`，不只看報告怎麼寫。Strict 工單再加 `--evidence-dir 證據資料夾 --candidate <git rev-parse worker 分支>`，少一個就失敗：報告、證據紀錄和裁決的 `CANDIDATE_HEAD` 都要指向同一個 commit。只有 `verify --rerun` 才算重跑驗證；`--match --evidence-dir` 和不加 `--rerun` 的 `verify` 只是讀 worker 自己寫的紀錄。`--match` 檢查每條驗收條件都有結果、狀態符合類型、PASS 附證據、工單雜湊和派工紀錄相符；不給 `--dispatch-log` 就只能和工單現在的樣子比。工具通過只代表格式、範圍和檔案對得上，不代表做對了；下面四階段照做。
 - 總監審查四階段：
   1. 對照原始需求逐項核對，不接受 worker 自行縮減的驗收條件。REVIEW 條件交給獨立審查（`docs/07`），PO 條件放上待決頁。
   2. 審證據：修改範圍、意外修改、build、測試是否足夠、回歸、未驗證項。沒有親自取得的證據要寫「依 worker 報告」。

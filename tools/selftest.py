@@ -328,7 +328,7 @@ def test_dispatch(tmp):
         match(f"dispatch_no_record_{governance}", code, against=other, says=mark, lacks=None if mark else "DISPATCH",
               dispatch_log=log("log_other", f"DISPATCH WO-999 rev=1 sha={'1' * 64}"))
     strict = tmp / "WO-001-Strict.md"
-    match("strict_without_dispatch_log_notes", 0, against=strict, says="~ DISPATCH: Strict order checked without --dispatch-log")
+    match("strict_without_dispatch_log_fails", 1, against=strict, says="- DISPATCH: Strict order checked without --dispatch-log")
     match("standard_without_dispatch_log_silent", 0, lacks="DISPATCH")
     expect("--dispatch-log needs --match", "gate_check.py", 2, "--order", order, "--dispatch-log", logged)
     expect("--dispatch-log file missing", "gate_check.py", 2, "--match", tmp / "dispatch_ok.md", order, "--dispatch-log", tmp / "nope.md")
@@ -403,9 +403,12 @@ def test_evidence_match(tmp):
     strict = tmp / "WO-003-strict.md"
     strict.write_bytes(strict_text.encode("utf-8"))
     strict_sha = hashlib.sha256(strict_text.encode("utf-8")).hexdigest()
+    strict_log = tmp / "strict_log.md"
+    strict_log.write_text(f"# DIRECTOR_LOG\n2026-01-02 10:00 +08:00 | DISPATCH WO-003-strict rev=1 sha={strict_sha}\n", encoding="utf-8")
 
     def ev(name, code, record=None, says=None, lacks=None, rows=good, title=f"/ c / {head} / yes", extra="", result="PASS",
            against=order, digest=sha):
+        """A Strict order is matched with --candidate and --dispatch-log too (v0.13), so each case shows one fault."""
         if record is not None:
             evidence_file(folder, "e.json", **{"head": head, **record})
         report = tmp / f"{name}.md"
@@ -415,7 +418,8 @@ def test_evidence_match(tmp):
         else:
             text = text.replace("/ c / d0d0d0d / yes", title, 1)
         report.write_text(text, encoding="utf-8")
-        expect(name, "gate_check.py", code, "--match", report, against, "--evidence-dir", folder, says=says, lacks=lacks)
+        bind = ("--candidate", head, "--dispatch-log", strict_log) if against == strict else ()
+        expect(name, "gate_check.py", code, "--match", report, against, "--evidence-dir", folder, *bind, says=says, lacks=lacks)
         return report
 
     ev("ev_ok", 0, {}, "OK   match", "  ~ ")  # AC-2 (REVIEW) names out.txt: only AUTO rows are read
@@ -467,6 +471,72 @@ def test_evidence_match(tmp):
     expect("--evidence-dir folder missing", "gate_check.py", 2, "--match", plain, order, "--evidence-dir", tmp / "nope")
 
 
+def test_candidate(tmp):
+    """v0.13 (A01 A02 A04): a Strict --match is bound to the candidate commit. With --candidate, --dispatch-log and
+    --evidence-dir and a full-hash report it passes; leaving out one piece is exactly one problem for Strict and nothing
+    to fail for Standard. A candidate the report or record does not match fails in both."""
+    global total
+    head = "0123456789abcdef0123456789abcdef01234567"
+    other = "f" * 40
+    for governance in ("Strict", "Standard"):
+        text = TYPED_ORDER.format(base="abc123").replace("GOVERNANCE     = Standard", f"GOVERNANCE     = {governance}")
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+        def case(name, record=None, title=head, drop=(), candidate=head):
+            folder = tmp / "candidate" / governance / name
+            folder.mkdir(parents=True)
+            order = folder / "WO-001-parser.md"
+            order.write_bytes(text.encode("utf-8"))
+            evidence_file(folder, "e.json", **{"head": head, **(record or {})})
+            (folder / "log.md").write_text(f"# DIRECTOR_LOG\n2026-01-02 10:00 +08:00 | DISPATCH WO-001 rev=1 sha={digest}\n",
+                                           encoding="utf-8")
+            report_text = match_report(list(ACCEPTANCE.values()), "PARTIAL", digest)
+            if title is None:
+                report_text = report_text.replace(" / HEAD / WORKTREE_CLEAN: T / a / sonnet / b / c / d0d0d0d / yes",
+                                                  " / WORKTREE_CLEAN: T / a / sonnet / b / c / yes", 1)
+            else:
+                report_text = report_text.replace("/ c / d0d0d0d / yes", f"/ c / {title} / yes", 1)
+            (folder / "report.md").write_text(report_text, encoding="utf-8")
+            flags = {"--evidence-dir": folder, "--dispatch-log": folder / "log.md", "--candidate": candidate}
+            args = [part for flag, value in flags.items() if flag not in drop for part in (flag, value)]
+            code, out = run("gate_check.py", "--match", folder / "report.md", order, *args)
+            return code, [line for line in out.splitlines() if line.startswith("  - ")], out
+
+        def check(name, want, **kw):
+            """want: the one problem Strict must report; Standard must pass. None: both pass with no problem."""
+            global total
+            total += 1
+            code, problems, out = case(name, **kw)
+            if want is None or governance == "Standard":
+                ok = code == 0 and not problems
+            else:
+                ok = code == 1 and len(problems) == 1 and want in problems[0]
+            if not ok:
+                failures.append(f"candidate {governance} {name}: exit {code}, problems {problems}: {out.strip()[-300:]}")
+
+        check("bound", None)
+        check("no_dispatch_log", "DISPATCH: Strict order checked without --dispatch-log", drop=("--dispatch-log",))
+        check("no_evidence_dir", "EVIDENCE: Strict order checked without --evidence-dir; the records of AUTO PASS rows AC-1",
+              drop=("--evidence-dir",))
+        check("no_candidate", "CANDIDATE: a Strict match needs --candidate", drop=("--candidate",))
+        check("legacy_record", "AC-1: e.json: legacy record without `schema`; Strict: record again",
+              record={"drop": ("schema", "cwd", "started", "finished")})
+        check("record_without_head", "AC-1: e.json: recorded with no git HEAD; Strict: record again", record={"head": None})
+        check("short_report_head", "HEAD: a Strict report names the full commit (40 hex digits), got 0123456", title=head[:7])
+        check("no_report_head", "HEAD: a Strict report names the full commit (40 hex digits), got none", title=None)
+        for name, kw, want in (("other_candidate", {"candidate": other}, "the report names 0123456789ab, the candidate is ffffffffffff"),
+                               ("record_not_at_candidate", {"record": {"head": other}},
+                                "recorded at HEAD ffffffffffff, the candidate is 0123456789ab")):
+            total += 1
+            code, problems, out = case(name, **kw)
+            if code != 1 or not any(want in p for p in problems):
+                failures.append(f"candidate {governance} {name}: exit {code}, problems {problems}: {out.strip()[-300:]}")
+    expect("--candidate needs the full hash", "gate_check.py", 2, "--match", tmp / "candidate" / "Strict" / "bound" / "report.md",
+           tmp / "candidate" / "Strict" / "bound" / "WO-001-parser.md", "--candidate", head[:7])
+    expect("--candidate needs --match", "gate_check.py", 2, "--report", tmp / "candidate" / "Strict" / "bound" / "report.md",
+           "--candidate", head)
+
+
 def test_one_fault(tmp):
     """v0.12: one fault at a time in an otherwise complete record, run the way an outside audit runs gate_check
     (--order, --report, --match and --evidence-dir together). The record starts as what `evidence_record.py run` wrote,
@@ -498,9 +568,13 @@ def test_one_fault(tmp):
             order.write_bytes(text.encode("utf-8"))
             (folder / "e.json").write_text(json.dumps({**written, **change}), encoding="utf-8")
             report = folder / "report.md"
-            report.write_text(match_report(list(ACCEPTANCE.values()), "PARTIAL", hashlib.sha256(text.encode("utf-8")).hexdigest())
+            digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+            report.write_text(match_report(list(ACCEPTANCE.values()), "PARTIAL", digest)
                               .replace("/ c / d0d0d0d / yes", f"/ c / {report_head} / yes", 1), encoding="utf-8")
-            code, out = run("gate_check.py", "--order", order, "--report", report, "--match", report, order, "--evidence-dir", folder)
+            (folder / "log.md").write_text(f"# DIRECTOR_LOG\n2026-01-02 10:00 +08:00 | DISPATCH WO-001 rev=1 sha={digest}\n",
+                                           encoding="utf-8")
+            code, out = run("gate_check.py", "--order", order, "--report", report, "--match", report, order, "--evidence-dir", folder,
+                            "--dispatch-log", folder / "log.md", "--candidate", head)
             problems = [line for line in out.splitlines() if line.startswith("  - ")]
             notes = [line for line in out.splitlines() if line.startswith("  ~ ") and problem and problem in line]
             if problem is None:
@@ -955,6 +1029,7 @@ def main():
         test_dispatch(tmp)
         test_revision(tmp)
         test_evidence_match(tmp)
+        test_candidate(tmp)
         test_one_fault(tmp)
         test_trace(tmp)
         test_metrics(tmp)
