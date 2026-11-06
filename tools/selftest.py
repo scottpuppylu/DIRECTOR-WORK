@@ -477,9 +477,13 @@ def test_dispatch_events(tmp):
          says="- ORDER: the report names WO-999-other.md, the order is WO-001")
 
 
-def evidence_file(folder, name, head, exit_code=0, timed_out=False, dirty=False, label="AC-1", sha256="ab" * 32, drop=(), **override):
+def evidence_file(folder, name, head, exit_code=0, timed_out=False, dirty=False, label="AC-1", sha256="written", drop=(), **override):
     """An evidence_record.py file with every field `run` writes, written directly so the case does not depend on git.
-    drop: field names to leave out; override: field values to replace."""
+    With sha256="written" its artifact out.txt is written next to it and hashed. drop: field names to leave out; override: field
+    values to replace."""
+    if sha256 == "written":
+        (folder / "out.txt").write_bytes(b"x")
+        sha256 = hashlib.sha256(b"x").hexdigest()
     record = {"schema": 1, "label": label, "command": ["python", "-c", "0"], "cwd": str(folder), "started": "2026-01-02T10:00:00+08:00",
               "finished": "2026-01-02T10:00:01+08:00", "seconds": 1.0, "exit_code": exit_code, "timed_out": timed_out,
               "git": {"head": head, "dirty": dirty}, "output_lines": 1, "output_tail": ["ok"], "log": None,
@@ -565,6 +569,27 @@ def test_evidence_match(tmp):
        against=strict, digest=strict_sha)
     ev("ev_strict_label_lists_both", 0, {"label": "AC-1 AC-2"}, "OK   match", against=strict, digest=strict_sha)
     ev("ev_strict_clean_ok", 0, {}, "OK   match", lacks="  - ", against=strict, digest=strict_sha)
+    # v0.13 batch 3: one HEAD / ORDER line (G02b); Strict reads only schema 1 and git.dirty false (G03 G03a);
+    # the artifacts a record lists are hashed again (G03c)
+    two_heads = ev("ev_two_heads", 1, {}, "- HEAD: the report names HEAD 2 times (0123456789ab, eeeeeeeeeeee); write it once",
+                   extra=f"HEAD: {'e' * 40}\n")
+    expect("--report fails a report that names HEAD twice", "gate_check.py", 1, "--report", two_heads,
+           says="- HEAD: the report names HEAD 2 times")
+    ev("ev_two_order_lines", 1, {}, "- ORDER: the report has 2 ORDER: lines; write it once",
+       extra="ORDER: WO-001-parser.md REVISION 1\n")
+    ev("ev_schema_strict", 1, {"schema": 99}, "- AC-1: e.json: schema 99 is not one this tool reads (1); Strict",
+       against=strict, digest=strict_sha)
+    ev("ev_schema_standard", 0, {"schema": 99}, ["OK   match", "~ AC-1: e.json: schema 99 is not one this tool reads (1)"])
+    ev("ev_dirty_null_strict", 1, {"dirty": None}, "- AC-1: e.json: git.dirty is null, not false",
+       against=strict, digest=strict_sha)
+    ev("ev_dirty_null_standard", 0, {"dirty": None}, "OK   match", lacks="git.dirty")
+    ev("ev_artifact_changed_strict", 1, {"sha256": "ab" * 32},
+       "- AC-1: e.json: artifact changed since it was recorded: out.txt; Strict", against=strict, digest=strict_sha)
+    ev("ev_artifact_changed_standard", 0, {"sha256": "ab" * 32},
+       ["OK   match", "~ AC-1: e.json: artifact changed since it was recorded: out.txt"])
+    gone = str(tmp / "never-written.txt")
+    ev("ev_artifact_gone_strict", 1, {"artifacts": [{"path": gone, "kind": "file", "size": 1, "sha256": "ab" * 32}]},
+       f"- AC-1: e.json: artifact gone since it was recorded: {gone}", against=strict, digest=strict_sha)
     expect("--report notes a HEAD that is not a commit hash", "gate_check.py", 0, "--report", tmp / "ev_bad_head_standard_notes.md",
            says="~ HEAD: not-a-commit is not a commit hash")
     ev("ev_fail_row_unchecked", 0, {"exit_code": 3}, "OK   match", rows=["| AC-1 | exit 3 | e.json | FAIL |"] + good[1:],

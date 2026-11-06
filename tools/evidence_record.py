@@ -55,6 +55,7 @@ import time
 MAX_LINE = 400
 SHA = re.compile(r"[0-9a-fA-F]{7,40}")
 # field: type a record written by `run` has; a record missing one, or with another type, is not evidence
+SCHEMAS = (1,)  # record versions this tool writes and reads
 RECORD_FIELDS = {"schema": int, "label": str, "command": (list, str), "cwd": str, "started": str, "finished": str,
                  "exit_code": int, "timed_out": bool, "git": dict, "artifacts": list}
 CORE_FIELDS = ("command", "exit_code", "artifacts")  # a record without `schema` (legacy) must still have these

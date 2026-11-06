@@ -446,15 +446,17 @@ def check_report(text, notes):
         if scope.startswith("NOT_RUN"):
             problems.append("RESULT PASS with SCOPE_CHECK NOT_RUN: the scope was not checked")
     check_head(text, problems, notes)
+    check_header_once(text, problems)
     if not ac_table(text, problems):
         notes.append("ACCEPTANCE: no table; give each AC of the order its own row and check it with --match")
     return problems
 
 
-def report_head_value(text):
-    """What a report writes as HEAD: the value after `HEAD:`, or its place in
+def report_head_values(text):
+    """Every value a report writes as HEAD, in order: the value after `HEAD:`, or its place in
     `TASK_ID / ... / HEAD / WORKTREE_CLEAN: ... / <value> / yes` (counted from the right, so a branch name with slashes
-    does not shift it). None when no line names HEAD."""
+    does not shift it)."""
+    found = []
     for line in text.splitlines():
         keys, sep, values = line.partition(":")
         names = [key.strip() for key in keys.split("/")]
@@ -462,8 +464,29 @@ def report_head_value(text):
             parts = [value.strip() for value in values.split("/")]
             back = len(names) - names.index("HEAD")
             if len(parts) >= back:
-                return parts[-back]
-    return None
+                found.append(parts[-back])
+    return found
+
+
+def report_head_value(text):
+    """The first value a report writes as HEAD; None when no line names HEAD."""
+    values = report_head_values(text)
+    return values[0] if values else None
+
+
+HEADER_ONCE = ("ORDER", "ORDER_SHA256", "RESULT")
+
+
+def check_header_once(text, problems):
+    """A report names its commit, order, order hash and result once (G02b): a second line could say something else."""
+    heads = report_head_values(text)
+    if len(heads) > 1:
+        problems.append(f"HEAD: the report names HEAD {len(heads)} times ({', '.join(v[:12] or 'empty' for v in heads)}); "
+                        "write it once")
+    for key in HEADER_ONCE:
+        lines = re.findall(rf"^[ \t]*{key}[ \t]*:", text, re.M)
+        if len(lines) > 1:
+            problems.append(f"{key}: the report has {len(lines)} {key}: lines; write it once")
 
 
 def report_head(text):
@@ -537,6 +560,10 @@ def check_evidence(ac, evidence, folder, head, problems, notes, strict=False, ca
             (problems if strict else notes).append(
                 f"{ac}: {name}: legacy record without `schema`; "
                 + ("Strict: record again with evidence_record.py run" if strict else "only command, exit_code and artifacts checked"))
+        elif record["schema"] not in ev.SCHEMAS:
+            (problems if strict else notes).append(
+                f"{ac}: {name}: schema {record['schema']} is not one this tool reads ({', '.join(map(str, ev.SCHEMAS))})"
+                + ("; Strict: record again with this evidence_record.py" if strict else ""))
         code, git = record["exit_code"], record.get("git") or {}
         if code != 0 or record.get("timed_out"):
             problems.append(f"{ac}: {name}: the command exited {code}{' (timed out)' if record.get('timed_out') else ''}")
@@ -558,6 +585,18 @@ def check_evidence(ac, evidence, folder, head, problems, notes, strict=False, ca
         if git.get("dirty"):
             (problems if strict else notes).append(
                 f"{ac}: {name}: recorded with uncommitted changes" + ("; Strict: commit, then record again" if strict else ""))
+        elif strict and "schema" in record and git.get("dirty") is not False:
+            problems.append(f"{ac}: {name}: git.dirty is {json.dumps(git.get('dirty'))}, not false: the record does not say "
+                            "the worktree was clean; Strict: record again inside the worktree")
+        for item in record.get("artifacts", []):
+            if item.get("sha256") is None:
+                continue
+            path = pathlib.Path(item["path"])
+            now_hash = ev.hash_artifact(path if path.is_absolute() else pathlib.Path(record.get("cwd") or ".", path))["sha256"]
+            if now_hash != item["sha256"]:
+                (problems if strict else notes).append(
+                    f"{ac}: {name}: artifact {'gone' if now_hash is None else 'changed'} since it was recorded: {item['path']}"
+                    + ("; Strict: the record's hash is not what is on disk" if strict else ""))
         if approved is not None and record["command"] != approved:
             (problems if strict else notes).append(
                 f"{ac}: {name}: its command is not the order's approved check (CHECKS {ac}); "
@@ -580,6 +619,7 @@ def check_match(report, order, notes, evidence_dir=None, dispatch=None, order_pa
     problems.extend(f"order: {p}" for p in order_problems)
     strict = bool(re.search(r"^\s*GOVERNANCE\s*=\s*Strict\b", order_text, re.M))
     head_value = check_head(report, problems, notes, strict)
+    check_header_once(report, problems)
     hashlike = head_value.lower() if head_value and SHA.fullmatch(head_value) else None
     if strict and (head_value is None or hashlike) and not (hashlike and len(hashlike) == 40):
         problems.append(f"HEAD: a Strict report names the full commit (40 hex digits), got {hashlike or 'none'}")
