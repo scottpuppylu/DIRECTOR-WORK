@@ -61,7 +61,7 @@
 9. 證據綁工單（G03b）：worker 收證一律加 `--order`。REVISION 2 以上的 Strict 工單，沒綁的舊證據要在候選 commit 重新收，例如：
    `python -I -X utf8 DIRECTOR/tools/evidence_record.py run --out-dir <證據資料夾> --label AC-1 --order DIRECTOR/orders/WO-001-parser.md -- python -I -m unittest tests.test_parser`
    舊版次的證據確定仍然有效時，總監改在 `DIRECTOR_LOG.md` 頂格寫一整行 `EVIDENCE_EQUIVALENT WO-001 rev=1 sha=<紀錄 order 欄的 sha> to rev=2`，不必重收。
-   Codex 重現腳本的 M-C05（對照組，REVISION 2 配沒綁的紀錄）因此從 0 變 1：這是預期變更（G03b 優先），不是退步。
+   Codex 重現腳本的 M-C05（對照組，REVISION 2 配沒綁的紀錄）和 M-C03（同一份對照組用 `verify --rerun` 重跑，重跑本身通過，但 `--rerun` 也比對工單綁定）因此從 0 變 1：這是預期變更（G03b 優先），不是退步。
 
 Deprecated：
 - 證據未綁工單，下個 MAJOR 起必填 `--order`。現在 `evidence_record.py run` 不加 `--order` 仍可用；REVISION 1 的工單照收，但 `gate_check.py --match --evidence-dir` 會印 WARN。
