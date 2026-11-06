@@ -99,6 +99,7 @@ python -I -X utf8 gate_check.py --match <報告.md> <WO.md> --evidence-dir <證�
 python -I -X utf8 gate_check.py --match <報告.md> <WO.md> --dispatch-log <DIRECTOR_LOG.md>   # 再和派工紀錄的雜湊比
 python -I -X utf8 gate_check.py --match <報告.md> <WO.md> --evidence-dir <證據資料夾> --dispatch-log <DIRECTOR_LOG.md> --candidate <40 位>   # Strict 的審查要三個都給
 python -I -X utf8 gate_check.py --hash <WO.md>                # 印工單 SHA-256（CRLF 當 LF 算）和要記進 LOG 的 DISPATCH 行
+python -I -X utf8 gate_check.py --preflight <報告.md> <WO.md> --evidence-dir <證據資料夾> --dispatch-log <DIRECTOR_LOG.md> --repo <受信任的 checkout>   # 舊審查升到新 Strict 前缺什麼
 ```
 
 - 每個檔案印一行 `OK` / `FAIL`，有問題逐條列出；任何一個失敗就 exit 1。
@@ -110,11 +111,12 @@ python -I -X utf8 gate_check.py --hash <WO.md>                # 印工單 SHA-25
 - 工單可以加 `CHECKS:` 清單，每條 AUTO 條件一行 `- AC-1: ["python", "-I", "-m", "unittest", "tests.test_parser"]`：總監核准的檢查指令，JSON 字串陣列，不經 shell。工單雜湊包含它，所以派工時的 DISPATCH 行已經把它鎖住。`--order` 查格式（要能解析成非空的字串陣列）、AC 要存在而且類型是 AUTO、同一 AC 不能寫兩行；Strict 工單有 AUTO 條件卻沒有 CHECKS 只印提示。` #` 之後會被當成註解切掉；指令裡要有 ` #` 時，整個項目用反引號包起來。
 - `--match 報告 工單`（可重複）：工單每條 AC 在報告都有一列，不多不少；狀態要在該類型允許的範圍（`vocabulary.json` 的 `ac_worker_statuses`），所以 REVIEW 或 PO 條件填 PASS 會失敗；PASS 要有證據、PASS / FAIL 要寫實際；有一列是 FAIL / BLOCKED / UNVERIFIED 時 RESULT 不能是 PASS；報告的 `ORDER_SHA256` 要和工單現在的雜湊相同。工單沒寫類型的 AC 當 AUTO 查，另印提示。同時給 `--order` 和 `--report` 不會自動對照，行為和以前一樣。
 - 驗收表（工單和報告都查）：同一個 AC 出現兩列、表頭有兩欄同名、某列欄數和表頭不同，都失敗，不會悄悄取最後一列。反引號裡的 `|` 和寫成 `\|` 的 `|` 不會被當成欄位分隔。
-- `--evidence-dir <資料夾>`（配 `--match`）：AUTO 條件填 PASS 時，證據欄要寫 `evidence_record.py` 產生的 `.json` 檔名，檔案在這個資料夾裡；紀錄的指令 exit 0、沒逾時、產物沒有缺；紀錄的 git HEAD 要和報告的 HEAD 相同，所以最後一次 commit 之後再記。檔案要有 `run` 寫的每個欄位而且型別正確（`schema, label, command, cwd, started, finished, exit_code, timed_out, git, artifacts`），缺一個或型別不對就不算證據，例如只有 `{"exit_code": 0}` 的檔案會失敗；沒有 `schema` 的舊紀錄照舊讀。舊紀錄、沒有 git HEAD 的紀錄、紀錄時有未提交的改動、label 不是這條 AC：Strict 失敗，Standard 只印提示；一份紀錄要給兩條 AC 共用，label 寫兩個（`--label "AC-1 AC-2"`）。報告的 HEAD 要是 7 到 40 位十六進位：Strict 失敗，Standard 和 `--report` 只印提示。工單有 CHECKS 時，紀錄的 command 要和這條 AC 核准的指令完全相同：Strict 失敗，Standard 提示。不加這個參數就和以前一樣，只查有沒有寫證據。這裡只讀紀錄、不重跑；只有 `evidence_record.py verify --rerun --order ...` 才算重跑驗證。紀錄是 worker 自己寫的 JSON，只證明指令跑過而且通過，不證明它測對了東西。
+- `--evidence-dir <資料夾>`（配 `--match`）：AUTO 條件填 PASS 時，證據欄要寫 `evidence_record.py` 產生的 `.json` 檔名，檔案在這個資料夾裡；紀錄的指令 exit 0、沒逾時、產物沒有缺；紀錄的 git HEAD 要和報告的 HEAD 相同，所以最後一次 commit 之後再記。檔案要有 `run` 寫的每個欄位而且型別正確（`schema, label, command, cwd, started, finished, exit_code, timed_out, git, artifacts`），缺一個或型別不對就不算證據，例如只有 `{"exit_code": 0}` 的檔案會失敗；沒有 `schema` 的舊紀錄照舊讀。舊紀錄、沒有 git HEAD 的紀錄、紀錄時有未提交的改動、label 不是這條 AC：Strict 失敗，Standard 只印提示；一份紀錄要給兩條 AC 共用，label 寫兩個（`--label "AC-1 AC-2"`）。Strict 另外要 `schema` 是這版讀得懂的（Standard 提示），`git.dirty` 要明寫 false。紀錄列出的產物會重新算雜湊（相對路徑以紀錄的 cwd 為準），不見或變了：Strict 失敗，Standard 提示；沒有 cwd 的舊紀錄不重算，只提示。報告的 HEAD 要是 7 到 40 位十六進位：Strict 失敗，Standard 和 `--report` 只印提示。工單有 CHECKS 時，紀錄的 command 要和這條 AC 核准的指令完全相同：Strict 失敗，Standard 提示。不加這個參數就和以前一樣，只查有沒有寫證據。這裡只讀紀錄、不重跑；只有 `evidence_record.py verify --rerun --order ...` 才算重跑驗證。紀錄是 worker 自己寫的 JSON，只證明指令跑過而且通過，不證明它測對了東西。
 - `--dispatch-log <DIRECTOR_LOG.md>`（配 `--match`）：LOG 裡要有 `DISPATCH <WO-ID> rev=<n> sha=<64 位雜湊>` 一行（`--hash` 會印好給你貼；WO-ID 是工單標題第一個字或檔名，同一工單以最新一行為準），工單現在的雜湊要和它相同。worker 改工單（放寬條件、刪 REVIEW / PO 列、把 REVIEW 改成 AUTO）後重算 `ORDER_SHA256`，報告和工單彼此一致，只有這條會查出來。DISPATCH 必須獨占一行（前面可有 `<日期> |` 欄、後面可有 `| <依據>` 欄）；寫在說明裡、縮排、`>` 引用或 ``` / ~~~ 圍欄裡的都不算。LOG 沒有這張工單的紀錄：各治理模式都失敗。工單標題和檔名的編號要一致，報告 ORDER 行也要指向這張工單。最新一行的 `rev=` 要等於工單的 REVISION，不同就失敗。
 - 報告的 `ORDER: <檔名> REVISION <n>` 要和工單的 REVISION 相同，不同就失敗（報告回答的是另一版工單）；沒寫 REVISION：Strict 失敗，Standard 提示。
 - `--candidate <40 位>`（配 `--match`）：審查的 commit，總監自己用 `git rev-parse <worker 分支>` 取得，不抄報告。報告的 HEAD 要是它（Strict 以外前綴相同即可），每份證據紀錄的 git HEAD 也要是它（Strict 要完全相同）。不是 40 位十六進位就 exit 2。
 - **Strict 的審查綁在一個 commit 上**：Strict 工單做 `--match` 時，沒給 `--candidate`、沒給 `--dispatch-log`、有 AUTO 列填 PASS 卻沒給 `--evidence-dir`、報告 HEAD 不是完整 40 位，都失敗；舊紀錄和沒有 git HEAD 的紀錄也失敗。v0.12 的 Strict 審查指令要補上這三個參數。
+- `--preflight 報告 工單`（可重複，只讀）：舊版本做的審查要照現在的 Strict 重審前，逐項列出缺什麼，一項一行 `LACKS`：報告 HEAD 不是 40 位（給 `--repo` 時在那個 checkout 解出完整 commit；解不出來就要 worker 重交）、報告 `ORDER:` 行沒寫 REVISION、LOG 沒有這一版的 DISPATCH 行、AUTO 條件沒有 CHECKS（要用核准重跑就要補）、證據紀錄沒有支援的 schema、git.head 不是 40 位或 `git.dirty` 不是 false（要重新收證）。沒給 `--evidence-dir` / `--dispatch-log` 的部分印 `NOT_CHECKED`。有缺就 exit 1。
 - `--hash`：派工時記下，交件時比對。**這是事後偵測，不是事前防止**：任何人都還是改得動工單，只是改了會被查出來；沒有派工紀錄就查不出「改完重算」。
 - 固定用詞（判定、下一步、RESULT、治理模式、證據等級）只在 `vocabulary.json` 定義；改用詞時改它，再改 selftest 點名的文件和範本。
 - 已有舊檔案的專案導入時：`--warn` 只警告、exit 0；`--since YYYY-MM-DD` 跳過較早的檔案（工單看 ISSUED_BY、RESUME_STATE 看 UPDATED、報告和裁決看第一個日期）；找不到日期的檔案無從比較，也跳過，印 `UNDATED` 並在最後一行另計，要查它就不加 `--since`。先用 `--warn` 看全貌，新工單再用 `--since` 嚴格檢查。舊檔案不追溯修改。
@@ -156,7 +158,7 @@ python -I -X utf8 scope_check.py --order <WO.md> --base <ref>        # 取代工
 - submodule 一律比對，不管 `submodule.*.ignore` 或 `diff.ignoreSubmodules` 怎麼設。
 - 標成 assume-unchanged 或 skip-worktree 的檔，git diff 看不到它的修改，所以另外算雜湊和 index 比；不同就算未暫存，並多印一行 `FLAGGED: n file(s) marked ...; m differ from the index`。skip-worktree 而工作樹沒有這個檔，視為 sparse checkout、不算改動。
 - 看不到被 git 忽略的檔案和 repo 外的檔案。
-- 清單項目裡 ` #` 之後是註解。檔名本身有 ` #` 時，整個項目用反引號包起來：`` - `src/x #draft.txt` ``，反引號裡的字照原樣讀（檔名不能含反引號）。`gate_check.py --order` 看到沒包反引號、被 ` #` 切掉的項目會印提示。
+- 清單項目裡 ` #` 之後是註解。檔名本身有 ` #` 時，整個項目用反引號包起來：`` - `src/x #draft.txt` ``，反引號裡的字照原樣讀（檔名不能含反引號）。`gate_check.py --order` 看到沒包反引號、` #` 後面緊接著字（像 `a #1.txt`）而被切掉的項目會印提示；`# 說明`（`#` 後面有空格）當一般註解，不提示。
 - 工單有 `REQUIRED_CHANGES:` 清單時，每一條 glob 都要對到至少一個改動的檔案；沒對到的印 `MISSING   <glob>`，結果是 VIOLATION，最後一行多一個 ` missing=n`。沒有這個清單，輸出和以前一樣。`gate_check.py --order` 另外查每一條都在 SCOPE 裡、不在 FORBIDDEN 裡，否則這張工單做不到。
 - 最後一行貼進 TASK REPORT。exit 0 通過、1 越界或缺必要改動、2 沒辦法檢查（`NOT_RUN`，包括 SCOPE / FORBIDDEN 下一行不是 `- 項目`）。
 

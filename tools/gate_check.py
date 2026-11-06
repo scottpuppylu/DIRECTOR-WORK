@@ -47,6 +47,14 @@ evidence and the product is still the Director's job (docs/02, docs/07).
              The report's `ORDER: <file> REVISION n` line must name the order's REVISION; without a revision Strict
              fails and Standard notes it.
   --hash FILE  print the SHA-256 that ORDER_SHA256 compares (line endings counted as LF) and the DISPATCH line to log
+  --preflight REPORT ORDER
+             before moving a review made with an older version to this one: list, one `LACKS` line each, what the
+             report, order, evidence and dispatch log lack for a Strict review now (a HEAD that is not 40 hex digits, a
+             report ORDER line without REVISION, an order without a DISPATCH line for its REVISION, AUTO criteria
+             without CHECKS, evidence records without a supported schema, a full git HEAD or `git.dirty` false).
+             With --repo, a short HEAD is resolved there to the full commit (when it is unique). Takes
+             --evidence-dir and --dispatch-log; what they would show is NOT_CHECKED without them. Exit 1 when
+             anything is lacking. Only reads, like every check here.
 
 The hash only detects a changed order after the fact; it cannot stop anyone from editing it. An evidence record shows
 a command ran and passed, not that it tests the right thing.
@@ -129,12 +137,13 @@ def parse_list(text, key):
 
 
 def comment_notes(text, notes):
-    """An item cut at ` #` may be a name that holds ` #` (S02): say what was kept, and how to keep the rest."""
+    """An item cut at ` #` may be a name that holds ` #` (S02): say what was kept, and how to keep the rest. Only when a
+    character follows the `#` (`a #1.txt`); `# text`, with a space, is read as an ordinary comment."""
     for key in ("SCOPE", "FORBIDDEN", "REQUIRED_CHANGES", "CHECKS"):
         m = re.search(rf"^[ \t]*{key}[ \t]*[:：][ \t]*\n((?:[ \t]*-[ \t]+.*\n?)*)", text, re.M)
         for line in (m.group(1).splitlines() if m else []):
             item = re.match(r"\s*-\s+(.*)", line).group(1)
-            if re.search(r"\s+#", item) and not re.fullmatch(r"`([^`]+)`(?:\s+#.*)?\s*", item):
+            if re.search(r"\s+#\S", item) and not re.fullmatch(r"`([^`]+)`(?:\s+#.*)?\s*", item):
                 kept = re.split(r"\s+#", item)[0].strip()
                 notes.append(f"{key}: `{item.strip()}` is read as `{kept}` (` #` starts a "
                              "comment); if ` #` is part of the name, write the item in backticks")
@@ -607,7 +616,10 @@ def check_evidence(ac, evidence, folder, head, problems, notes, strict=False, ca
             if item.get("sha256") is None:
                 continue
             path = pathlib.Path(item["path"])
-            now_hash = ev.hash_artifact(path if path.is_absolute() else pathlib.Path(record.get("cwd") or ".", path))["sha256"]
+            if not path.is_absolute() and not record.get("cwd"):
+                notes.append(f"{ac}: {name}: artifact {item['path']} not hashed again: the record has no cwd to find it from")
+                continue
+            now_hash = ev.hash_artifact(path if path.is_absolute() else pathlib.Path(record["cwd"], path))["sha256"]
             if now_hash != item["sha256"]:
                 (problems if strict else notes).append(
                     f"{ac}: {name}: artifact {'gone' if now_hash is None else 'changed'} since it was recorded: {item['path']}"
@@ -711,6 +723,93 @@ def check_match(report, order, notes, evidence_dir=None, dispatch=None, order_pa
     return problems
 
 
+def resolve_commit(repo, short):
+    """The full commit a short hash names in repo, or None when it is unknown or ambiguous."""
+    import subprocess
+    try:
+        done = subprocess.run(["git", "-C", str(repo), "-c", "core.useReplaceRefs=false", "rev-parse", "--verify",
+                               "--quiet", f"{short}^{{commit}}"], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    full = done.stdout.strip().lower()
+    return full if done.returncode == 0 and re.fullmatch(r"[0-9a-f]{40}", full) else None
+
+
+def preflight(report, order, order_path, evidence_dir=None, dispatch=None, log_name=None, repo=None):
+    """(lacks, not checked): what an older report, order, evidence and dispatch log lack for a Strict review now (M01-M03),
+    each with the step that supplies it. Only reads."""
+    lacks, unchecked = [], []
+    order_text = order.decode("utf-8-sig")
+    wanted, got = ac_table(order_text) or {}, ac_table(report) or {}
+    rev = order_revision(order_text)
+    heads = report_head_values(report)
+    value = heads[0] if heads else None
+    if value is None:
+        lacks.append("HEAD: the report names no commit; the worker writes `HEAD: <40 hex digits>` (git rev-parse HEAD)")
+    elif not re.fullmatch(r"[0-9a-fA-F]{40}", value):
+        full = resolve_commit(repo, value) if repo and SHA.fullmatch(value) else None
+        if full:
+            lacks.append(f"HEAD: the report names {value}; in {repo} that is {full}: write the full commit in the report "
+                         "(keep the old report for the record)")
+        else:
+            lacks.append(f"HEAD: the report names {value or 'empty'}, not 40 hex digits; "
+                         + ("it does not name one commit in " + str(repo) + ": the worker resubmits" if repo else
+                            "resolve it with `git rev-parse <short>` in a trusted checkout (--repo), or the worker resubmits"))
+    named = order_line(report)
+    if named is None or named[1] is None:
+        lacks.append(f"ORDER: the report names no revision; write `ORDER: {pathlib.Path(order_path).name} REVISION {rev}`")
+    elif str(named[1]) != rev:
+        lacks.append(f"ORDER: the report is for REVISION {named[1]}, the order is at REVISION {rev}; the worker reports "
+                     "on this revision")
+    if dispatch is None:
+        unchecked.append("DISPATCH: no --dispatch-log")
+    else:
+        hit = dispatch_for(dispatch, order_ids(order_text, order_path))
+        now = order_hash(order)
+        if hit is None or hit[1] != (rev, now):
+            ids = order_ids(order_text, order_path)
+            lacks.append(f"DISPATCH: {log_name} has no `DISPATCH {order_key(ids) or '<WO-ID>'} rev={rev} sha={now[:12]}...` "
+                         "line for the order as it is; the Director logs it (gate_check.py --hash) when dispatching "
+                         "this revision" + (f" (latest is rev={hit[1][0]} sha={hit[1][1][:12]})" if hit else ""))
+    auto = [ac for ac, spec in wanted.items() if spec.get("type", "AUTO") in ("AUTO", "")]
+    checks = order_checks(order_text) or {}
+    without = [ac for ac in auto if ac not in checks]
+    if without:
+        lacks.append(f"CHECKS: no approved check for AUTO {', '.join(without)}; for `evidence_record.py verify --rerun` "
+                     "the Director writes CHECKS, raises REVISION, logs a new DISPATCH and the worker records again "
+                     "(--match without CHECKS still works)")
+    files = sorted({name for ac in auto if got.get(ac, {}).get("status") == "PASS"
+                    for name in EVIDENCE_FILE.findall(got[ac].get("evidence", ""))})
+    if not evidence_dir:
+        unchecked.append(f"EVIDENCE: no --evidence-dir ({len(files)} record(s) named by AUTO PASS rows)")
+        return lacks, unchecked
+    ev = evidence_module()
+    for name in files:
+        try:
+            record = json.loads((pathlib.Path(evidence_dir) / name).read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            lacks.append(f"EVIDENCE {name}: not readable in {evidence_dir}; record again at the candidate")
+            continue
+        bad = ev.record_problems(record)
+        git = record.get("git") if isinstance(record, dict) and isinstance(record.get("git"), dict) else {}
+        missing = []
+        if bad:
+            missing.append(f"not an evidence record ({bad[0]})")
+        elif "schema" not in record:
+            missing.append("no `schema` (legacy record)")
+        elif record["schema"] not in ev.SCHEMAS:
+            missing.append(f"schema {record['schema']} is not one this version reads")
+        head = str(git.get("head") or "")
+        if not bad and not re.fullmatch(r"[0-9a-fA-F]{40}", head):
+            missing.append(f"git.head is {head or 'missing'}, not 40 hex digits")
+        if not bad and git.get("dirty") is not False:
+            missing.append(f"git.dirty is {json.dumps(git.get('dirty'))}, not false")
+        if missing:
+            lacks.append(f"EVIDENCE {name}: {'; '.join(missing)}; record again with this evidence_record.py run (or verify "
+                         "--rerun) at the candidate; keep the old file with a closed review as it was")
+    return lacks, unchecked
+
+
 def check_verdict(text, notes):
     problems = []
     section = re.search(r"^##\s*A\b.*?$(.*?)(?=^##\s|\Z)", text, re.M | re.S)
@@ -784,6 +883,9 @@ def main():
     ap.add_argument("--dispatch-log", metavar="LOG", help="with --match: the order's hash must equal its DISPATCH line here")
     ap.add_argument("--candidate", metavar="SHA", help="with --match: the commit under review, 40 hex digits (git rev-parse <branch>)")
     ap.add_argument("--hash", nargs="+", default=[], metavar="FILE", help="print the hash ORDER_SHA256 compares and the DISPATCH line")
+    ap.add_argument("--preflight", nargs=2, action="append", default=[], metavar=("REPORT", "ORDER"),
+                    help="list what an older review lacks for a Strict review now (LACKS lines)")
+    ap.add_argument("--repo", metavar="DIR", help="with --preflight: a trusted checkout to resolve a short HEAD in")
     ap.add_argument("--warn", action="store_true", help="report problems as WARN and exit 0")
     ap.add_argument("--since", metavar="YYYY-MM-DD", help="skip files dated before this day")
     a = ap.parse_args()
@@ -800,18 +902,20 @@ def main():
         print(f"{digest}  {path}\n  DISPATCH {order_key(ids) or pathlib.Path(path).stem} rev={order_revision(text)} sha={digest}")
         if identity:
             print(f"  - {identity}")
-    if not jobs and a.hash:
+    if not jobs and a.hash and not a.preflight:
         return 1 if missing else 0
-    if not jobs:
-        ap.error("give at least one of --resume / --order / --report / --verdict / --match / --hash")
+    if not jobs and not a.preflight:
+        ap.error("give at least one of --resume / --order / --report / --verdict / --match / --preflight / --hash")
+    if a.repo and not a.preflight:
+        ap.error("--repo works with --preflight")
     if a.since and not DATE.fullmatch(a.since):
         ap.error("--since takes a date: YYYY-MM-DD")
-    if a.evidence_dir and not a.match:
-        ap.error("--evidence-dir works with --match")
+    if a.evidence_dir and not (a.match or a.preflight):
+        ap.error("--evidence-dir works with --match or --preflight")
     if a.evidence_dir and not pathlib.Path(a.evidence_dir).is_dir():
         ap.error(f"--evidence-dir: folder not found: {a.evidence_dir}")
-    if a.dispatch_log and not a.match:
-        ap.error("--dispatch-log works with --match")
+    if a.dispatch_log and not (a.match or a.preflight):
+        ap.error("--dispatch-log works with --match or --preflight")
     if a.dispatch_log and not pathlib.Path(a.dispatch_log).is_file():
         ap.error(f"--dispatch-log: file not found: {a.dispatch_log}")
     if a.candidate and not (a.match or a.verdict):
@@ -823,6 +927,21 @@ def main():
     matched = [(pathlib.Path(o).read_text(encoding="utf-8-sig"), pathlib.Path(o)) for _, o in a.match if pathlib.Path(o).is_file()]
 
     failed = skipped = undated = 0
+    for report_path, order_path in a.preflight:
+        files = [pathlib.Path(report_path), pathlib.Path(order_path)]
+        if not all(f.is_file() for f in files):
+            failed += 1
+            print(f"FAIL preflight {report_path} against {order_path}\n  - file not found")
+            continue
+        order = files[1].read_bytes()
+        mode = re.search(r"^\s*GOVERNANCE\s*=\s*(\w+)", order.decode("utf-8-sig"), re.M)
+        lacks, unchecked = preflight(files[0].read_text(encoding="utf-8-sig"), order, files[1], a.evidence_dir, dispatch,
+                                     a.dispatch_log, a.repo)
+        failed += bool(lacks)
+        print(f"PREFLIGHT {report_path} against {order_path} (GOVERNANCE {mode.group(1) if mode else 'not set'}): "
+              + (f"{len(lacks)} item(s) to migrate" if lacks else "nothing lacking") + "; only read")
+        for line in [f"  LACKS {item}" for item in lacks] + [f"  NOT_CHECKED {item}" for item in unchecked]:
+            print(line)
     for kind, path in jobs:
         files = [pathlib.Path(p) for p in (path if kind == "match" else [path])]
         text = files[0].read_text(encoding="utf-8-sig") if all(f.is_file() for f in files) else None

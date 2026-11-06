@@ -906,7 +906,7 @@ def test_purpose():
     total += 1
     if "只有 PO 能改本檔" not in text:
         failures.append("PURPOSE.md no longer says 只有 PO 能改本檔")
-    for version, body in re.findall(r"^## (\d+\.\d+\.\d+)[^\n]*\n(.*?)(?=^## |\Z)", (root / "CHANGELOG.md").read_text(encoding="utf-8"), re.M | re.S):
+    for version, body in re.findall(r"^## (\d+\.\d+\.\d+|Unreleased)[^\n]*\n(.*?)(?=^## |\Z)", (root / "CHANGELOG.md").read_text(encoding="utf-8"), re.M | re.S):
         total += 1
         if "對齊初衷" not in body:
             failures.append(f"CHANGELOG {version}: no 對齊初衷 line (PURPOSE.md, 改規則前的檢查)")
@@ -934,7 +934,7 @@ def test_vocabulary():
             failures.append(f"vocabulary: {path} no longer contains {text!r}; change tools/vocabulary.json and the docs together")
 
 
-MUST_READ_LIMIT = 12359  # bytes of the 每輪必讀 docs on 2026-11-06 (v0.13 moved pure reasons to docs/10); every round re-reads them, so growth costs quota
+MUST_READ_LIMIT = 12392  # bytes of the 每輪必讀 docs on 2026-11-06 (v0.13 moved pure reasons to docs/10; +33 for the IN_FLIGHT fields kept in docs/06, review D01); every round re-reads them, so growth costs quota
 
 
 def test_must_read_size():
@@ -1082,6 +1082,8 @@ def test_scope(tmp):
         expect(name, "scope_check.py", code, "--order", listed, "--repo", repo, says=says)
     expect("--order notes an item cut at ` #`", "gate_check.py", 0, "--order", listed,
            says="~ FORBIDDEN: `src/x #draft.txt` is read as `src/x` (` #` starts a comment); if ` #` is part of the name")
+    listed.write_text(ORDER.format(base=base).replace("- src/frozen/**\n", "- src/frozen/**  # tests only\n"), encoding="utf-8")
+    expect("--order reads `# text` as a plain comment", "gate_check.py", 0, "--order", listed, lacks="is read as")
     hashed.unlink()
 
     # v0.13: optional REQUIRED_CHANGES; the changes now are src/a.py and .config/app.json
@@ -1443,6 +1445,61 @@ def test_order_checks(tmp):
                    "--candidate", head, says=says, lacks=None if says else "approved check")
 
 
+def test_preflight(tmp):
+    """v0.13 batch 3 (M01 M02 M03): --preflight lists what an older Strict review lacks, one LACKS line each, and
+    resolves a short HEAD in --repo. Once each item is supplied it lists nothing and the Strict --match passes."""
+    global total
+    repo = tmp / "preflight" / "repo"
+    repo.mkdir(parents=True)
+
+    def git(*args):
+        return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args], cwd=repo,
+                              check=True, capture_output=True, text=True).stdout.strip()
+
+    git("init", "-q")
+    (repo / "a.txt").write_text("a", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "a")
+    head = git("rev-parse", "HEAD")
+    strict = TYPED_ORDER.format(base="abc123").replace("GOVERNANCE     = Standard", "GOVERNANCE     = Strict")
+    old = tmp / "preflight" / "old"
+    old.mkdir()
+    order = old / "WO-001-parser.md"
+    order.write_text(strict, encoding="utf-8")
+    digest = hashlib.sha256(strict.encode("utf-8")).hexdigest()
+    (old / "log.md").write_text("# DIRECTOR_LOG\n", encoding="utf-8")
+    evidence_file(old, "e.json", head[:9], drop=("schema",))
+    (old / "report.md").write_text(match_report(list(ACCEPTANCE.values()), "PARTIAL", digest).replace(
+        "/ c / d0d0d0d / yes", f"/ c / {head[:9]} / yes", 1).replace(" REVISION 1", "", 1), encoding="utf-8")
+    flags = ("--evidence-dir", old, "--dispatch-log", old / "log.md")
+    expect("preflight lists what an old Strict review lacks (M01-M03)", "gate_check.py", 1, "--preflight", old / "report.md",
+           order, *flags, "--repo", repo,
+           says=["(GOVERNANCE Strict): 5 item(s) to migrate; only read",
+                 f"LACKS HEAD: the report names {head[:9]}; in {repo} that is {head}",
+                 "LACKS ORDER: the report names no revision; write `ORDER: WO-001-parser.md REVISION 1`",
+                 "LACKS DISPATCH: ", "LACKS CHECKS: no approved check for AUTO AC-1",
+                 "LACKS EVIDENCE e.json: no `schema` (legacy record); git.head is " + head[:9] + ", not 40 hex digits"])
+    expect("preflight without --repo, --evidence-dir or --dispatch-log", "gate_check.py", 1, "--preflight", old / "report.md",
+           order, says=["resolve it with `git rev-parse <short>` in a trusted checkout (--repo)",
+                        "NOT_CHECKED DISPATCH: no --dispatch-log", "NOT_CHECKED EVIDENCE: no --evidence-dir (1 record(s)"])
+    expect("--repo needs --preflight", "gate_check.py", 2, "--report", old / "report.md", "--repo", repo)
+
+    new = tmp / "preflight" / "new"
+    new.mkdir()
+    body = with_checks(strict, 'AC-1: ["python", "-c", "0"]').replace("REVISION       = 1", "REVISION       = 2")
+    digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    (new / "WO-001-parser.md").write_text(body, encoding="utf-8")
+    (new / "log.md").write_text(f"# DIRECTOR_LOG\nDISPATCH WO-001 rev=2 sha={digest}\n", encoding="utf-8")
+    evidence_file(new, "e.json", head)
+    (new / "report.md").write_text(match_report(list(ACCEPTANCE.values()), "PARTIAL", digest).replace(
+        "/ c / d0d0d0d / yes", f"/ c / {head} / yes", 1).replace("REVISION 1", "REVISION 2", 1), encoding="utf-8")
+    flags = ("--evidence-dir", new, "--dispatch-log", new / "log.md")
+    expect("preflight after the migration lists nothing", "gate_check.py", 0, "--preflight", new / "report.md",
+           new / "WO-001-parser.md", *flags, says="(GOVERNANCE Strict): nothing lacking; only read", lacks=["LACKS", "NOT_CHECKED"])
+    expect("the migrated review passes the Strict --match", "gate_check.py", 0, "--match", new / "report.md",
+           new / "WO-001-parser.md", *flags, "--candidate", head)
+
+
 def test_trusted_rerun(tmp):
     """v0.13 (A06 A07): `verify --rerun` runs the order's approved check at the candidate commit, in a clean checkout,
     and only after the order matches its DISPATCH line. The record's command is compared, never run."""
@@ -1637,6 +1694,7 @@ def main():
         test_hook_protect(tmp)
         test_evidence(tmp)
         test_order_checks(tmp)
+        test_preflight(tmp)
         test_trusted_rerun(tmp)
         test_trusted_isolation(tmp)
     finally:
