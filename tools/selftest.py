@@ -404,6 +404,7 @@ def test_evidence_match(tmp):
     ev("ev_bool_exit", 1, {"exit_code": False}, "field exit_code is not int")
     ev("ev_bad_record_head", 1, {"head": "not-a-commit"}, "git.head is not a commit hash: not-a-commit")
     ev("ev_bad_artifact_entry", 1, {"artifacts": [{"kind": "file"}]}, "artifact 1 has no path or sha256")
+    ev("ev_artifacts_not_list", 1, {"artifacts": 42}, "is not an evidence_record file: field artifacts is not list")
     ev("ev_legacy_record", 0, {"drop": ("schema", "cwd", "started", "finished")},
        ["OK   match", "~ AC-1: e.json: legacy record without `schema`; only command, exit_code and artifacts checked"])
     ev("ev_legacy_still_needs_core", 1, {"drop": ("schema", "artifacts")}, "is not an evidence_record file: missing field artifacts")
@@ -811,6 +812,16 @@ def test_evidence(tmp):
         legacy.pop(key)
     (out / "legacy.json").write_text(json.dumps(legacy), encoding="utf-8")
     expect("verify reads a legacy record with a note", *common, 0, "verify", out / "legacy.json", says=["~ legacy record without `schema`", "OK"])
+    # v0.13 (A08): a field of the wrong type is a clean NOT_RUN, never a traceback
+    whole = json.loads(record.read_text(encoding="utf-8"))
+    for name, change, problem in (("artifacts_int", {"artifacts": 42}, "- field artifacts is not list"),
+                                  ("command_int_part", {"command": [1]}, "- command: every part must be a string"),
+                                  ("legacy_git_str", {"git": "abc", "schema": None}, "- field git is not dict")):
+        broken = {**whole, **change}
+        broken = {key: value for key, value in broken.items() if not (key == "schema" and value is None)}
+        (out / f"{name}.json").write_text(json.dumps(broken), encoding="utf-8")
+        expect(f"verify refuses {name} cleanly", *common, 2, "verify", out / f"{name}.json",
+               says=[problem, "EVIDENCE_VERIFY: NOT_RUN not an evidence record"])
 
     expect("exit code passes through", *common, 7, "run", "--out-dir", out, "--label", "AC-2", "--", py, "-c", "raise SystemExit(7)")
     expect("missing artifact fails", *common, 3, "run", "--out-dir", out, "--label", "AC-3", "--artifact", tmp / "nope", "--", py, "-c", "0", says="missing=1")

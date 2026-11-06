@@ -40,19 +40,23 @@ def record_problems(record):
     if not isinstance(record, dict):
         return ["not a JSON object"]
     out = []
-    for key in (CORE_FIELDS if "schema" not in record else RECORD_FIELDS):
-        kind = RECORD_FIELDS[key]
+    required = CORE_FIELDS if "schema" not in record else RECORD_FIELDS
+    for key, kind in RECORD_FIELDS.items():  # a field a legacy record does have must still have the right type
         names = " or ".join(k.__name__ for k in (kind if isinstance(kind, tuple) else (kind,)))
-        if key not in record:
-            out.append(f"missing field {key}")
+        if key not in record or (record[key] is None and key not in required):
+            if key in required:
+                out.append(f"missing field {key}")
         elif not isinstance(record[key], kind) or (kind is int and isinstance(record[key], bool)):
             out.append(f"field {key} is not {names}")
     if isinstance(record.get("command"), (list, str)) and not record["command"]:
         out.append("command is empty")
+    elif isinstance(record.get("command"), list) and not all(isinstance(part, str) for part in record["command"]):
+        out.append("command: every part must be a string")
     git = record.get("git")
     if isinstance(git, dict) and git.get("head") is not None and not (isinstance(git["head"], str) and SHA.fullmatch(git["head"])):
         out.append(f"git.head is not a commit hash: {git['head']}")
-    for n, item in enumerate(record.get("artifacts") or [], 1):
+    artifacts = record.get("artifacts")
+    for n, item in enumerate(artifacts if isinstance(artifacts, list) else [], 1):  # another type is reported above
         if not isinstance(item, dict) or not isinstance(item.get("path"), str) or "sha256" not in item:
             out.append(f"artifact {n} has no path or sha256")
         elif item["sha256"] is not None and not (isinstance(item["sha256"], str) and re.fullmatch(r"[0-9a-f]{64}", item["sha256"])):
