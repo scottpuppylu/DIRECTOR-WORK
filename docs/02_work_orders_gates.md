@@ -22,7 +22,7 @@
   - worker 能填的狀態以 `tools/vocabulary.json` 為準：REVIEW 最多填 `READY_FOR_REVIEW`，PO 只填 `PENDING_PO`。
 - `TRACES_TO` 寫這張工單服務的需求或決定編號，沿用專案已有的編號；格式寫在 `director_work.json` 的 `trace_id_pattern`。
 - Worker 不改工單的驗收條件和規格。發現條件做不到、互相矛盾或有錯，回報 `BLOCKED` 並寫明原因，由總監裁決後改工單。
-- 總監改工單時 `REVISION` 加 1，在 H 節記一列（誰改、原因、影響的 AC）。派工時用 `gate_check.py --hash` 記下工單雜湊，寫進 `DIRECTOR_LOG`；worker 在報告填 `ORDER_SHA256`。這只能查出改動，擋不住改動。
+- 總監改工單時 `REVISION` 加 1，在 H 節記一列（誰改、原因、影響的 AC）。派工時用 `gate_check.py --hash` 印出工單雜湊，把它印的 `DISPATCH <WO-ID> rev=<n> sha=<雜湊>` 那行原樣寫進 `DIRECTOR_LOG`（同一工單以最新一行為準）；worker 在報告填 `ORDER_SHA256`。審查時 `--match ... --dispatch-log DIRECTOR_LOG.md` 拿派工紀錄比對：工單被改過再重算雜湊也會被查出；沒有紀錄時 Strict 失敗、Standard 提示、Direct 不查。這是事後查出，不是事前防止：誰都還是改得動工單。
 - 發工單前想清楚需求、現有結構、相依、邊界條件、測試方法，一次給完整。
 - 規格審查：Strict 工單派工前必做，Standard 選用，Direct 不做。總監開一個短上下文、只讀的 subagent，照 `templates/SPEC_REVIEW.md` 審工單；結果只給總監參考，不增加 PO 的工作。每次在 `DIRECTOR_LOG` 記下花費（subagent 回報的 token）和抓到的問題；花費高過它省下的返工，就降回選用。
 
@@ -30,7 +30,7 @@
 
 - Worker 在 gate 完成、卡住、需要裁決、要偏離工單時回報，一個 gate 只送**一則完整**的 TASK REPORT（`templates/TASK_REPORT.md`）。
 - 交件前 worker 跑三支工具，把結論行貼進 TASK REPORT：`tools/scope_check.py`（改動有沒有超出工單）、`tools/gate_check.py`（欄位和用詞）、`tools/evidence_record.py`（驗收指令留下重跑指令和產物雜湊）。AUTO 條件在最後一次 commit 之後記錄，ACCEPTANCE 表的證據欄寫紀錄的 `.json` 檔名；總監用 `gate_check.py --match 報告 工單 --evidence-dir 證據資料夾` 核對紀錄真的 exit 0、HEAD 相同。
-- 總監審查時自己重跑 `scope_check.py`、`evidence_record.py verify` 和 `gate_check.py --match 報告 工單`，不只看報告怎麼寫。`--match` 檢查每條驗收條件都有結果、狀態符合類型、PASS 附證據、工單雜湊相符。工具通過只代表格式、範圍和檔案對得上，不代表做對了；下面四階段照做。
+- 總監審查時自己重跑 `scope_check.py`、`evidence_record.py verify --rerun` 和 `gate_check.py --match 報告 工單 --dispatch-log DIRECTOR_LOG.md`，不只看報告怎麼寫。只有 `verify --rerun` 才算重跑驗證；`--match --evidence-dir` 和不加 `--rerun` 的 `verify` 只是讀 worker 自己寫的紀錄。`--match` 檢查每條驗收條件都有結果、狀態符合類型、PASS 附證據、工單雜湊和派工紀錄相符；不給 `--dispatch-log` 就只能和工單現在的樣子比。工具通過只代表格式、範圍和檔案對得上，不代表做對了；下面四階段照做。
 - 總監審查四階段：
   1. 對照原始需求逐項核對，不接受 worker 自行縮減的驗收條件。REVIEW 條件交給獨立審查（`docs/07`），PO 條件放上待決頁。
   2. 審證據：修改範圍、意外修改、build、測試是否足夠、回歸、未驗證項。沒有親自取得的證據要寫「依 worker 報告」。

@@ -48,7 +48,7 @@ FORBIDDEN:
 """
 REPORT = """done
 ```text
-TASK_ID / WORKER / MODEL / BRANCH / BASE / HEAD / WORKTREE_CLEAN: T / a / sonnet / b / c / d / yes
+TASK_ID / WORKER / MODEL / BRANCH / BASE / HEAD / WORKTREE_CLEAN: T / a / sonnet / b / c / d0d0d0d / yes
 RESULT: {result}
   ENGINEERING: builds
   PRODUCT（成品）: not applicable
@@ -157,7 +157,11 @@ def test_gate(tmp):
     expect("--warn reports and does not block", "gate_check.py", 0, "--warn", "--order", old, new, says="warned 2")
     expect("--since skips an old order", "gate_check.py", 0, "--since", "2026-01-01", "--order", old, says="SKIP")
     expect("--since still checks a new order", "gate_check.py", 1, "--since", "2026-01-01", "--order", old, new, says="skipped 1")
-    expect("--since still checks an undated file", "gate_check.py", 1, "--since", "2026-01-01", "--report", undated, says="FAIL")
+    expect("an undated file is checked without --since", "gate_check.py", 1, "--report", undated, says="FAIL")
+    expect("--since skips an undated file and counts it", "gate_check.py", 1, "--since", "2026-01-01", "--report", undated,
+           "--order", old, new, says=["SKIP report", "UNDATED: no date", "checked 1, failed 1, skipped 1, UNDATED 1 (not checked)"])
+    expect("--since without undated files prints no UNDATED count", "gate_check.py", 0, "--since", "2026-01-01", "--order", old,
+           lacks="UNDATED")
     expect("--since skips an old RESUME_STATE", "gate_check.py", 0, "--since", "2026-02-01", "--resume", tmp / "resume_empty.md", says="SKIP")
     expect("--since needs a date", "gate_check.py", 2, "--since", "yesterday", "--order", new)
 
@@ -230,10 +234,117 @@ def test_acceptance(tmp):
     expect("--match missing file", "gate_check.py", 1, "--match", tmp / "nope.md", order, says="file not found")
 
 
-def evidence_file(folder, name, head, exit_code=0, timed_out=False, dirty=False, label="AC-1", sha256="ab" * 32):
-    """An evidence_record.py file, written directly so the case does not depend on git."""
-    record = {"schema": 1, "label": label, "command": ["python", "-c", "0"], "exit_code": exit_code, "timed_out": timed_out,
-              "git": {"head": head, "dirty": dirty}, "artifacts": [{"path": "out.txt", "kind": "file", "size": 1, "sha256": sha256}]}
+def test_table(tmp):
+    r"""v0.12: the ACCEPTANCE table parser rejects a duplicate AC row, a duplicate column name and a row whose cell count
+    differs from the header's; `|` inside backticks or escaped as `\|` does not split a cell."""
+    global total
+    total += 1
+    typed = TYPED_ORDER.format(base="abc123")
+    order = tmp / "WO-010-table.md"
+    order.write_text(typed, encoding="utf-8")
+    sha = hashlib.sha256(typed.encode("utf-8")).hexdigest()
+    good = list(ACCEPTANCE.values())
+
+    def match(name, code, rows, says=None, lacks=None, against=order, digest=sha, header=None):
+        report = tmp / f"{name}.md"
+        text = match_report(rows, "PASS", digest)
+        if header:
+            text = text.replace("| ID | 實際 | 證據 | 狀態 |", header)
+        report.write_text(text, encoding="utf-8")
+        expect(name, "gate_check.py", code, "--match", report, against, says=says, lacks=lacks)
+
+    match("table_dup_ac_fail_then_pass", 1, ["| AC-1 | exit 1 | e.json | FAIL |"] + good,
+          ["AC-1: listed twice; one row per AC", "RESULT PASS with FAIL"])
+    match("table_dup_ac_pass_then_pass", 1, good + [good[0]], "AC-1: listed twice")
+    match("table_short_row", 1, ["| AC-1 | PASS |"] + good[1:], "AC-1: 2 cells, the header has 4")
+    match("table_long_row", 1, ["| AC-1 | exit 0 | e.json | PASS | extra |"] + good[1:], "AC-1: 5 cells, the header has 4")
+    match("table_dup_column", 1, good, "column actual appears twice in the header", header="| ID | 實際 | 實際 | 狀態 |")
+    gate(tmp, "table_dup_ac_order", "order", typed.replace("| AC-2 |", "| AC-1 |", 1), 1, "AC-1: listed twice")
+    gate(tmp, "table_short_row_order", "order", typed.replace("| run test_parser | exit 0 |", "| run test_parser |"), 1,
+         "AC-1: 4 cells, the header has 5")
+    gate(tmp, "table_dup_column_order", "order", typed.replace("| ID | 類型 | 要求 | 驗證方法 | 預期 |", "| ID | 類型 | 要求 | 要求 | 預期 |"), 1,
+         "column requirement appears twice")
+    piped = typed.replace("| run test_parser |", "| run `cat a.txt \\| grep -E \"x\\|y\"` and `a | b`, then `c` |")
+    if piped == typed:
+        failures.append("test_table: TYPED_ORDER has no `run test_parser` cell; update the replace()")
+    pipe_order = tmp / "WO-011-pipe.md"
+    pipe_order.write_text(piped, encoding="utf-8")
+    pipe_sha = hashlib.sha256(piped.encode("utf-8")).hexdigest()
+    expect("a `|` inside backticks does not split the order's cell", "gate_check.py", 0, "--order", pipe_order, lacks=["cells", "  ~ "])
+    match("table_pipe_in_report_cell", 0, ["| AC-1 | `a | b` and `x\\|y` ran, exit 0 | e.json | PASS |"] + good[1:],
+          "OK   match", against=pipe_order, digest=pipe_sha)
+    match("table_escaped_pipe_in_cell", 0, ["| AC-1 | saw a \\| b | e.json | PASS |"] + good[1:], "OK   match",
+          against=pipe_order, digest=pipe_sha)
+    match("table_unclosed_backtick_is_short", 1, ["| AC-1 | `a | e.json | PASS |"] + good[1:], "cells, the header has 4",
+          against=pipe_order, digest=pipe_sha)
+
+
+def test_dispatch(tmp):
+    """v0.12: --match --dispatch-log compares the order's hash with the DISPATCH line the Director logged, so an order
+    rewritten and re-hashed by the worker is caught. Without the flag only the order as it is now is compared."""
+    typed = TYPED_ORDER.format(base="abc123")
+    order = tmp / "WO-001-parser.md"
+    order.write_bytes(typed.encode("utf-8"))
+    sha = hashlib.sha256(typed.encode("utf-8")).hexdigest()
+    good = list(ACCEPTANCE.values())
+
+    def log(name, *lines):
+        file = tmp / f"{name}.md"
+        file.write_text("# DIRECTOR_LOG\n" + "".join(f"2026-01-02 10:00 +08:00 | {line}\n" for line in lines), encoding="utf-8")
+        return file
+
+    def match(name, code, against=order, rows=good, says=None, lacks=None, dispatch_log=None):
+        report = tmp / f"{name}.md"
+        digest = hashlib.sha256(against.read_bytes().replace(b"\r\n", b"\n")).hexdigest()  # write_text may add CR
+        report.write_text(match_report(rows, "PASS", digest), encoding="utf-8")
+        extra = ("--dispatch-log", dispatch_log) if dispatch_log else ()
+        expect(name, "gate_check.py", code, "--match", report, against, *extra, says=says, lacks=lacks)
+        return report
+
+    logged = log("log_ok", f"DISPATCH WO-001 rev=1 sha={sha}")
+    match("dispatch_ok", 0, says="OK   match", lacks="  ~ ", dispatch_log=logged)
+    match("dispatch_by_file_name", 0, says="OK   match", lacks="  ~ ", dispatch_log=log("log_stem", f"DISPATCH WO-001-parser.md rev=1 sha={sha}"))
+    match("dispatch_latest_line_wins", 0, says="OK   match", dispatch_log=log("log_two", f"DISPATCH WO-001 rev=1 sha={'0' * 64}",
+                                                                              f"DISPATCH WO-001 rev=1 sha={sha}"))
+    match("dispatch_stale_line_fails", 1, says="not the one logged at dispatch", dispatch_log=log("log_stale", f"DISPATCH WO-001 rev=1 sha={sha}",
+                                                                                                 f"DISPATCH WO-001 rev=2 sha={'0' * 64}"))
+    # the worker weakens AC-1, drops the REVIEW / PO rows, or turns REVIEW into AUTO, then re-hashes: the report agrees
+    # with the order as it is now, only the dispatch record disagrees
+    weakened = tmp / "WO-001-weak.md"
+    weakened.write_text(typed.replace("| AC-1 | AUTO | parser accepts empty input | run test_parser | exit 0 |",
+                                      "| AC-1 | AUTO | parser exists | ls | file listed |"), encoding="utf-8")
+    match("dispatch_weakened_rehashed", 1, against=weakened, says="the order changed after dispatch", dispatch_log=logged)
+    expect("the same rewrite passes without --dispatch-log", "gate_check.py", 0, "--match", tmp / "dispatch_weakened_rehashed.md", weakened)
+    dropped = tmp / "WO-001-dropped.md"
+    dropped.write_text("\n".join(line for line in typed.splitlines() if "| AC-2 |" not in line and "| AC-3 |" not in line) + "\n", encoding="utf-8")
+    match("dispatch_rows_dropped_rehashed", 1, against=dropped, rows=good[:1], says="the order changed after dispatch", dispatch_log=logged)
+    retyped = tmp / "WO-001-retyped.md"
+    retyped.write_text(typed.replace("| AC-2 | REVIEW |", "| AC-2 | AUTO |"), encoding="utf-8")
+    match("dispatch_review_to_auto_rehashed", 1, against=retyped, rows=[good[0], "| AC-2 | reads right | e.json | PASS |", good[2]],
+          says="the order changed after dispatch", dispatch_log=logged)
+    for governance, code, mark in (("Strict", 1, "  - DISPATCH: no line for WO-001 / WO-001-"), ("Standard", 0, "  ~ DISPATCH: no line for"), ("Direct", 0, None)):
+        other = tmp / f"WO-001-{governance}.md"
+        other.write_text(typed.replace("GOVERNANCE     = Standard", f"GOVERNANCE     = {governance}"), encoding="utf-8")
+        match(f"dispatch_no_record_{governance}", code, against=other, says=mark, lacks=None if mark else "DISPATCH",
+              dispatch_log=log("log_other", f"DISPATCH WO-999 rev=1 sha={'1' * 64}"))
+    strict = tmp / "WO-001-Strict.md"
+    match("strict_without_dispatch_log_notes", 0, against=strict, says="~ DISPATCH: Strict order checked without --dispatch-log")
+    match("standard_without_dispatch_log_silent", 0, lacks="DISPATCH")
+    expect("--dispatch-log needs --match", "gate_check.py", 2, "--order", order, "--dispatch-log", logged)
+    expect("--dispatch-log file missing", "gate_check.py", 2, "--match", tmp / "dispatch_ok.md", order, "--dispatch-log", tmp / "nope.md")
+    expect("--hash prints the DISPATCH line to log", "gate_check.py", 0, "--hash", order, says=f"\n  DISPATCH WO-001 rev=1 sha={sha}")
+
+
+def evidence_file(folder, name, head, exit_code=0, timed_out=False, dirty=False, label="AC-1", sha256="ab" * 32, drop=(), **override):
+    """An evidence_record.py file with every field `run` writes, written directly so the case does not depend on git.
+    drop: field names to leave out; override: field values to replace."""
+    record = {"schema": 1, "label": label, "command": ["python", "-c", "0"], "cwd": str(folder), "started": "2026-01-02T10:00:00+08:00",
+              "finished": "2026-01-02T10:00:01+08:00", "seconds": 1.0, "exit_code": exit_code, "timed_out": timed_out,
+              "git": {"head": head, "dirty": dirty}, "output_lines": 1, "output_tail": ["ok"], "log": None,
+              "artifacts": [{"path": "out.txt", "kind": "file", "size": 1, "sha256": sha256}]}
+    record.update(override)
+    for key in drop:
+        record.pop(key, None)
     (folder / name).write_text(json.dumps(record), encoding="utf-8")
 
 
@@ -248,13 +359,25 @@ def test_evidence_match(tmp):
     folder.mkdir()
     good = list(ACCEPTANCE.values())
 
-    def ev(name, code, record=None, says=None, lacks=None, rows=good, title=f"/ c / {head} / yes", extra="", result="PASS"):
+    strict_text = typed.replace("GOVERNANCE     = Standard", "GOVERNANCE     = Strict")
+    if strict_text == typed:
+        failures.append("TYPED_ORDER has no `GOVERNANCE     = Standard` line; update test_evidence_match")
+    strict = tmp / "WO-003-strict.md"
+    strict.write_bytes(strict_text.encode("utf-8"))
+    strict_sha = hashlib.sha256(strict_text.encode("utf-8")).hexdigest()
+
+    def ev(name, code, record=None, says=None, lacks=None, rows=good, title=f"/ c / {head} / yes", extra="", result="PASS",
+           against=order, digest=sha):
         if record is not None:
             evidence_file(folder, "e.json", **{"head": head, **record})
         report = tmp / f"{name}.md"
-        text = match_report(rows, result, sha).replace("/ c / d / yes", title, 1).replace("RESULT:", extra + "RESULT:", 1)
+        text = match_report(rows, result, digest).replace("RESULT:", extra + "RESULT:", 1)
+        if title is None:  # a title line that does not name HEAD at all
+            text = text.replace(" / HEAD / WORKTREE_CLEAN: T / a / sonnet / b / c / d0d0d0d / yes", " / WORKTREE_CLEAN: T / a / sonnet / b / c / yes", 1)
+        else:
+            text = text.replace("/ c / d0d0d0d / yes", title, 1)
         report.write_text(text, encoding="utf-8")
-        expect(name, "gate_check.py", code, "--match", report, order, "--evidence-dir", folder, says=says, lacks=lacks)
+        expect(name, "gate_check.py", code, "--match", report, against, "--evidence-dir", folder, says=says, lacks=lacks)
         return report
 
     ev("ev_ok", 0, {}, "OK   match", "  ~ ")  # AC-2 (REVIEW) names out.txt: only AUTO rows are read
@@ -269,16 +392,87 @@ def test_evidence_match(tmp):
        rows=["| AC-1 | exit 0 | log.txt | PASS |"] + good[1:])
     ev("ev_missing_record", 1, {}, "AC-1: gone.json is not an evidence_record file",
        rows=["| AC-1 | exit 0 | gone.json | PASS |"] + good[1:])
-    ev("ev_head_line", 0, {}, "OK   match", "  ~ ", title="/ c / d / yes", extra=f"HEAD: {head}\n")
+    ev("ev_head_line", 0, {}, "OK   match", "  ~ ", title=None, extra=f"HEAD: {head}\n")
     ev("ev_branch_slash", 0, {}, "OK   match", "  ~ ", title=f"/ feature/x / c / {head} / yes")
     ev("ev_no_head", 0, {"head": "fedcba9876543210fedcba9876543210fedcba98"},
-       "~ HEAD: the report names no commit hash; evidence HEAD not compared", title="/ c / d / yes")
+       ["~ HEAD: pending is not a commit hash (7 to 40 hex digits)", "~ HEAD: the report names no commit hash (see above); evidence HEAD not compared"],
+       title="/ c / pending / yes")
+    # v0.12: a record must have every field `run` writes; HEAD must be a commit hash; Strict fails on dirty / other label
+    (folder / "e.json").write_text('{"exit_code": 0}', encoding="utf-8")
+    ev("ev_shell_record", 1, None, "AC-1: e.json is not an evidence_record file: missing field command (+1 more)")
+    ev("ev_wrong_type", 1, {"exit_code": "0"}, "is not an evidence_record file: field exit_code is not int")
+    ev("ev_bool_exit", 1, {"exit_code": False}, "field exit_code is not int")
+    ev("ev_bad_record_head", 1, {"head": "not-a-commit"}, "git.head is not a commit hash: not-a-commit")
+    ev("ev_bad_artifact_entry", 1, {"artifacts": [{"kind": "file"}]}, "artifact 1 has no path or sha256")
+    ev("ev_legacy_record", 0, {"drop": ("schema", "cwd", "started", "finished")},
+       ["OK   match", "~ AC-1: e.json: legacy record without `schema`; only command, exit_code and artifacts checked"])
+    ev("ev_legacy_still_needs_core", 1, {"drop": ("schema", "artifacts")}, "is not an evidence_record file: missing field artifacts")
+    ev("ev_record_without_git_head", 0, {"head": None}, "~ AC-1: e.json: recorded with no git HEAD; not compared with the report's")
+    ev("ev_bad_head_standard_notes", 0, {}, ["OK   match", "~ HEAD: not-a-commit is not a commit hash (7 to 40 hex digits)"],
+       title="/ c / not-a-commit / yes")
+    ev("ev_bad_head_strict_fails", 1, {}, "- HEAD: not-a-commit is not a commit hash (7 to 40 hex digits)",
+       title="/ c / not-a-commit / yes", against=strict, digest=strict_sha)
+    ev("ev_strict_dirty_fails", 1, {"dirty": True}, "- AC-1: e.json: recorded with uncommitted changes; Strict: commit, then record again",
+       against=strict, digest=strict_sha)
+    ev("ev_strict_other_label_fails", 1, {"label": "AC-9"}, "- AC-1: e.json: its label is AC-9, not AC-1; Strict: record once per AC, or label both",
+       against=strict, digest=strict_sha)
+    ev("ev_strict_label_lists_both", 0, {"label": "AC-1 AC-2"}, "OK   match", against=strict, digest=strict_sha)
+    ev("ev_strict_clean_ok", 0, {}, "OK   match", lacks="  - ", against=strict, digest=strict_sha)
+    expect("--report notes a HEAD that is not a commit hash", "gate_check.py", 0, "--report", tmp / "ev_bad_head_standard_notes.md",
+           says="~ HEAD: not-a-commit is not a commit hash")
     ev("ev_fail_row_unchecked", 0, {"exit_code": 3}, "OK   match", rows=["| AC-1 | exit 3 | e.json | FAIL |"] + good[1:],
        result="FAIL")
     plain = ev("ev_flag_off_base", 1, {"exit_code": 3})
     expect("without --evidence-dir a failed record is not read", "gate_check.py", 0, "--match", plain, order, says="OK   match")
     expect("--evidence-dir needs --match", "gate_check.py", 2, "--report", plain, "--evidence-dir", folder)
     expect("--evidence-dir folder missing", "gate_check.py", 2, "--match", plain, order, "--evidence-dir", tmp / "nope")
+
+
+def test_one_fault(tmp):
+    """v0.12: one fault at a time in an otherwise complete record, run the way an outside audit runs gate_check
+    (--order, --report, --match and --evidence-dir together). The record starts as what `evidence_record.py run` wrote,
+    so no case stops early at a missing field. Strict: each fault alone exits 1 with that one problem. Standard: a record
+    from another commit still fails; uncommitted changes, another AC's label and a report HEAD that is not a hash are notes."""
+    global total
+    base = tmp / "one_fault"
+    work = base / "work"
+    work.mkdir(parents=True)
+    expect("one fault: recording the base record", "evidence_record.py", 0, "run", "--out-dir", base / "out", "--label", "AC-1",
+           "--cwd", work, "--", sys.executable, "-c", "print('ok')", says="exit=0")
+    written = json.loads(next((base / "out").glob("*.json")).read_text(encoding="utf-8"))
+    head = "0123456789abcdef0123456789abcdef01234567"
+    written["git"] = {"head": head, "dirty": False}  # run outside git leaves both None; set them, change nothing else
+    faults = {
+        "clean": ({}, head, None),
+        "report_head_not_hash": ({}, "not-a-commit", "HEAD: not-a-commit is not a commit hash"),
+        "record_from_other_commit": ({"git": {"head": "f" * 40, "dirty": False}}, head, "recorded at HEAD ffffffffffff"),
+        "dirty": ({"git": {"head": head, "dirty": True}}, head, "recorded with uncommitted changes"),
+        "other_label": ({"label": "AC-OTHER"}, head, "its label is AC-OTHER, not AC-1"),
+    }
+    fails_in_standard = {"record_from_other_commit"}
+    for governance in ("Strict", "Standard"):
+        text = TYPED_ORDER.format(base="a" * 40).replace("GOVERNANCE     = Standard", f"GOVERNANCE     = {governance}")
+        for case, (change, report_head, problem) in faults.items():
+            folder = base / governance / case
+            folder.mkdir(parents=True)
+            order = folder / "WO-001-parser.md"
+            order.write_bytes(text.encode("utf-8"))
+            (folder / "e.json").write_text(json.dumps({**written, **change}), encoding="utf-8")
+            report = folder / "report.md"
+            report.write_text(match_report(list(ACCEPTANCE.values()), "PARTIAL", hashlib.sha256(text.encode("utf-8")).hexdigest())
+                              .replace("/ c / d0d0d0d / yes", f"/ c / {report_head} / yes", 1), encoding="utf-8")
+            code, out = run("gate_check.py", "--order", order, "--report", report, "--match", report, order, "--evidence-dir", folder)
+            problems = [line for line in out.splitlines() if line.startswith("  - ")]
+            notes = [line for line in out.splitlines() if line.startswith("  ~ ") and problem and problem in line]
+            if problem is None:
+                ok = code == 0 and not problems
+            elif governance == "Strict" or case in fails_in_standard:
+                ok = code == 1 and len(problems) == 1 and problem in problems[0]
+            else:
+                ok = code == 0 and not problems and notes
+            total += 1
+            if not ok:
+                failures.append(f"one fault {governance} {case}: exit {code}, problems {problems}, notes {notes}: {out.strip()[-300:]}")
 
 
 def test_metrics(tmp):
@@ -300,20 +494,52 @@ def test_metrics(tmp):
         "2026-01-03 10:00 +08:00 | RESUMED WO-001 at AC-2; next=run; waiting=NONE; redo=capture.mp4\n"
         "2026-01-02 11:00 +08:00 | BOOTSTRAP_STUCK 第 4 步 tool missing\n"
         "2026-01-02 12:00 +08:00 | SPEC_REVIEW WO-001 tokens=1200 issues=0/1/2 adopted=2\n", encoding="utf-8")
-    (root / "PO_PENDING.md").write_text("ID: OD-1\nSTATUS: open\n\nID: OD-2\nSTATUS: closed\n\nID: ACT-1\nSTATUS: answered\n",
-                                        encoding="utf-8")
+    (root / "PO_PENDING.md").write_text("ID: OD-1\nCREATED: 2026-01-06 09:00\nSTATUS: open\n\nID: OD-2\nCREATED: 2025-12-01 09:00\n"
+                                        "STATUS: closed\n\nID: ACT-1\nSTATUS: answered\n", encoding="utf-8")
+    (root / "orders" / "WO-009-old.md").write_text("# WO-009 old style\nGOVERNANCE = Strict\n", encoding="utf-8")
+    (root / "orders" / "WO-010.md").write_text(typed.replace("# WO-001", "# WO-010").replace("ISSUED_BY      = director 2026-01-02 10:00",
+                                                                                            "ISSUED_BY      = director"), encoding="utf-8")
     expect("metrics counts", "metrics_report.py", 0, "--director", root,
-           says=["| 返工次數 | 1（CONTINUE_SAME_WORKER 1、SWITCH_TO_OTHER_WORKER 0）；工單改版 2 次（1 份工單） | 裁決 2 份、工單 2 份 |",
-                 "| 中斷後遺失的工作 | 1 / 恢復 3 次；1 次沒寫 redo= |", "| PO 介入次數 | 3（OD 2、ACT 1），還在等 PO 1 |",
+           says=["| 返工次數 | 1（CONTINUE_SAME_WORKER 1、SWITCH_TO_OTHER_WORKER 0）；工單改版 2 次（1 份工單） | 裁決 2 份、工單 3 份 |",
+                 "- 像工單但沒有 `ISSUED_BY =` 行，返工和改版都沒算到：1 份：" + str(pathlib.Path("orders", "WO-009-old.md")),
+                 "| 中斷後遺失的工作 | 1 / 恢復 3 次；1 次沒寫 redo= |", "| PO 介入次數 | 3（ACT 1、OD 2），還在等 PO 1；UNDATED 1（沒寫 CREATED） | PO_PENDING.md |",
                  "| 新專案導入卡住 | 1 |", "1 次，tokens 合計 1200，採用的問題 2 個", "UNKNOWN：跑 `usage_report.py`"])
     expect("metrics --since drops older lines", "metrics_report.py", 0, "--director", root, "--since", "2026-01-01",
            says=["| 中斷後遺失的工作 | 1 / 恢復 2 次 |", "範圍：2026-01-01 起"])
     expect("metrics --since drops older orders", "metrics_report.py", 0, "--director", root, "--since", "2026-01-05",
-           says=["工單改版 0 次（0 份工單）", "| 新專案導入卡住 | 0 |", "0 次"])
+           says=["工單改版 0 次（0 份工單）", "| 新專案導入卡住 | 0 |", "0 次", "| 中斷後遺失的工作 | UNKNOWN：DIRECTOR_LOG 沒有 RESUMED 行",
+                 "照 --since 略過：2 份", "- 工單沒有日期，照算：1 份",
+                 "| PO 介入次數 | 2（ACT 1、OD 1），還在等 PO 1；UNDATED 1（沒寫 CREATED，照算）；--since 前 1 項沒算 |"])
+    elsewhere = tmp / "metrics" / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "DECISIONS_FOR_OWNER.md").write_text(
+        "| ID | 問題 | 狀態 |\n|---|---|---|\n| Q-1 | a | 等待 |\n| Q-2 | b | 已決 |\n", encoding="utf-8")
+    po_cfg = elsewhere / "po.json"
+    po_cfg.write_text(json.dumps({"schema_version": 1, "po_pending_files": ["DECISIONS_FOR_OWNER.md"],
+                                  "po_item_pattern": r"^\|\s*(Q)-\d+", "po_open_pattern": r"等待"}), encoding="utf-8")
+    expect("metrics reads PO entries from the files the config names", "metrics_report.py", 0, "--director", elsewhere,
+           "--config", po_cfg, says="| PO 介入次數 | 2（Q 2），還在等 PO 1；UNDATED 2（沒寫 CREATED） | DECISIONS_FOR_OWNER.md |")
+    (elsewhere / "director_work.json").write_text(po_cfg.read_text(encoding="utf-8"), encoding="utf-8")
+    expect("metrics finds director_work.json in DIRECTOR", "metrics_report.py", 0, "--director", elsewhere, says="2（Q 2）")
+    no_po = tmp / "metrics" / "no_po"
+    no_po.mkdir()
+    expect("metrics without a PO file named in the config", "metrics_report.py", 0, "--director", no_po,
+           "--config", po_cfg, says="UNKNOWN：沒有 DECISIONS_FOR_OWNER.md")
+    po_cfg.write_text(json.dumps({"schema_version": 1, "po_item_pattern": "(unclosed"}), encoding="utf-8")
+    expect("metrics refuses a broken PO pattern", "metrics_report.py", 1, "--director", elsewhere, "--config", po_cfg,
+           says="FAIL config")
+    po_cfg.write_text(json.dumps({"schema_version": 9}), encoding="utf-8")
+    expect("metrics refuses an unknown config version", "metrics_report.py", 1, "--director", elsewhere, "--config", po_cfg,
+           says="schema_version 9 is not 1")
+    no_verdict = tmp / "metrics" / "no_verdict"
+    shutil.copytree(root / "orders", no_verdict / "orders")
+    expect("metrics with orders but no verdict says UNKNOWN, not 0", "metrics_report.py", 0, "--director", no_verdict,
+           says="| 返工次數 | UNKNOWN：找不到裁決；工單改版 2 次（1 份工單） | 裁決 0 份、工單 3 份 |", lacks="| 返工次數 | 0")
     empty = tmp / "metrics" / "empty"
     empty.mkdir()
     expect("metrics with nothing recorded", "metrics_report.py", 0, "--director", empty,
-           says=["UNKNOWN：找不到裁決或工單", "UNKNOWN：沒有 DIRECTOR_LOG.md", "UNKNOWN：沒有 PO_PENDING.md"], lacks="| 0 |")
+           says=["UNKNOWN：找不到裁決；工單改版 UNKNOWN：找不到工單", "UNKNOWN：沒有 DIRECTOR_LOG.md", "UNKNOWN：沒有 PO_PENDING.md",
+                 "沒有 `ISSUED_BY =` 行，返工和改版都沒算到：0 份"], lacks="| 0 |")
     expect("metrics bad --since", "metrics_report.py", 2, "--director", root, "--since", "Jan 1")
     expect("metrics missing folder", "metrics_report.py", 1, "--director", tmp / "metrics" / "nope", says="folder not found")
 
@@ -331,6 +557,9 @@ def test_trace(tmp):
     (root / "reports" / "stray.md").write_text(REPORT.format(result="PASS", tests="t", scope="PASS", evidence="e"), encoding="utf-8")
     (root / "reviews" / "v1.md").write_text(VERDICT.format(verdict="PASS_WITH_WARNINGS", step="ACCEPT_AND_CLOSE")
                                             .replace("# GATE VERDICT", "# GATE VERDICT WO-001"), encoding="utf-8")
+    (root / "orders" / "WO-004-old.md").write_text("# WO-004 old style\nGOVERNANCE = Strict\n", encoding="utf-8")
+    (root / "reports" / "notes.md").write_text("# notes\n", encoding="utf-8")
+    (root / "reviews" / "draft.md").write_text("# draft verdict\n", encoding="utf-8")
     config = root / "director_work.json"
     config.write_text(json.dumps({"schema_version": 1, "trace_id_pattern": r"^(DD|OD)-\d+$"}), encoding="utf-8")
     base = ("--orders", root / "orders", "--reports", root / "reports")
@@ -338,8 +567,37 @@ def test_trace(tmp):
            says=["| DD-1 | WO-001 | AC-2 | REVIEW | READY_FOR_REVIEW | out.txt | PASS_WITH_WARNINGS |",
                  "| DD-1 | WO-001 | AC-1 | AUTO | PASS | e.json | PASS_WITH_WARNINGS |",
                  "| REQ7 | WO-003 | AC-1 | AUTO | 沒有報告 |", "## 沒有 TRACES_TO 的工單\n- WO-002",
-                 "## 編號格式不符 trace_id_pattern\n- WO-003: REQ7", "stray.md"])
+                 "## 編號格式不符 trace_id_pattern\n- WO-003: REQ7", "stray.md", "沒計入的檔案 3 份，列在文末。",
+                 "工單資料夾裡沒有 `ISSUED_BY =` 行的檔案（沒算成工單）：1 份\n- ", "WO-004-old.md",
+                 "報告資料夾裡沒有 `TASK_ID` 行的檔案（沒算成報告）：1 份\n- ", "notes.md",
+                 "裁決資料夾裡沒有 `## A` 的檔案（沒算成裁決）：1 份\n- ", "draft.md"])
     expect("trace without a pattern accepts any ID", "trace_report.py", 0, *base, says="## 編號格式不符 trace_id_pattern\n- 無")
+    many = tmp / "trace_many"
+    (many / "reports").mkdir(parents=True)
+    shutil.copytree(root / "orders", many / "orders")
+    passed = match_report(list(ACCEPTANCE.values()), "PARTIAL")
+    failed = passed.replace("| AC-1 | exit 0 | e.json | PASS |", "| AC-1 | exit 1 | e.json | FAIL |")
+    (many / "reports" / "report-9.md").write_text(passed, encoding="utf-8")
+    (many / "reports" / "report-10.md").write_text(failed.replace("REVISION 1", "REVISION 2"), encoding="utf-8")
+    trace_many = ("--orders", many / "orders", "--reports", many / "reports")
+    expect("trace picks the higher order revision, not the last file name", "trace_report.py", 0, *trace_many,
+           says=["| DD-1 | WO-001 | AC-1 | AUTO | FAIL | e.json |", "報告 2 份對到工單",
+                 f"- WO-001：選 {many / 'reports' / 'report-10.md'}", "REVISION 2、ATTEMPT —、日期 —、HEAD d0d0d0d ← 選這份",
+                 "report-9.md：REVISION 1"])
+    (many / "reports" / "report-10.md").write_text(failed.replace("RESULT:", "ATTEMPT: 1\nRESULT:", 1), encoding="utf-8")
+    (many / "reports" / "report-9.md").write_text(passed.replace("RESULT:", "ATTEMPT: 2\nRESULT:", 1), encoding="utf-8")
+    expect("trace picks the higher ATTEMPT at the same revision", "trace_report.py", 0, *trace_many,
+           says=["| DD-1 | WO-001 | AC-1 | AUTO | PASS |", f"選 {many / 'reports' / 'report-9.md'}"])
+    (many / "reports" / "report-10.md").write_text(failed.replace("RESULT:", "2026-01-04 09:00\nRESULT:", 1), encoding="utf-8")
+    (many / "reports" / "report-9.md").write_text(passed.replace("RESULT:", "2026-01-03 18:00\nRESULT:", 1), encoding="utf-8")
+    expect("trace picks the later date when revision and attempt tie", "trace_report.py", 0, *trace_many,
+           says=["| DD-1 | WO-001 | AC-1 | AUTO | FAIL |", "日期 2026-01-04 09:00"])
+    (many / "reports" / "report-10.md").write_text(failed, encoding="utf-8")
+    (many / "reports" / "report-9.md").write_text(passed, encoding="utf-8")
+    expect("trace takes neither of two reports it cannot order", "trace_report.py", 0, *trace_many,
+           says=["| DD-1 | WO-001 | AC-1 | AUTO | 多份報告分不出先後 |", "分不出先後，表內兩份都不取"], lacks="← 選這份")
+    expect("trace with one report per order lists none", "trace_report.py", 0, *base,
+           says="## 同一工單有多份報告（依 REVISION、ATTEMPT、日期選，不看檔名）\n- 無")
     expect("trace with a missing folder", "trace_report.py", 1, "--orders", root / "nope", "--reports", root / "reports",
            says="folder not found")
 
@@ -537,14 +795,31 @@ def test_evidence(tmp):
     total += 1
     if data["output_tail"] != ["hello"] or len(data["artifacts"]) != 1 or data["artifacts"][0]["sha256"] is None:
         failures.append(f"record content: {data}")
-    expect("verify same", *common, 0, "verify", record, says="OK")
-    expect("verify with rerun", *common, 0, "verify", record, "--rerun", says="OK")
+    expect("verify same", *common, 0, "verify", record, says="EVIDENCE_VERIFY: OK integrity=same test=not-rerun artifacts=1 missing=0 rerun=no")
+    expect("verify with rerun", *common, 0, "verify", record, "--rerun", says="EVIDENCE_VERIFY: OK integrity=same test=passed artifacts=1 missing=0 rerun=yes")
     art.write_text("changed", encoding="utf-8")
-    expect("verify sees a changed artifact", *common, 1, "verify", record, says="MISMATCH")
+    expect("verify sees a changed artifact", *common, 1, "verify", record, says=["artifact changed: ", "MISMATCH integrity=changed"])
     expect("rerun rebuilds it", *common, 0, "verify", record, "--rerun", says="OK")
+    art.unlink()
+    expect("verify sees a gone artifact", *common, 1, "verify", record, says=["artifact gone: ", "MISMATCH integrity=same test=not-rerun artifacts=1 missing=1"])
+    expect("rerun rebuilds a gone artifact", *common, 0, "verify", record, "--rerun", says="OK")
+    shell = out / "shell.json"
+    shell.write_text('{"exit_code": 0}', encoding="utf-8")
+    expect("verify refuses a record without the fields", *common, 2, "verify", shell, says=["- missing field command", "- missing field artifacts", "NOT_RUN not an evidence record (2 problems)"])
+    legacy = json.loads(record.read_text(encoding="utf-8"))
+    for key in ("schema", "cwd", "started", "finished"):
+        legacy.pop(key)
+    (out / "legacy.json").write_text(json.dumps(legacy), encoding="utf-8")
+    expect("verify reads a legacy record with a note", *common, 0, "verify", out / "legacy.json", says=["~ legacy record without `schema`", "OK"])
 
     expect("exit code passes through", *common, 7, "run", "--out-dir", out, "--label", "AC-2", "--", py, "-c", "raise SystemExit(7)")
     expect("missing artifact fails", *common, 3, "run", "--out-dir", out, "--label", "AC-3", "--artifact", tmp / "nope", "--", py, "-c", "0", says="missing=1")
+    expect("verify never passes a record whose artifact was missing", *common, 1, "verify", next(out.glob("*-AC-3.json")),
+           says=["artifact missing when recorded: ", "MISMATCH integrity=same test=not-rerun artifacts=1 missing=1"])
+    expect("verify never passes a record whose artifact was missing, even rerun", *common, 1, "verify", next(out.glob("*-AC-3.json")), "--rerun",
+           says=["artifact missing when recorded: ", "MISMATCH integrity=same test=passed artifacts=1 missing=1 rerun=yes"])
+    expect("verify reports a failing command as test=failed", *common, 1, "verify", next(out.glob("*-AC-2.json")),
+           says="MISMATCH integrity=same test=failed(recorded exit 7) artifacts=0 missing=0")
     expect("unknown command", *common, 127, "run", "--out-dir", out, "--label", "AC-4", "--", "no-such-command-xyz")
     expect("timeout", *common, 124, "run", "--out-dir", out, "--label", "AC-5", "--timeout", "1", "--", py, "-c", "import time;time.sleep(30)")
     expect("no command", *common, 2, "run", "--out-dir", out, "--label", "AC-6")
@@ -578,7 +853,10 @@ def main():
     try:
         test_gate(tmp)
         test_acceptance(tmp)
+        test_table(tmp)
+        test_dispatch(tmp)
         test_evidence_match(tmp)
+        test_one_fault(tmp)
         test_trace(tmp)
         test_metrics(tmp)
         test_purpose()
