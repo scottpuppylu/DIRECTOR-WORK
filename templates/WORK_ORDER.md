@@ -36,8 +36,16 @@ FORBIDDEN:
 
 `*` 不跨資料夾，`**` 跨資料夾，沒有萬用字元的名稱連底下全部都算。兩邊都符合時以 FORBIDDEN 為準。不要寫「相關檔案」這種話。
 
+選用：一定要改到的路徑。`scope_check.py` 會查每一條都有對到改動，沒對到就印 `MISSING` 並判越界；每一條都要在 SCOPE 裡、不在 FORBIDDEN 裡（`gate_check.py --order` 會查）。不需要就整段不寫。
+
+```text
+REQUIRED_CHANGES:
+- <一定要改到的路徑或 glob，例如 src/parser.py>
+```
+
 ## C. 執行前檢查
 repo 與分支、工作樹乾淨、未提交修改、相關規範、相依、實際行為、能否重現、基準測試。路徑不存在先搜尋，不假設。
+製作類工單先做既有資產盤點：未合併分支（`git log --all -- <路徑>`）、需求方提供過的檔案、舊報告；結果寫進 TASK REPORT 的 DONE（docs/02）。
 
 ## D. 實作要求
 沿用現有架構；最小但完整；處理例外；必要的向後相容；補上直接相關的測試；不做無關重構。每項修改做成開關，方便批次驗證（docs/02）。
@@ -47,7 +55,13 @@ repo 與分支、工作樹乾淨、未提交修改、相關規範、相依、實
 |---|---|---|---|---|
 | AC-1 | <AUTO / REVIEW / PO> | | | |
 
-- `AUTO`：有指令可以重跑。總監自己重跑後判定；驗證指令用 `evidence_record.py` 留紀錄。
+- `AUTO`：有指令可以重跑。總監自己重跑後判定；驗證指令用 `evidence_record.py` 留紀錄。核准的指令寫在下面的 `CHECKS:`（選用，Strict 建議寫），一條 AUTO 一行，JSON 字串陣列、不經 shell；` #` 之後是註解，要保留 ` #` 就把整個項目用反引號包起來；派工雜湊會鎖住它，總監用 `evidence_record.py verify --rerun --order` 跑的就是這一行，worker 用同一個指令記錄（`evidence_record.py run --order <本工單>`）：
+
+```text
+CHECKS:
+- AC-1: ["python", "-I", "-m", "unittest", "tests.test_parser"]
+```
+
 - `REVIEW`：要有人看成品。開工前寫明誰看、從哪個角度看、看多大範圍、看哪些常識閘門項目（docs/07）。worker 最多填 `READY_FOR_REVIEW`。
 - `PO`：PO 保留的判定，例如最終驗收。worker 和總監都只填 `PENDING_PO`。
 

@@ -1,5 +1,7 @@
 # GATE VERDICT — <TASK_ID> <gate 名稱>
 <YYYY-MM-DD HH:MM，讀 date> 總監
+ORDER: <WO-檔名.md> REVISION <n>
+CANDIDATE_HEAD: <審查的 commit，40 位，git rev-parse worker 分支>
 
 ## A. 判定
 <PASS | PASS_WITH_WARNINGS | CONDITIONAL_PASS | PARTIAL | HOLD | BLOCKED | FAIL | NOT_RUN>

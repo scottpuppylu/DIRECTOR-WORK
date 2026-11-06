@@ -16,21 +16,22 @@
 - 內容分段：A 背景、B 目標（MUST / OPTIONAL / OUT OF SCOPE，加上 SCOPE / FORBIDDEN 路徑清單）、C 執行前檢查、D 實作要求、E 驗收條件、F 安全與版控、G 完成定義。
 - 驗收條件每項有：ID、類型、要求、驗證方法、預期。結果（實際、證據、狀態）寫在 TASK REPORT 的 ACCEPTANCE 表，不寫回工單。Mock 和單元測試不能當成真實環境的驗收。
 - 類型 `AUTO / REVIEW / PO`：
-  - AUTO：有指令可以重跑，總監重跑後判定。
+  - AUTO：有指令可以重跑，總監重跑後判定。核准的指令寫在工單的 `CHECKS:`（`templates/WORK_ORDER.md` E 節），派工雜湊一起鎖住。
   - REVIEW：要有人看成品，獨立審查後由總監判定。開工前寫明誰看、從哪個角度看、看多大範圍、看哪些常識閘門項目（`docs/07`）。
   - PO：只有 PO 能判。
   - worker 能填的狀態以 `tools/vocabulary.json` 為準：REVIEW 最多填 `READY_FOR_REVIEW`，PO 只填 `PENDING_PO`。
 - `TRACES_TO` 寫這張工單服務的需求或決定編號，沿用專案已有的編號；格式寫在 `director_work.json` 的 `trace_id_pattern`。
 - Worker 不改工單的驗收條件和規格。發現條件做不到、互相矛盾或有錯，回報 `BLOCKED` 並寫明原因，由總監裁決後改工單。
-- 總監改工單時 `REVISION` 加 1，在 H 節記一列（誰改、原因、影響的 AC）。派工時用 `gate_check.py --hash` 印出工單雜湊，把它印的 `DISPATCH <WO-ID> rev=<n> sha=<雜湊>` 那行原樣寫進 `DIRECTOR_LOG`（同一工單以最新一行為準）；worker 在報告填 `ORDER_SHA256`。審查時 `--match ... --dispatch-log DIRECTOR_LOG.md` 拿派工紀錄比對：工單被改過再重算雜湊也會被查出；沒有紀錄時 Strict 失敗、Standard 提示、Direct 不查。這是事後查出，不是事前防止：誰都還是改得動工單。
+- 總監改工單時 `REVISION` 加 1，在 H 節記一列（誰改、原因、影響的 AC）。派工時用 `gate_check.py --hash` 印出工單雜湊，把它印的 `DISPATCH <WO-ID> rev=<n> sha=<雜湊>` 那行原樣寫進 `DIRECTOR_LOG`（同一工單以最新一行為準）；worker 在報告填 `ORDER_SHA256`。審查時 `--match ... --dispatch-log DIRECTOR_LOG.md` 拿派工紀錄比對：工單被改過再重算雜湊也會被查出；DISPATCH 必須獨占一行，引用、縮排或圍欄裡的不算；沒有紀錄時各模式都失敗。這是事後查出，不是事前防止：誰都還是改得動工單。
 - 發工單前想清楚需求、現有結構、相依、邊界條件、測試方法，一次給完整。
-- 規格審查：Strict 工單派工前必做，Standard 選用，Direct 不做。總監開一個短上下文、只讀的 subagent，照 `templates/SPEC_REVIEW.md` 審工單；結果只給總監參考，不增加 PO 的工作。每次在 `DIRECTOR_LOG` 記下花費（subagent 回報的 token）和抓到的問題；花費高過它省下的返工，就降回選用。
+- 製作類工單的第一步固定是「既有資產盤點」：未合併的分支（`git log --all -- <路徑>`）、需求方提供過的檔案、舊報告。盤點結果寫進 gate 報告。
+- 規格審查：Strict 工單放上待決頁前必做（Desktop 的做法見 `docs/11`），Standard 選用，Direct 不做。總監開一個短上下文、只讀的 subagent，照 `templates/SPEC_REVIEW.md` 審工單；結果只給總監參考，不增加 PO 的工作。每次在 `DIRECTOR_LOG` 記下花費（subagent 回報的 token）和抓到的問題；花費高過它省下的返工，就降回選用。
 
 ### Gate 與回報
 
 - Worker 在 gate 完成、卡住、需要裁決、要偏離工單時回報，一個 gate 只送**一則完整**的 TASK REPORT（`templates/TASK_REPORT.md`）。
 - 交件前 worker 跑三支工具，把結論行貼進 TASK REPORT：`tools/scope_check.py`（改動有沒有超出工單）、`tools/gate_check.py`（欄位和用詞）、`tools/evidence_record.py`（驗收指令留下重跑指令和產物雜湊）。AUTO 條件在最後一次 commit 之後記錄，ACCEPTANCE 表的證據欄寫紀錄的 `.json` 檔名；總監用 `gate_check.py --match 報告 工單 --evidence-dir 證據資料夾` 核對紀錄真的 exit 0、HEAD 相同。
-- 總監審查時自己重跑 `scope_check.py`、`evidence_record.py verify --rerun` 和 `gate_check.py --match 報告 工單 --dispatch-log DIRECTOR_LOG.md`，不只看報告怎麼寫。只有 `verify --rerun` 才算重跑驗證；`--match --evidence-dir` 和不加 `--rerun` 的 `verify` 只是讀 worker 自己寫的紀錄。`--match` 檢查每條驗收條件都有結果、狀態符合類型、PASS 附證據、工單雜湊和派工紀錄相符；不給 `--dispatch-log` 就只能和工單現在的樣子比。工具通過只代表格式、範圍和檔案對得上，不代表做對了；下面四階段照做。
+- 總監審查時自己重跑 `scope_check.py`、`evidence_record.py verify 紀錄 --rerun --order 工單 --dispatch-log DIRECTOR_LOG.md --repo <候選 commit 的乾淨 worktree> --candidate <40 位>` 和 `gate_check.py --match 報告 工單 --dispatch-log DIRECTOR_LOG.md`，不只看報告怎麼寫。`--rerun` 跑的是工單 `CHECKS:` 裡核准的指令，不是 worker 寫在紀錄裡的；紀錄的指令不同或不是在候選 commit 記的，都算不符。它在候選 commit 的 tree 複製出來的暫存資料夾裡跑，仍會執行候選 commit 的測試碼，不是沙箱；`--repo` 用 `git worktree add --detach` 開的乾淨目錄。worker 記證據時加 `--order 工單`，紀錄就綁住工單版次；工單改版後要沿用舊證據，總監在 DIRECTOR_LOG 寫整行 `EVIDENCE_EQUIVALENT <WO-ID> rev=<舊> sha=<舊雜湊> to rev=<新>`，否則 Strict 失敗。Strict 工單再加 `--evidence-dir 證據資料夾 --candidate <git rev-parse worker 分支>`，少一個就失敗：報告、證據紀錄和裁決的 `CANDIDATE_HEAD` 都要指向同一個 commit。只有 `verify --rerun` 才算重跑驗證；`--match --evidence-dir` 和不加 `--rerun` 的 `verify` 只是讀 worker 自己寫的紀錄，`--rerun-recorded` 跑的也是紀錄裡寫的指令。`--match` 檢查每條驗收條件都有結果、狀態符合類型、PASS 附證據、工單雜湊和派工紀錄相符；不給 `--dispatch-log` 就只能和工單現在的樣子比。工具通過只代表格式、範圍和檔案對得上，不代表做對了；下面四階段照做。
 - 總監審查四階段：
   1. 對照原始需求逐項核對，不接受 worker 自行縮減的驗收條件。REVIEW 條件交給獨立審查（`docs/07`），PO 條件放上待決頁。
   2. 審證據：修改範圍、意外修改、build、測試是否足夠、回歸、未驗證項。沒有親自取得的證據要寫「依 worker 報告」。
@@ -48,8 +49,10 @@
 - 用到共用重資源的工作，先送 `TEST REQUEST`（`templates/TEST_REQUEST.md`），等 `GO`，結束送 `DONE <內容> <實際分鐘>`；超時 10 分鐘以上要說明原因和新 ETA。
 - **GO 寫在排程看板檔，不用訊息發。** 看板只有總管能寫，一行一筆：`GO <完整名稱> <內容> <開始> <上限分鐘>`、`QUIET <時段> <原因>`、`HOLD <名稱> <原因>`。
 - Worker 送出申請後，用背景等待程序看板（不花額度），看到自己的 GO 才開始，並寫一行 ACK。看板讀寫用固定的小工具，名稱一律寫完整名稱，短名稱由工具換成全名。
-- 總管寫 GO 後幾分鐘內確認對方真的開始；沒開始就提醒。不准空等整段獨佔時段。
+- GO 後 N 分鐘內沒有 ACK，排程員直接找 worker 並告警；派工工具成功不等於對方確認。N 建議 3–5 分鐘；不准空等整段獨佔時段。
 - 文件、git、打包、輕量 CPU 工作不用申請。
+- 停機（QUIET、叫停）的對象是整條程序樹：由上往下，先停批次腳本（父 shell），再停子程序。停完依 CPU 用量列出所有程序，量一段時間內的 CPU 增量，確認沒有殘留，並回報已停的 PID；不能只比對程序名。下令的一方也獨立確認一次。
+- 長批次腳本每一步開跑前檢查暫停旗標（看板的 QUIET）；有暫停就自己停下。
 
 ### 測試預算
 

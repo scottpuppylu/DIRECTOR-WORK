@@ -13,8 +13,25 @@ The line is split only outside quotes, and a quoted string is checked as a comma
 Not covered: deleting files (rm -rf, Remove-Item -Recurse), a command hidden in a script file or built at run time.
 This is a seat belt, not a security boundary. Install with setup_project_settings.py --hooks. A push the PO approved
 is run by the PO, or after removing the hook. A cleaner session that removes worktrees does not install it.
+
+With --protect DIRECTOR_DIR (setup_project_settings.py --protect-director) it also blocks the Write and Edit tools on
+DIRECTOR_DIR/orders/** and DIRECTOR_DIR/DIRECTOR_LOG.md, so a worker cannot slip and edit its own work order or the
+dispatch log. A relative file_path is taken from the hook's cwd; both paths are resolved (junctions, symlinks, `..`),
+8.3 short names are expanded on Windows, and Windows compares without case. On Windows the extended-length prefix of a
+drive or UNC path is dropped and an NTFS stream name (`DIRECTOR_LOG.md::$DATA`, `x.md:note`) counts as its file; any
+other device path (GLOBALROOT, a dot-device path, a volume GUID) is blocked. A target, or a folder above it, that
+already exists is also compared by file identity (volume serial and file id) with DIRECTOR_LOG.md and every file and folder under
+orders/, so another name for the same object (UNC alias, hardlink of an existing file) is blocked too.
+Without --protect, Write and Edit pass.
+This guards against a slip, not against a worker that means to: it does not see a file written by Bash / PowerShell,
+MultiEdit, NotebookEdit or an MCP tool, a DIRECTOR_LOG.md or orders/ folder that does not exist yet and is created
+through another name (network drive, subst drive letter, UNC share), or a junction whose target does not exist yet.
+Protect the folder with OS write permissions when that matters. The Director's own worktree keeps the hook without --protect (--director-worktree).
 """
+import argparse
 import json
+import os
+import pathlib
 import re
 import sys
 
@@ -166,12 +183,105 @@ def reason(command, shell="bash"):
     return None
 
 
+def long_path(path):
+    """On Windows, the long form of the longest existing part of path (8.3 names expanded); elsewhere path."""
+    if os.name != "nt":
+        return path
+    import ctypes
+    head, tail = path, []
+    while not head.exists() and head.parent != head:
+        head, tail = head.parent, [head.name] + tail
+    buf = ctypes.create_unicode_buffer(32768)
+    if ctypes.windll.kernel32.GetLongPathNameW(str(head), buf, len(buf)):
+        head = pathlib.Path(buf.value)
+    return head.joinpath(*tail)
+
+
+DEVICE = re.compile(r"^(?:[\\/]{2}[?.][\\/]|\\\?\?\\)(.*)$", re.S)
+
+
+def plain(file_path):
+    """file_path as an ordinary Windows path: no extended-length prefix, no NTFS stream names (H01). None for a device
+    path that names no drive or UNC share (GLOBALROOT, a dot-device path, a volume GUID), which is not mapped (H02)."""
+    if os.name != "nt":
+        return file_path
+    m = DEVICE.match(file_path)
+    if m:
+        rest = m.group(1)
+        if re.match(r"[A-Za-z]:[\\/]", rest):
+            file_path = rest
+        elif re.match(r"UNC[\\/]", rest, re.I):
+            file_path = "\\\\" + rest[4:]
+        else:
+            return None
+    drive, tail = os.path.splitdrive(file_path)
+    parts = re.split(r"([\\/]+)", tail)
+    return drive + "".join(part.split(":")[0] if n % 2 == 0 else part for n, part in enumerate(parts))
+
+
+def identity(path):
+    """(volume serial, file id) of an existing file or folder; None when it is missing or has no id."""
+    try:
+        st = os.stat(path)
+    except (OSError, ValueError):
+        return None
+    return (st.st_dev, st.st_ino) if st.st_ino else None
+
+
+def same_object(target, root):
+    """Whether target, by file identity, is DIRECTOR_LOG.md, a file under orders/, or lies in a folder under orders/."""
+    files, folders = {identity(root / "DIRECTOR_LOG.md")}, {identity(root / "orders")}
+    for here, subdirs, names in os.walk(root / "orders"):
+        folders |= {identity(os.path.join(here, n)) for n in subdirs}
+        files |= {identity(os.path.join(here, n)) for n in names}
+    files.discard(None)
+    folders.discard(None)
+    if identity(target) in files:
+        return True
+    return any(identity(parent) in folders for parent in pathlib.Path(target).parents)
+
+
+def canonical(path, cwd=None):
+    path = pathlib.Path(path)
+    if not path.is_absolute():
+        path = pathlib.Path(cwd or os.getcwd()) / path
+    return os.path.normcase(str(long_path(path.resolve())))
+
+
+def protected_reason(file_path, cwd, protect):
+    file_path = plain(file_path)
+    if file_path is None:
+        return "a device path (GLOBALROOT, dot-device or volume GUID form) is not checked against the protected folder; use a drive or UNC path"
+    target = canonical(file_path, cwd)
+    absolute = pathlib.Path(file_path) if pathlib.Path(file_path).is_absolute() else pathlib.Path(cwd or os.getcwd()) / file_path
+    for root in protect:
+        orders, log = canonical(pathlib.Path(root) / "orders"), canonical(pathlib.Path(root) / "DIRECTOR_LOG.md")
+        if target == log or target.startswith(orders + os.sep) or same_object(absolute, pathlib.Path(root)):
+            # no <...> in messages: a report quoting one must still pass gate_check
+            return "work orders and DIRECTOR_LOG.md are the Director's (docs/02); report BLOCKED with the reason instead"
+    return None
+
+
 def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--protect", action="append", default=[], help="DIRECTOR folder whose orders/ and DIRECTOR_LOG.md Write / Edit may not touch")
+    a = ap.parse_args()
     try:
         call = json.load(sys.stdin)
     except ValueError:
         return 0
-    command = (call.get("tool_input") or {}).get("command")
+    if not isinstance(call, dict):
+        return 0
+    tool_input = call.get("tool_input") or {}
+    file_path = tool_input.get("file_path") if isinstance(tool_input, dict) else None
+    if a.protect and call.get("tool_name") in ("Write", "Edit") and isinstance(file_path, str) and file_path:
+        cwd = call.get("cwd") if isinstance(call.get("cwd"), str) else None
+        why = protected_reason(file_path, cwd, a.protect)
+        if why:
+            print(f"BLOCKED by hook_guard: {why}", file=sys.stderr)
+            return 2
+        return 0
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
     if not isinstance(command, str):
         return 0
     why = reason(command, "powershell" if call.get("tool_name") == "PowerShell" else "bash")

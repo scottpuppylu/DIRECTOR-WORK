@@ -1,6 +1,6 @@
 # 規格審查（派工前，subagent 用）
 
-Strict 工單必做，Standard 選用，Direct 不做（`docs/02`）。總監用 Agent 工具開一個只讀的 subagent（只給 Read / Glob / Grep），模型照 `docs/05` 選，預設用便宜的那一級。把下面的提示填好貼給它。結果只給總監參考，怎麼改工單由總監決定。
+Strict 工單必做，Standard 選用，Direct 不做（`docs/02`）。總監用 Agent 工具開一個只讀的 subagent（只給 Read / Glob / Grep），模型照 `docs/05` 選，預設用便宜的那一級。把下面的提示填好貼給它。結果只給總監參考，怎麼改工單由總監決定。時機：工單寫好、放上 PO 待決頁之前，在同一輪跑完（Claude Desktop 見 `docs/11`「開 worker 的限制」）；審完工單又改版，就重審。
 
 ```text
 你是規格審查員，只讀不寫。審這張工單能不能直接開工：<工單路徑>

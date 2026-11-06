@@ -3,7 +3,8 @@
 ```text
 首行：<一句話結論>
 TASK_ID / WORKER / MODEL / BRANCH / BASE / HEAD / WORKTREE_CLEAN(yes|no)
-ORDER: 工單路徑與 REVISION
+  HEAD 寫 git rev-parse HEAD 的完整 40 位（Strict 一定要 40 位，總監拿它和審查的 commit 比）
+ORDER: <WO-檔名.md> REVISION <n>（REVISION 要和工單現在的相同）
 ORDER_SHA256: <開工時跑 gate_check.py --hash 工單 的 64 位輸出>
 RESULT: PASS | PARTIAL | BLOCKED | FAIL
   ENGINEERING: ...
