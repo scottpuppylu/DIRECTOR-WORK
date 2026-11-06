@@ -6,11 +6,11 @@
 - **MINOR**：新增規則、文件、工具或選項，舊檔案照樣通過。
 - **PATCH**：修正文字、修 bug，規則不變。
 
-## Unreleased（候選 1.0.0-rc.1）
+## 1.0.0-rc.1 — 2026-11-06
 
 把 Strict 的證據鏈綁在一個候選 commit 上，讓重跑只執行總監核准的檢查，並讓工單版次和 Git 狀態對得上。另外把每輪必讀文件縮小 1,025 bytes。
 
-版本：已經通過的 Strict 審查和舊指令會變成不通過（「對齊初衷」第 5 題、遷移），照本檔政策是 MAJOR。候選版號 1.0.0-rc.1；最後發 0.13.0 還是 1.0.0 由 Owner 決定，決定前 `VERSION` 寫 `Unreleased`，不打 tag。原本寫成 0.13.0 的段落沒有發行過，併進這一段。
+版本：已經通過的 Strict 審查和舊指令會變成不通過（「對齊初衷」第 5 題、遷移），照本檔政策是 MAJOR。Owner 2026-11-06 定為 1.0.0-rc.1；打 tag 和發布由總監獨立重跑後再做。原本寫成 0.13.0 的段落沒有發行過，併進這一段。
 
 - `evidence_record.py verify --rerun` 改成跑工單 `CHECKS:` 裡核准的指令（JSON 字串陣列，不經 shell，工單雜湊包含它，所以派工時的 `DISPATCH` 行已鎖住）。要給 `--order`、`--dispatch-log`、`--repo`、`--candidate`，少一個就 `NOT_RUN`、exit 2。工單雜湊和版次要等於最新的 `DISPATCH` 行，repo 的 HEAD 要等於候選 commit 而且工作樹乾淨。紀錄的指令不同、或不是在候選 commit 記的，都是 `MISMATCH`。舊行為改名 `--rerun-recorded`，結論寫 `test=recorded-command-passed source=record`，絕不印 `test=passed`。
 - `evidence_record.py`：欄位型別不對（例如 `artifacts=42`、`command=[1]`）印 `NOT_RUN not an evidence record`、exit 2，不再丟 traceback（`gate_check.py` 也一樣）。
@@ -37,14 +37,14 @@
   - `setup_project_settings.py`：已裝的 hook_guard 指令和這份工具要寫的不是逐字相同，就是 `MISSING (hooks.PreToolUse command)`，`--apply` 換掉。項目到位後實際跑一次 hook（一筆要放行、一筆要擋，有 `--protect` 時再加一筆寫進 `orders/` 的 Write），答得不對是 `HOOK_FAIL`、exit 1（H04）。
   - `gate_check.py --preflight 報告 工單`（只讀）：舊版本做的審查要照現在的 Strict 重審前，一項一行 `LACKS` 列出缺什麼，並給補法（M01–M03，見遷移第 7 步）。
   - 證據綁工單（G03b）：`evidence_record.py run --order 工單` 把工單 ID、REVISION 和雜湊寫進紀錄的 `order` 欄；雜湊就是 `gate_check.py --hash` 印給 DISPATCH 行的那一個（同一個函式、同樣讀工單檔的位元組）。`--match --evidence-dir` 時，有綁的紀錄要和工單現在的 ID、版次、雜湊相同，或 `--dispatch-log` 有總監寫的整行 `EVIDENCE_EQUIVALENT <WO-ID> rev=<舊> sha=<舊雜湊> to rev=<新>`（和 DISPATCH 用同一套整行規則：引文、縮排、code fence、寫在 NOTE 句子裡的都不算）。沒綁的紀錄：REVISION 1 照收，印 `WARN evidence not bound to the order`；REVISION 2 以上 Strict 失敗、Standard 提示。`--preflight` 對 REVISION 2 以上沒綁的紀錄印 `LACKS`。`evidence_record.py verify --rerun` 也用同一套規則（同一個 `check_binding`）比對紀錄的 `order` 欄：Strict 工單綁錯工單、綁舊版次又沒有 EVIDENCE_EQUIVALENT 行、或 REVISION 2 以上沒綁，結論是 `MISMATCH`、exit 1；Standard 印 `~` 提示。
-- `selftest.py` 加上面各項的正反案例（285 → 486 項）。
+- `selftest.py` 加上面各項的正反案例（285 → 524 項）。
 
 對齊初衷：
 1. 幫到誰：外部稽核（Codex）和 SDD 報告指出的漏洞，先在暫存 fixture 逐項重現才修：Strict 少給旗標只出提示、`--rerun` 會執行紀錄裡被竄改的指令、`artifacts=42` 丟 traceback、DISPATCH 版次不同照收、已暫存後改回的 FORBIDDEN 修改看不到、裁決配到別版的報告。重現腳本修正前 A01–A11 是 exit 0 或 traceback，修正後是 1 或 2。第二輪 Codex 對抗式審查找到的繞道（改 GOVERNANCE 自己降級、引文裡的 DISPATCH 被當授權、別的 commit 的 PASS 裁決、用 replace refs 或 assume-unchanged 騙過重跑、用裝置路徑繞過 hook）也先用審查附的重現腳本重現，修完再跑一次。
 2. Desktop：在 Desktop Code 分頁的 worker session 實作，Python 3.11 跑 selftest 全過。junction 和 8.3 短檔名案在 Windows 實跑，沒有 SKIP；一般帳號沒有建立 symlink 的權限（WinError 1314），symlink 沒測。`--protect-director` 還沒在真實 worker 資料夾裝過；`CHECKS` 和 `--candidate` 還沒在真實工單上跑過，都是 NOT_VERIFIED。
 3. 服務：成品要真的對（5）：重跑只跑總監核准的檢查，證據、報告、裁決指向同一個 commit。PO 不用盯細節（3）：工具查得出版次和 Git 狀態不一致。零成本（7）：只用標準函式庫。
 4. 核心：每輪必讀變小（13,417 → 12,392 bytes），規則沒有刪，理由搬到 `docs/10`。Direct 不多步驟。PO 不多操作：新參數都是總監下的。
-5. 舊檔案和舊指令：可能新不通過的有四種。Strict 審查少了 `--candidate`、`--dispatch-log` 或 `--evidence-dir`；單獨寫 `verify --rerun` 沒給 `--order`（exit 2）；`scope_check.py` 看到以前漏掉的已暫存或已 commit 修改（當 bug 修，Standard 也會報）；DISPATCH 或報告的版次和工單不同。審查修正後再加四種：LOG 裡引用、縮排或放在 code fence 的 DISPATCH 不再算派工；報告 header 欄位重複；Strict 證據的 `git.dirty` 沒寫或 schema 不認得；候選裡有 assume-unchanged / skip-worktree 檔案或 `refs/replace/` 時重跑拒跑；REVISION 2 以上的 Strict 工單，證據沒用 `--order` 綁版次（G03b）。沒有 `CHECKS` 和 `REQUIRED_CHANGES` 的舊工單，`--order` 結果不變。這些照本檔政策是 MAJOR；0.x 升 MAJOR 等於 1.0，由 Owner 決定，所以先寫 Unreleased（候選 1.0.0-rc.1）。
+5. 舊檔案和舊指令：可能新不通過的有四種。Strict 審查少了 `--candidate`、`--dispatch-log` 或 `--evidence-dir`；單獨寫 `verify --rerun` 沒給 `--order`（exit 2）；`scope_check.py` 看到以前漏掉的已暫存或已 commit 修改（當 bug 修，Standard 也會報）；DISPATCH 或報告的版次和工單不同。審查修正後再加四種：LOG 裡引用、縮排或放在 code fence 的 DISPATCH 不再算派工；報告 header 欄位重複；Strict 證據的 `git.dirty` 沒寫或 schema 不認得；候選裡有 assume-unchanged / skip-worktree 檔案或 `refs/replace/` 時重跑拒跑；REVISION 2 以上的 Strict 工單，證據沒用 `--order` 綁版次（G03b）。沒有 `CHECKS` 和 `REQUIRED_CHANGES` 的舊工單，`--order` 結果不變。這些照本檔政策是 MAJOR；0.x 升 MAJOR 等於 1.0，Owner 定為 1.0.0-rc.1。
 
 遷移：
 1. 把 `tools/` 整個重新複製到 `DIRECTOR/tools/`。
