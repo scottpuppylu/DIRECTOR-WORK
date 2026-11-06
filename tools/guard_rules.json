@@ -8,6 +8,12 @@
     "worker": {"denies": 5, "window_s": 600},
     "director": null
   },
+  "review": {
+    "about": "hook_guard.py --review (off unless given): asks of these rule categories go to a second model first (claude -p, no tools, no hooks); block turns the ask into a deny, anything else keeps the ask",
+    "model": "haiku",
+    "timeout_s": 45,
+    "categories": ["push", "delete", "send", "config"]
+  },
   "pause": {
     "about": "hook_guard.py --pause-flag: while the flag file exists only these calls run; the Director's list adds pause_ctl.py off",
     "reason": "only reading, reporting and progress files run while paused; report where you stopped and wait for the Director to run pause_ctl.py off",

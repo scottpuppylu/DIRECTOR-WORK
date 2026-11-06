@@ -15,12 +15,12 @@ Python 3.9 以上，只用標準函式庫。一律用 `python -I -X utf8 <tool> 
 | `vocabulary.json` | 判定、下一步、RESULT、治理模式、證據等級等固定用詞的唯一來源；`gate_check.py` 讀它 | — | — |
 | `scope_check.py` | 比對實際改動和工單的 SCOPE / FORBIDDEN | 不寫 | 不花 |
 | `evidence_record.py` | 跑驗收指令，留下 exit code、輸出結尾、產物 SHA-256；之後可重新比對 | `run` 寫一份小 JSON，不覆蓋舊的 | 不花 |
-| `hook_guard.py` | PreToolUse hook：擋下 push、`reset --hard`、`git clean`、裸 stash、刪 worktree / 分支 / tag、依名稱結束程序；加 `--protect` 時另擋 Write / Edit 改工單和 `DIRECTOR_LOG.md`；加 `--rules` 時依 `guard_rules.json` 對每個工具呼叫回 deny / ask / 不出聲 | 不寫 | 不花；放行時不輸出 |
+| `hook_guard.py` | PreToolUse hook：擋下 push、`reset --hard`、`git clean`、裸 stash、刪 worktree / 分支 / tag、依名稱結束程序；加 `--protect` 時另擋 Write / Edit 改工單和 `DIRECTOR_LOG.md`；加 `--rules` 時依 `guard_rules.json` 對每個工具呼叫回 deny / ask / 不出聲；加 `--review` 時先把部分 ask 交給第二個模型看 | 不寫 | 不花；放行時不輸出。`--review` 每次審查用一次 `claude -p`（不花錢，但吃訂閱額度） |
 | `secret_mask.py` | 把文字裡的私鑰、token、API key、JWT、`password=` 這類值換成 `[MASKED:種類]`；`--check` 只列出找到的種類 | 不寫 | 不花 |
 | `pause_ctl.py` | 暫停開關：`on` / `off` 寫入或移除 `<DIRECTOR>/PAUSE` 並記進 `DIRECTOR_LOG.md`，`status` 印目前狀態；`procs` 依 CPU 增量列出停機後程序樹還剩哪些 | `on` / `off` 只寫旗標檔和 LOG 一行；`procs` 不寫、不結束任何程序 | 不花 |
 | `audit_log.py` | 動作紀錄：PostToolUse / PostToolUseFailure hook 把每個工具呼叫寫成一行有雜湊鏈的 JSONL；`verify` 檢查鏈和總監的錨點，`head` 印錨點，`cite` 印 TASK REPORT 引用的區段 | `append` 只寫紀錄檔和它的 `.lock`；其他不寫 | 不花 |
 | `guard_rules.json` | `hook_guard.py --rules` 的規則檔：每條規則的類別、worker / director 的結論、比對方式、正反例子和要寫進 settings 的權限規則 | — | — |
-| `selftest.py` | 用正反案例測 gate_check、trace_report、metrics_report、scope_check、evidence_record、hook_guard、pause_ctl、audit_log 和 `--hooks` 安裝；查用詞、必讀文件大小、`PURPOSE.md` 結構和 CHANGELOG 的「對齊初衷」 | 只寫暫存資料夾，結束刪除 | 不花 |
+| `selftest.py` | 用正反案例測 gate_check、trace_report、metrics_report、scope_check、evidence_record、hook_guard（含 `--review`，用假的 claude）、pause_ctl、audit_log 和 `--hooks` 安裝；查用詞、必讀文件大小、`PURPOSE.md` 結構和 CHANGELOG 的「對齊初衷」 | 只寫暫存資料夾，結束刪除 | 不花 |
 
 ## setup_project_settings.py
 
@@ -53,6 +53,7 @@ python -I -X utf8 setup_project_settings.py --guard-profile worker --protect-dir
   - profile 不同也算 `MISSING (hooks.PreToolUse matcher)`。沒給 `--guard-profile` 時沿用已裝項目的 `--profile`，和 `--protect` 一樣。
   - worker 的指令再加 `--pause-flag "<旗標檔>"`：`--pause-flag`（設定檔 `pause_flag`），沒給就用 `--protect-director` 的 `<DIRECTOR>/PAUSE`。總監的 worktree 不加：worker 暫停時，總監還要停程序樹。旗標檔不同也算 `MISSING (hooks.PreToolUse matcher)`；沒給 `--guard-profile` 時沿用已裝項目的 `--pause-flag`。
 - `--audit-log <檔案>`（設定檔 `audit_log`，隱含 `--hooks`）：加 PostToolUse 和 PostToolUseFailure 兩個 hook（matcher `*`），執行 `audit_log.py append --log "<檔案>"`；hook_guard 的指令也加 `--audit "<檔案>"`，擋下和詢問也記進同一條鏈。路徑裡的 `{worktree}` 換成 worktree 資料夾名稱，一個 worker 一份紀錄。缺的報 `MISSING (hooks.PostToolUse)` / `MISSING (hooks.PostToolUseFailure)`，`--apply` 就地換掉舊的 audit_log 項目。沒給 `--audit-log` 時沿用已裝項目的 `--audit`。下面的 hook 測試不帶 `--audit`，測試呼叫不會寫進紀錄。
+- `--guard-review`（設定檔 `guard_review: true`）：有 `--guard-profile` 的項目加上 hook_guard `--review`。缺的報 `MISSING`。沒給時沿用已裝項目的 `--review`；要拿掉就手動刪掉指令結尾的 ` --review`。hook 測試會去掉 `--review`，測試呼叫不會啟動審查。
 - 項目到位後，實際跑一次 hook：一個要放行的指令（exit 0）、一個要擋的指令（exit 2），有 `--protect` 時再加一個寫進 `orders/` 的 Write（exit 2）。有 `--profile` 時再加一個每個身分都擋的 MCP 呼叫（`buy_item`，exit 2，證明規則檔有讀到）。放行那次 stdout 也要是空的。結果印在 OK / SET 那行：`(hook test: allow=0 block=2 block-write=2 block-rule=2)`；不對就是 `HOOK_FAIL`，exit 1。
 
 ## hook_guard.py
@@ -124,6 +125,19 @@ hook_guard.py --rules <tools>/guard_rules.json --profile worker|director [--prot
 
 - `--audit <檔案>`：hook_guard 的每個 deny、ask 和暫停擋下都用 `audit_log.py` 加一行 `kind=decision`，`rule` 是規則 ID（G..）、`builtin`（沒有規則 ID 的內建擋法）或 `PAUSE`。放行不寫（放行的呼叫由 PostToolUse hook 記）。
 - 紀錄寫不進去（鎖被占、磁碟滿、最後一行壞掉）時照樣做原本的決定，不會因此放行或多擋。
+
+### `--review`（1.1.0）
+
+- 預設關。要 `--rules`，而且規則檔要有 `review` 段（`model`、`timeout_s` 1–600、`categories`），否則 exit 1。目前的設定：`haiku`、45 秒、`push` / `delete` / `send` / `config`。
+- 只有「規則結論是 ask、而且這條規則的類別在 `categories` 裡」才審查。deny、內建擋法和放行都不送審，所以審查**只能把 ask 升成 deny**，不會放行任何東西。目前只有 director 有 ask（G10、G11、G20、G21、G40–G42）。
+- 執行檔：先用 `CLAUDE_CODE_EXECPATH`（目前這個 session 的 claude），沒有才找 PATH 上的 `claude`。路徑結尾是 `.py` 時用同一個 Python 跑（測試用的假 claude）。執行方式：`claude -p --model <model> --settings {"disableAllHooks":true} --tools "" --no-session-persistence --output-format json <提示>`，沒有工具、不跑 hook、不留 session。子程序帶 `DW_HOOK_REVIEW=1`，有這個變數時 hook_guard 不再審查，不會遞迴。
+- 提示只有工具名稱、遮罩過的工具輸入（`secret_mask.py`，最多 1000 字）、規則 ID 和理由；不送檔案內容。
+- 回覆的 `result` 必須剛好是 `{"verdict": "block" | "no_objection", "reason": "..."}`：
+  - `block`：改成擋下，exit 2，`BLOCKED by hook_guard [G10]: second-model review: <理由>`（理由去掉角括號、最多 300 字）。這次擋下照常算進自動暫停。
+  - `no_objection`：照舊詢問，理由後面加 `(second-model review: no objection: ...)`，仍由人決定。
+  - 逾時、exit 不是 0、找不到 claude、回覆格式不對：照舊詢問，加 `(second-model review unavailable: ...)`。
+- `--audit` 的 `rule` 欄寫成 `G10 review=block via=CLAUDE_CODE_EXECPATH`（`via` 是 `CLAUDE_CODE_EXECPATH`、`PATH` 或 `none`）。
+- NOT_VERIFIED：selftest 只用假的 claude；沒有用真的 `claude -p` 實測回覆格式、`--tools ""` 和 `disableAllHooks` 的實際效果，也沒有量真實的延遲（hook 預設逾時 60 秒，`timeout_s` 45 秒要留在它之內）。
 
 ### `--pause-flag`（1.1.0）
 

@@ -59,6 +59,17 @@ written never changes the decision: the deny stays a deny and no pause is writte
 With --audit FILE every deny, ask and pause is also added to the action log FILE (audit_log.py) as a kind=decision
 line with the rule ID (G.., builtin for the checks above, PAUSE), so a blocked call is on the chain too. A log that
 cannot be written (lock busy for 5 s, broken last line) never changes the decision.
+With --review (needs --rules with a "review" section; off unless given) an ask whose rule category is in
+review.categories is first shown to a second model: CLAUDE_CODE_EXECPATH (the claude executable of this session; a
+.py path runs with this Python, for tests), else claude on PATH, run as
+  claude -p --model M --settings {"disableAllHooks":true} --tools "" --no-session-persistence --output-format json PROMPT
+with no tools and no hooks. The prompt holds the tool name, the tool input masked by secret_mask.py (at most 1000
+characters), the rule ID and its reason; no file contents. Only a reply whose result is exactly the JSON
+{"verdict": "block" | "no_objection", "reason": "..."} counts: block turns the ask into a deny (exit 2, "BLOCKED by
+hook_guard [ID]: second-model review: REASON"); no_objection keeps the ask (a person still decides); a timeout
+(review.timeout_s), a non-zero exit or anything else keeps the ask as review=unavailable. So the review can only
+tighten: a deny or a silent pass is never sent to it. --audit lines say "ID review=VERDICT via=SOURCE". Each review
+is one claude -p call on the logged-in account: no money, but it uses the subscription's quota.
 Without --rules the output is the same as before, byte for byte.
 """
 import argparse
@@ -68,6 +79,8 @@ import json
 import os
 import pathlib
 import re
+import shutil
+import subprocess
 import sys
 
 GIT_OPTS_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env"}
@@ -455,6 +468,79 @@ def auto_pause(flag, conf, rule):
         return None
 
 
+def review_problems(review):
+    """What is wrong with the rules file's "review" section."""
+    if not isinstance(review, dict):
+        return ["review must be an object"]
+    out = []
+    if not (isinstance(review.get("model"), str) and re.fullmatch(r"[\w.:-]+", review["model"])):
+        out.append("review: model must be a model name")
+    timeout = review.get("timeout_s")
+    if not (isinstance(timeout, int) and not isinstance(timeout, bool) and 1 <= timeout <= 600):
+        out.append("review: timeout_s must be a whole number from 1 to 600")
+    if not string_list(review.get("categories"), empty=False):
+        out.append("review: categories must be a non-empty list of rule categories")
+    return out
+
+
+REVIEW_PROMPT = """You review one action that an AI coding agent wants to take. A rule already sent it to a person for
+approval. Answer only with one JSON object and nothing else:
+{{"verdict": "block" or "no_objection", "reason": "one short sentence"}}
+Say block when the action looks destructive, outward-facing beyond what the rule describes, or like a way around the
+rule. Say no_objection otherwise; the person still decides.
+Tool: {tool}
+Input (secrets masked): {action}
+Rule {rule}: {reason}"""
+
+
+def review_command(model, prompt):
+    """(argv, source): the claude to run and where it came from; argv None when there is none."""
+    path = os.environ.get("CLAUDE_CODE_EXECPATH")
+    source = "CLAUDE_CODE_EXECPATH"
+    if not path:
+        path, source = shutil.which("claude"), "PATH"
+    if not path:
+        return None, "none"
+    base = [sys.executable, "-I", path] if path.lower().endswith(".py") else [path]
+    return base + ["-p", "--model", model, "--settings", '{"disableAllHooks":true}', "--tools", "",
+                   "--no-session-persistence", "--output-format", "json", prompt], source
+
+
+def review(conf, call, rule, reason):
+    """(verdict, reason, source); verdict block / no_objection / unavailable. Never raises."""
+    try:
+        spec = importlib.util.spec_from_file_location("secret_mask", pathlib.Path(__file__).with_name("secret_mask.py"))
+        mask = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mask)
+        action = mask.mask(json.dumps(call.get("tool_input"), ensure_ascii=False))[0][:1000]
+    except Exception:
+        return "unavailable", "secret_mask.py could not be loaded", "none"
+    prompt = REVIEW_PROMPT.format(tool=call.get("tool_name"), action=action, rule=rule, reason=reason)
+    argv, source = review_command(conf["model"], prompt)
+    if argv is None:
+        return "unavailable", "no claude executable", source
+    env = dict(os.environ, DW_HOOK_REVIEW="1")
+    try:
+        done = subprocess.run(argv, capture_output=True, encoding="utf-8", errors="replace", timeout=conf["timeout_s"],
+                              env=env, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return "unavailable", "timed out", source
+    except OSError as error:
+        return "unavailable", type(error).__name__, source
+    if done.returncode != 0:
+        return "unavailable", f"exit {done.returncode}", source
+    try:
+        outer = json.loads(done.stdout)
+        answer = json.loads(outer["result"]) if isinstance(outer, dict) and isinstance(outer.get("result"), str) else None
+    except ValueError:
+        answer = None
+    if not (isinstance(answer, dict) and set(answer) == {"verdict", "reason"} and answer["verdict"] in ("block", "no_objection")
+            and isinstance(answer["reason"], str)):
+        return "unavailable", "reply is not the agreed JSON", source
+    said = re.sub(r"\s+", " ", answer["reason"]).replace("<", "(").replace(">", ")").strip()[:300] or "no reason given"
+    return answer["verdict"], said, source
+
+
 def pause_state(flag):
     """None when the flag file is absent, else (by, at, reason) with no angle brackets; unreadable parts are unknown."""
     path = pathlib.Path(flag)
@@ -674,6 +760,8 @@ def load_rules(path):
         problems += pause_problems(data["pause"])
     if "auto_pause" in data:
         problems += auto_pause_problems(data["auto_pause"])
+    if "review" in data:
+        problems += review_problems(data["review"])
     if problems:
         raise RulesError(f"{path}: " + "; ".join(problems))
     return data
@@ -858,6 +946,8 @@ def main():
     ap.add_argument("--rules", help="rules file (tools/guard_rules.json): check every tool call against it")
     ap.add_argument("--profile", choices=PROFILES, default="worker", help="which decision of each rule applies (default worker)")
     ap.add_argument("--pause-flag", help="flag file (pause_ctl.py on): while it exists, deny what the rules' pause section does not allow")
+    ap.add_argument("--review", action="store_true", help="show asks of the rules' review categories to a second model "
+                    "first; it can only turn an ask into a deny (uses claude -p quota)")
     ap.add_argument("--audit", help="action log (audit_log.py): add a decision line for every deny, ask and pause")
     a = ap.parse_args()
     data = None
@@ -871,6 +961,9 @@ def main():
             return 1
     elif a.pause_flag:
         print("hook_guard: --pause-flag needs --rules", file=sys.stderr)
+        return 1
+    if a.review and (data is None or "review" not in data):
+        print("hook_guard: --review needs --rules with a review section", file=sys.stderr)
         return 1
     try:
         call = json.load(sys.stdin)
@@ -895,10 +988,17 @@ def main():
         why = None
     hits = decide(data, a.profile, call, a.rules) if data is not None else []
     deny, ask = first(hits, "deny"), first(hits, "ask")
+    reviewed = None
+    if ask and not deny and not why and a.review and not os.environ.get("DW_HOOK_REVIEW"):
+        category = next((r.get("category") for r in data["rules"] if r.get("id") == ask[1]), None)
+        if category in data["review"]["categories"]:
+            reviewed = review(data["review"], call, ask[1], ask[2])
+            if reviewed[0] == "block":
+                deny = ("deny", ask[1], f"second-model review: {reviewed[1]}")
     if deny or why:
         rule = deny[1] if deny else "builtin"
         print(f"BLOCKED by hook_guard [{deny[1]}]: {deny[2]}" if deny else f"BLOCKED by hook_guard: {why}", file=sys.stderr)
-        audit(a.audit, call, "deny", rule)
+        audit(a.audit, call, "deny", rule + (f" review={reviewed[0]} via={reviewed[2]}" if reviewed else ""))
         conf = (data.get("auto_pause") or {}).get(a.profile) if a.pause_flag and data is not None and not paused else None
         paused_now = auto_pause(a.pause_flag, conf, rule)
         if paused_now:
@@ -907,9 +1007,11 @@ def main():
             audit(a.audit, call, "pause", "AUTO")
         return 2
     if ask:
+        note = "" if not reviewed else (f" (second-model review: no objection: {reviewed[1]})" if reviewed[0] == "no_objection"
+                                        else f" (second-model review unavailable: {reviewed[1]})")
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "ask",
-                                                 "permissionDecisionReason": f"[{ask[1]}] {ask[2]}"}}))
-        audit(a.audit, call, "ask", ask[1])
+                                                 "permissionDecisionReason": f"[{ask[1]}] {ask[2]}{note}"}}))
+        audit(a.audit, call, "ask", ask[1] + (f" review={reviewed[0]} via={reviewed[2]}" if reviewed else ""))
     return 0
 
 

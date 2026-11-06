@@ -2606,6 +2606,143 @@ def test_audit(tmp):
     expect("setup plain --hooks keeps --audit", "setup_project_settings.py", 0, "--repo", wt, "--only-this", "--hooks", says="OK")
 
 
+FAKE_CLAUDE = '''import json, os, sys, time
+mode = os.environ.get("FAKE_REVIEW_MODE", "block")
+with open(os.environ["FAKE_REVIEW_LOG"], "a", encoding="utf-8") as out:
+    out.write(json.dumps({"argv": sys.argv[1:], "guard": os.environ.get("DW_HOOK_REVIEW")}) + "\\n")
+if mode == "sleep":
+    time.sleep(8)
+if mode == "exit1":
+    sys.exit(1)
+if mode == "garbage":
+    print("I think this is fine")
+    sys.exit(0)
+answer = {"verdict": "no_objection" if mode == "ok" else "block", "reason": "looks <risky>\\n   to me"}
+if mode == "extra":
+    answer["also"] = 1
+print(json.dumps({"type": "result", "result": json.dumps(answer)}))
+'''
+
+
+def test_review(tmp):
+    """1.1.0 batch 2: hook_guard --review shows asks of the review categories to a second model (a fake claude here,
+    never the real one); it can only turn an ask into a deny, and setup --guard-review installs the switch."""
+    global total
+    rules_path = TOOLS / "guard_rules.json"
+    folder = tmp / "review"
+    folder.mkdir()
+    fake = folder / "fake_claude.py"
+    fake.write_text(FAKE_CLAUDE, encoding="utf-8")
+    calls_log = folder / "calls.jsonl"
+    empty_path = folder / "no_programs"
+    empty_path.mkdir()
+    fake_key = "gh" + "p_" + "R8t" * 12  # built at run time: nothing key-shaped in the source
+    data = json.loads(rules_path.read_text(encoding="utf-8"))
+
+    def rules_copy(name, **change):
+        path = folder / f"{name}.json"
+        changed = dict(data, **change)
+        for key in [k for k, v in change.items() if v is None]:
+            del changed[key]
+        path.write_text(json.dumps(changed), encoding="utf-8")
+        return path
+
+    def calls():
+        return [json.loads(line) for line in calls_log.read_text(encoding="utf-8").splitlines()] if calls_log.exists() else []
+
+    def hook(call, mode="block", profile="director", review=True, rules_file=rules_path, extra=(), **env_change):
+        env = {k: v for k, v in os.environ.items() if k not in ("DW_HOOK_REVIEW", "CLAUDE_CODE_EXECPATH")}
+        env.update(CLAUDE_CODE_EXECPATH=str(fake), FAKE_REVIEW_MODE=mode, FAKE_REVIEW_LOG=str(calls_log))
+        env.update(env_change)
+        argv = [sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), "--rules", str(rules_file),
+                "--profile", profile] + (["--review"] if review else []) + [str(x) for x in extra]
+        return subprocess.run(argv, capture_output=True, encoding="utf-8", input=json.dumps(call), env=env)
+
+    def check(name, ok, detail=""):
+        global total
+        total += 1
+        if not ok:
+            failures.append(f"review {name}: {detail}")
+
+    def asked(done):
+        try:
+            out = json.loads(done.stdout)["hookSpecificOutput"]
+        except (ValueError, KeyError, TypeError):
+            return ""
+        return out["permissionDecisionReason"] if out.get("permissionDecision") == "ask" else ""
+
+    remove = {"tool_name": "Bash", "tool_input": {"command": "rm -rf build"}}
+    done = hook(remove)
+    check("block turns the director's G10 ask into a deny", done.returncode == 2 and done.stdout == ""
+          and done.stderr.startswith("BLOCKED by hook_guard [G10]: second-model review: looks (risky) to me")
+          and not re.search(r"<[^>]*>", done.stderr), done.stderr)
+    seen = calls()
+    argv = seen[-1]["argv"] if seen else []
+    check("the review runs claude -p with no hooks and no tools, marked against recursion", len(seen) == 1
+          and argv[:3] == ["-p", "--model", "haiku"] and argv[argv.index("--settings") + 1] == '{"disableAllHooks":true}'
+          and argv[argv.index("--tools") + 1] == "" and "--no-session-persistence" in argv
+          and argv[argv.index("--output-format") + 1] == "json" and seen[-1]["guard"] == "1"
+          and "rm -rf build" in argv[-1] and "Rule G10" in argv[-1], json.dumps(seen))
+    hook({"tool_name": "Bash", "tool_input": {"command": f"gh pr comment 3 --body {fake_key}"}})
+    prompt = calls()[-1]["argv"][-1] if len(calls()) == 2 else ""
+    check("the prompt has the tool input masked", "[MASKED:" in prompt and fake_key not in prompt and "Rule G20" in prompt, prompt)
+    done = hook(remove, mode="ok")
+    check("no_objection keeps the ask and says so", done.returncode == 0
+          and asked(done).startswith("[G10] ") and "(second-model review: no objection: looks (risky) to me)" in asked(done), done.stdout)
+    for mode, says in (("garbage", "reply is not the agreed JSON"), ("exit1", "exit 1"), ("extra", "reply is not the agreed JSON")):
+        done = hook(remove, mode=mode)
+        check(f"{mode} reply keeps the ask as unavailable", done.returncode == 0
+              and f"(second-model review unavailable: {says})" in asked(done), done.stdout + done.stderr)
+    quick = rules_copy("quick", review=dict(data["review"], timeout_s=1))
+    started = time.time()
+    done = hook(remove, mode="sleep", rules_file=quick)
+    check("a review past timeout_s keeps the ask", done.returncode == 0 and "unavailable: timed out" in asked(done)
+          and time.time() - started < 7, f"{time.time() - started:.1f}s {done.stdout}")
+    done = hook(remove, CLAUDE_CODE_EXECPATH="", PATH=str(empty_path))
+    check("no claude at all keeps the ask", done.returncode == 0 and "unavailable: no claude executable" in asked(done),
+          done.stdout + done.stderr)
+    before = len(calls())
+    worker = hook(remove, profile="worker")
+    allowed = hook({"tool_name": "Bash", "tool_input": {"command": "git status"}})
+    plain = hook(remove, review=False)
+    narrow = hook(remove, rules_file=rules_copy("narrow", review=dict(data["review"], categories=["push"])))
+    inner = hook(remove, DW_HOOK_REVIEW="1")
+    check("never reviewed: a deny, a silent pass, no --review, another category, a review's own calls",
+          len(calls()) == before and worker.returncode == 2 and worker.stderr.startswith("BLOCKED by hook_guard [G10]: ")
+          and "second-model" not in worker.stderr and allowed.returncode == 0 and allowed.stdout == ""
+          and all(asked(d).startswith("[G10] ") and "second-model" not in asked(d) for d in (plain, narrow, inner)),
+          " | ".join(d.stdout + d.stderr for d in (worker, allowed, plain, narrow, inner)))
+    done = hook(remove, rules_file=rules_copy("no_review", review=None))
+    check("--review without a review section is refused", done.returncode == 1 and "review section" in done.stderr, done.stderr)
+    for name, value in (("zero timeout", dict(data["review"], timeout_s=0)), ("no categories", dict(data["review"], categories=[])),
+                        ("odd model", dict(data["review"], model="haiku; rm -rf /"))):
+        done = hook(remove, rules_file=rules_copy(name.replace(" ", "_"), review=value))
+        check(f"bad review section ({name}) is refused", done.returncode == 1 and "bad rules file" in done.stderr
+              and "review" in done.stderr, done.stderr)
+    log = folder / "audit.jsonl"
+    hook(remove, extra=("--audit", log))
+    hook(remove, mode="ok", extra=("--audit", log))
+    lines = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()] if log.exists() else []
+    check("--audit says what the review did and which claude ran it",
+          [(e["result"]["status"], e["rule"]) for e in lines] == [("deny", "G10 review=block via=CLAUDE_CODE_EXECPATH"),
+                                                                  ("ask", "G10 review=no_objection via=CLAUDE_CODE_EXECPATH")],
+          json.dumps(lines))
+    expect("review audit chain verifies", "audit_log.py", 0, "verify", "--log", log, says=["entries=2", " OK"])
+    # setup --guard-review: the switch goes on the guarded entry; the hook test never starts a review
+    wt = folder / "wt"
+    wt.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=wt, check=True)
+    (wt / ".git" / "info" / "exclude").write_text(".claude/settings.local.json\n", encoding="utf-8")
+    setup = ("--repo", wt, "--only-this", "--guard-profile", "director")
+    expect("setup without review", "setup_project_settings.py", 0, *setup, "--apply", says="SET")
+    expect("setup review missing", "setup_project_settings.py", 1, *setup, "--guard-review", says="MISSING")
+    expect("setup review written and tested", "setup_project_settings.py", 0, *setup, "--guard-review", "--apply",
+           says=["SET", "guard_review=on", "block-rule=2"])
+    command = json.loads((wt / ".claude" / "settings.local.json").read_text(encoding="utf-8"))["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    check("setup puts --review on the guarded command", command.endswith(" --review") and "--profile director" in command, command)
+    expect("setup review kept on rerun without the option", "setup_project_settings.py", 0, *setup, says="OK")
+
+
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="director_work_selftest_")).resolve()
@@ -2635,6 +2772,7 @@ def main():
         test_pause(tmp)
         test_auto_pause(tmp)
         test_audit(tmp)
+        test_review(tmp)
         test_evidence(tmp)
         test_order_checks(tmp)
         test_preflight(tmp)
