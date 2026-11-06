@@ -3,6 +3,11 @@
   "about": "Rules for hook_guard.py --rules. Each rule: id, category, decision per profile (deny / ask / none), reason (no angle brackets), match (one object or a list; any one matching is enough), example_block, example_allow (hook inputs; selftest runs every one under both profiles), optional permissions (Claude Code permission rules that setup_project_settings.py --guard-profile writes into permissions.deny or permissions.ask for that profile). The strictest decision wins; between equal decisions the lowest id wins, so the order of rules never changes a result. G00 is built in: Write / Edit of the rules file in use, of this file or of hook_guard.py.",
   "internal_report_tools": ["SendMessage", "mcp__ccd_session_mgmt__send_message"],
   "read_only_mcp_prefixes": ["get", "list", "read", "search", "query", "status"],
+  "auto_pause": {
+    "about": "hook_guard.py --pause-flag: this many denies within window_s seconds write the pause flag (the deny count is kept in the flag path + .denies); null is off",
+    "worker": {"denies": 5, "window_s": 600},
+    "director": null
+  },
   "pause": {
     "about": "hook_guard.py --pause-flag: while the flag file exists only these calls run; the Director's list adds pause_ctl.py off",
     "reason": "only reading, reporting and progress files run while paused; report where you stopped and wait for the Director to run pause_ctl.py off",

@@ -51,12 +51,18 @@ Edit of an allow_write path (progress files) and a shell line whose every simple
 profile's allow_shell regexes (tested on the command name and its words joined by single spaces) and that sends no
 output to a file (any unquoted >, >>, 2>, &>; 2>&1 is fine). A Bash call with run_in_background is always denied while paused. A call the pause lets through is then checked by the rules as usual.
 The flag stops new tool calls only; a program already running keeps running.
+Auto-pause: when the rules file's "auto_pause" gives the profile {"denies": N, "window_s": S} (worker 5 in 600 s;
+director null, off), every deny while not paused adds "TIME RULE" to FILE.denies beside the flag; the N-th deny within
+S seconds writes the flag itself ("PAUSE by hook_guard at TIME: auto: N denies in Ss (G02 G50 ...)"), clears
+FILE.denies and says so in the deny message. pause_ctl.py off lifts it as usual. A FILE.denies that cannot be read or
+written never changes the decision: the deny stays a deny and no pause is written.
 With --audit FILE every deny, ask and pause is also added to the action log FILE (audit_log.py) as a kind=decision
 line with the rule ID (G.., builtin for the checks above, PAUSE), so a blocked call is on the chain too. A log that
 cannot be written (lock busy for 5 s, broken last line) never changes the decision.
 Without --rules the output is the same as before, byte for byte.
 """
 import argparse
+import datetime
 import importlib.util
 import json
 import os
@@ -403,6 +409,52 @@ def pause_problems(pause):
     return out
 
 
+def auto_pause_problems(auto):
+    """What is wrong with the rules file's "auto_pause" section."""
+    if not isinstance(auto, dict) or not set(PROFILES) <= set(auto):
+        return ["auto_pause must give worker and director each null or {denies, window_s}"]
+    out = []
+    for profile in PROFILES:
+        conf = auto[profile]
+        if conf is None:
+            continue
+        if not (isinstance(conf, dict) and set(conf) == {"denies", "window_s"}
+                and all(isinstance(conf[k], int) and not isinstance(conf[k], bool) and conf[k] >= 1 for k in conf)):
+            out.append(f"auto_pause.{profile} must be null or {{denies, window_s}} with whole numbers of at least 1")
+    return out
+
+
+def auto_pause(flag, conf, rule):
+    """Count this deny in FLAG.denies; at conf["denies"] within conf["window_s"] seconds write the flag. Returns the
+    pause reason when it paused, else None. Any OSError: None, nothing paused (the deny itself stands)."""
+    if not conf:
+        return None
+    state = pathlib.Path(str(flag) + ".denies")
+    now = datetime.datetime.now().astimezone()
+    try:
+        with open(state, "a", encoding="utf-8", newline="\n") as out:
+            out.write(f"{now.timestamp():.3f} {rule}\n")
+        recent = []
+        for line in state.read_text(encoding="utf-8", errors="replace").splitlines():
+            stamp, _, rid = line.partition(" ")
+            try:
+                if now.timestamp() - float(stamp) <= conf["window_s"]:
+                    recent.append(re.sub(r"[^\w.-]", "", rid) or "unknown")
+            except ValueError:
+                continue
+        if len(recent) < conf["denies"]:
+            if len(recent) * 4 < len(state.read_text(encoding="utf-8", errors="replace").splitlines()):
+                state.write_text("".join(f"{now.timestamp():.3f} {r}\n" for r in recent), encoding="utf-8", newline="\n")
+            return None
+        why = f"auto: {len(recent)} denies in {conf['window_s']}s ({' '.join(recent)})"
+        pathlib.Path(flag).write_text(f"PAUSE by hook_guard at {now.isoformat(timespec='seconds')}: {why}\n",
+                                      encoding="utf-8", newline="\n")
+        state.write_text("", encoding="utf-8")
+        return why
+    except OSError:
+        return None
+
+
 def pause_state(flag):
     """None when the flag file is absent, else (by, at, reason) with no angle brackets; unreadable parts are unknown."""
     path = pathlib.Path(flag)
@@ -620,6 +672,8 @@ def load_rules(path):
             problems.append(f"{key} must be a list of strings")
     if "pause" in data:
         problems += pause_problems(data["pause"])
+    if "auto_pause" in data:
+        problems += auto_pause_problems(data["auto_pause"])
     if problems:
         raise RulesError(f"{path}: " + "; ".join(problems))
     return data
@@ -841,13 +895,16 @@ def main():
         why = None
     hits = decide(data, a.profile, call, a.rules) if data is not None else []
     deny, ask = first(hits, "deny"), first(hits, "ask")
-    if deny:
-        print(f"BLOCKED by hook_guard [{deny[1]}]: {deny[2]}", file=sys.stderr)
-        audit(a.audit, call, "deny", deny[1])
-        return 2
-    if why:
-        print(f"BLOCKED by hook_guard: {why}", file=sys.stderr)
-        audit(a.audit, call, "deny", "builtin")
+    if deny or why:
+        rule = deny[1] if deny else "builtin"
+        print(f"BLOCKED by hook_guard [{deny[1]}]: {deny[2]}" if deny else f"BLOCKED by hook_guard: {why}", file=sys.stderr)
+        audit(a.audit, call, "deny", rule)
+        conf = (data.get("auto_pause") or {}).get(a.profile) if a.pause_flag and data is not None and not paused else None
+        paused_now = auto_pause(a.pause_flag, conf, rule)
+        if paused_now:
+            print(f"AUTO-PAUSED by hook_guard: {paused_now}; stop here, report where you stopped and wait for the Director"
+                  " (pause_ctl.py off lifts it)", file=sys.stderr)
+            audit(a.audit, call, "pause", "AUTO")
         return 2
     if ask:
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "ask",

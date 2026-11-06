@@ -39,7 +39,8 @@ process trees while the workers are paused. Without --guard-profile an installed
 run audit_log.py append --log FILE, and gives the hook_guard entry --audit FILE so denies and asks are logged too.
 {worktree} in FILE becomes the worktree folder name, for one log per worker. Missing ones show MISSING
 (hooks.PostToolUse / hooks.PostToolUseFailure); --apply replaces an audit_log entry in place. The hook test runs
-hook_guard without --audit, so no test line goes into the log. Without --audit-log an installed --audit is kept.
+hook_guard without --audit or --pause-flag, so no test line goes into the log and no test deny counts
+toward an auto-pause. Without --audit-log an installed --audit is kept.
 """
 import argparse
 import datetime
@@ -240,9 +241,10 @@ def hook_works(command, protect):
         argv = shlex.split(command)
     except ValueError as error:
         return False, f"command does not parse: {error}"
-    if "--audit" in argv[:-1]:  # the test calls are not tool calls: keep them out of the action log
-        at = argv.index("--audit")
-        del argv[at:at + 2]
+    for option in ("--audit", "--pause-flag"):  # test calls: not in the action log, not counted toward an auto-pause
+        if option in argv[:-1]:
+            at = argv.index(option)
+            del argv[at:at + 2]
     calls = [("allow", {"tool_name": "Bash", "tool_input": {"command": "git status"}}, 0),
              ("block", {"tool_name": "Bash", "tool_input": {"command": "git push"}}, 2)]
     if protect:

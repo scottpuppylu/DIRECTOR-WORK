@@ -14,6 +14,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 
 TOOLS = pathlib.Path(__file__).resolve().parent
 TEMPLATES = TOOLS.parent / "templates"
@@ -2369,6 +2370,74 @@ def test_pause(tmp):
         failures.append(f"setup director worktree: command is {command!r}")
 
 
+def test_auto_pause(tmp):
+    """1.1.0 batch 2: the 5th worker deny within 600 s writes the pause flag; older denies, the Director and a state
+    file that cannot be written never pause; bad auto_pause settings are refused."""
+    global total
+    rules_path = TOOLS / "guard_rules.json"
+    folder = tmp / "auto_pause"
+    folder.mkdir()
+    flag = folder / "PAUSE"
+    state = folder / "PAUSE.denies"
+
+    def hook(call, profile="worker", rules_file=rules_path, flag_file=flag):
+        return subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), "--rules", str(rules_file),
+                               "--profile", profile, "--pause-flag", str(flag_file)],
+                              capture_output=True, encoding="utf-8", input=json.dumps(call))
+
+    def check(name, ok, detail=""):
+        global total
+        total += 1
+        if not ok:
+            failures.append(f"auto-pause {name}: {detail}")
+
+    push = {"tool_name": "Bash", "tool_input": {"command": "git push origin main"}}
+    dotenv = {"tool_name": "Read", "tool_input": {"file_path": ".env"}}
+    first_four = [hook(push if i % 2 == 0 else dotenv) for i in range(4)]
+    check("4 denies: still denies, no flag", all(d.returncode == 2 and "AUTO-PAUSED" not in d.stderr for d in first_four)
+          and not flag.exists(), " | ".join(d.stderr.strip()[:80] for d in first_four))
+    fifth = hook(push)
+    text = flag.read_text(encoding="utf-8") if flag.exists() else ""
+    check("5th deny writes the flag with the rule IDs", fifth.returncode == 2 and "AUTO-PAUSED by hook_guard: auto: 5 denies in 600s" in fifth.stderr
+          and re.match(r"PAUSE by hook_guard at \S+: auto: 5 denies in 600s \(G02 G50 G02 G50 G02\)\n$", text)
+          and not re.search(r"<[^>]*>", fifth.stderr), fifth.stderr + text)
+    check("state file cleared after the pause", state.exists() and state.read_text(encoding="utf-8") == "")
+    expect("auto-paused flag reads as a pause", "pause_ctl.py", 0, "status", "--director", folder, says="PAUSE: on by hook_guard at")
+    ctl = f"python -I -X utf8 {(TOOLS / 'pause_ctl.py').as_posix()}"
+    status = hook({"tool_name": "Bash", "tool_input": {"command": f"{ctl} status --director {folder.as_posix()}"}})
+    off = hook({"tool_name": "Bash", "tool_input": {"command": f"{ctl} off --director {folder.as_posix()}"}})
+    check("auto-paused worker: pause_ctl status runs, off does not", status.returncode == 0 and off.returncode == 2
+          and off.stderr.startswith("PAUSED by hook_guard at "), status.stderr + off.stderr)
+    env = hook(dotenv)
+    check("while paused a rule deny is not counted again", env.returncode == 2 and env.stderr.startswith("BLOCKED by hook_guard [G50]")
+          and "AUTO-PAUSED" not in env.stderr and state.read_text(encoding="utf-8") == "", env.stderr)
+    flag.unlink()
+    old = time.time() - 601
+    state.write_text("".join(f"{old:.3f} G02\n" for _ in range(4)), encoding="utf-8")
+    once = hook(push)
+    check("denies older than the window are not counted", once.returncode == 2 and not flag.exists(), once.stderr)
+    state.write_text("", encoding="utf-8")
+    for _ in range(6):
+        boss = hook(push, profile="director")
+    check("director: no auto-pause", not flag.exists() and "AUTO-PAUSED" not in boss.stderr
+          and state.read_text(encoding="utf-8") == "", boss.stderr)
+    blocked_dir = tmp / "auto_pause_blocked"
+    blocked_dir.mkdir()
+    (blocked_dir / "PAUSE.denies").mkdir()  # a folder where the state file should be: every write fails
+    tries = [hook(push, flag_file=blocked_dir / "PAUSE") for _ in range(6)]
+    check("state file cannot be written: plain deny, no pause, no traceback",
+          all(d.returncode == 2 and d.stderr.startswith("BLOCKED by hook_guard [G02]") and "Traceback" not in d.stderr for d in tries)
+          and not (blocked_dir / "PAUSE").exists(), tries[-1].stderr)
+    data = json.loads(rules_path.read_text(encoding="utf-8"))
+    for name, value in (("missing director", {"worker": {"denies": 5, "window_s": 600}}),
+                        ("zero denies", {"worker": {"denies": 0, "window_s": 600}, "director": None}),
+                        ("text window", {"worker": {"denies": 5, "window_s": "600"}, "director": None})):
+        bad = folder / f"bad_{name.replace(' ', '_')}.json"
+        bad.write_text(json.dumps(dict(data, auto_pause=value)), encoding="utf-8")
+        done = hook(push, rules_file=bad, flag_file=folder / "unused_PAUSE")
+        check(f"bad auto_pause ({name}) is refused", done.returncode == 1 and "auto_pause" in done.stderr, done.stderr)
+
+
 def test_audit(tmp):
     """audit_log.py: the chain, its breaks, anchors (also from a commit), cited ranges, Bash output masking,
     hook_guard decision lines and setup --audit-log."""
@@ -2564,6 +2633,7 @@ def main():
         test_hook_protect(tmp)
         test_hook_rules(tmp)
         test_pause(tmp)
+        test_auto_pause(tmp)
         test_audit(tmp)
         test_evidence(tmp)
         test_order_checks(tmp)

@@ -138,6 +138,7 @@ hook_guard.py --rules <tools>/guard_rules.json --profile worker --pause-flag <DI
   - `allow_write`：Write / Edit / MultiEdit / NotebookEdit 只放行進度檔 `**/RESUME_STATE.md`、`**/TASK_REPORT*.md`。
   - `allow_shell`：每個身分一組 regex。Bash / PowerShell 沒有 `run_in_background`、整行沒有把輸出寫到檔案（不在引號裡的 `>`、`>>`、`2>`、`&>`、`>|`、`>(...)`，`$(...)` 裡的也算；`2>&1`、`>&2` 只是合併串流，照常放行），而且拆出的每個子指令（`名稱 參數...`，不分大小寫）都完整比對到其中一條才放行。預設放行 `git status/log/diff/show/rev-parse`（不可帶 `--output`、`-c`）、`tasklist`、`Get-Process`、`ps`、排序和篩選輸出的指令、`pause_ctl.py status|procs`；`pause_ctl.py off` 只有 director 放行。
 - 被擋的：其他 Bash / PowerShell、背景執行、Monitor、Agent、Workflow、其他寫檔、MCP 寫入動作、`start_session`。
+- 自動暫停（規則檔 `auto_pause`）：worker 在 600 秒內被擋 5 次（規則擋下和內建擋法都算），第 5 次就由 hook 自己寫入旗標，第一行是 `PAUSE by hook_guard at 時間: auto: 5 denies in 600s (G02 G50 ...)`，擋下訊息後面多一行 `AUTO-PAUSED ...`。次數記在旗標旁的 `<旗標>.denies`，暫停後清空；已經暫停時的擋下不再計數。director 是 `null`，不開。解除照舊由總監跑 `pause_ctl.py off`，暫停中的 worker 只放行 `pause_ctl.py status`。`.denies` 讀寫失敗時照常擋下、不暫停，不會卡住。setup 的 hook 測試不帶 `--pause-flag`，測試的擋下不計數。`auto_pause` 格式錯（缺身分、次數或秒數不是正整數）：exit 1。
 - 給了 `--pause-flag` 卻沒給 `--rules`，或規則檔沒有 `pause` 段、`pause` 段格式錯：exit 1（配合 `onFailure: block` 等於全部擋下）。
 - 限制：旗標只擋**新的**工具呼叫，已經在跑的程式（背景批次、子程序）照跑，要依 `docs/02` 停整條程序樹，再用 `pause_ctl.py procs` 確認；含空白的路徑在 allowlist regex 裡比不到 `\S+`，會被擋（寧可多擋）。
 
