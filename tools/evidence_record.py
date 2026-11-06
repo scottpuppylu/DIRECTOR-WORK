@@ -23,7 +23,11 @@ verify --rerun --order ORDER --dispatch-log LOG --repo REPO --candidate SHA
              commit, or whose command is not the approved one, is a MISMATCH (exit 1); the record's command is only
              compared, never run. Artifacts are hashed again in that folder, at their path relative to the record's
              cwd; one that comes out different is a MISMATCH;
-          6. after the check REPO is read again: a HEAD, tree, status or flag that changed is a MISMATCH (exit 1).
+          6. after the check REPO is read again: a HEAD, tree, status or flag that changed is a MISMATCH (exit 1);
+          7. the record's `order` binding is compared with the order by gate_check's rules (check_binding, G03b): bound
+             to another order, or to another REVISION or hash with no `EVIDENCE_EQUIVALENT` whole line in LOG, is a
+             MISMATCH for a Strict order and a `~` note for a Standard one; an unbound record is a WARN note at
+             REVISION 1 and, from REVISION 2, a MISMATCH (Strict) or a note (Standard).
           The last line adds `check=AC-n source=order candidate=<12 digits>`.
           The folder holds the committed files only: no .git, no untracked or ignored files. This proves the approved
           check ran on the candidate's tree; it still runs the candidate's own test code, so it is not a sandbox.
@@ -396,7 +400,11 @@ def approved_check(a, record):
     problems = repo_state(a.repo, wanted)
     if problems:
         raise Refused(problems[0])
-    return names[0], approved, wanted, git_trusted(a.repo, "rev-parse", f"{wanted}^{{tree}}")
+    # the same identity gate_check --match hands check_binding, so both tools judge a record's `order` alike (G03b)
+    binding = {"ids": ids, "rev": int(gate.order_revision(text)), "sha": now, "path": a.order,
+               "equivalent": gate.equivalent_records(log),
+               "strict": bool(re.search(r"^\s*GOVERNANCE\s*=\s*Strict\b", text, re.M))}
+    return names[0], approved, wanted, git_trusted(a.repo, "rev-parse", f"{wanted}^{{tree}}"), binding
 
 
 def cmd_verify(a):
@@ -426,7 +434,7 @@ def cmd_verify(a):
     if a.rerun:
         root = None
         try:
-            ac, approved, candidate, tree = approved_check(a, record)
+            ac, approved, candidate, tree, binding = approved_check(a, record)
             root = pathlib.Path(tempfile.mkdtemp(prefix="dw-rerun-")).resolve()
             count = materialize(a.repo, candidate, root)
             program = program_in(approved, root)
@@ -436,7 +444,7 @@ def cmd_verify(a):
             print(f"EVIDENCE_VERIFY: NOT_RUN {why}")
             return 2
         try:
-            return finish_rerun(a, record, ac, approved, candidate, tree, root, count, program)
+            return finish_rerun(a, record, ac, approved, candidate, tree, root, count, program, binding)
         finally:
             shutil.rmtree(root, ignore_errors=True)
     elif a.rerun_recorded:
@@ -449,9 +457,14 @@ def cmd_verify(a):
     return report(a, artifacts, lines, test, extra)
 
 
-def finish_rerun(a, record, ac, approved, candidate, tree, root, count, program):
-    """Run the approved check in the materialized folder root, then read REPO again and hash the artifacts in root."""
+def finish_rerun(a, record, ac, approved, candidate, tree, root, count, program, binding):
+    """Run the approved check in the materialized folder root, then read REPO again and hash the artifacts in root.
+    binding: the order's identity; the record's `order` field is judged by gate_check.check_binding."""
     lines, expected, command = [], record["exit_code"], record["command"]
+    notes = []
+    gate_module().check_binding(ac, pathlib.Path(a.record).name, record, binding, lines, notes, binding["strict"])
+    for note in notes:
+        print(f"  ~ {note}")
     recorded = ((record.get("git") or {}).get("head") or "").lower()
     if recorded != candidate:
         lines.append(f"recorded at HEAD {recorded[:12] or 'none'}, the candidate is {candidate[:12]}")

@@ -36,7 +36,7 @@
   - `hook_guard.py --protect`（Windows）：去掉磁碟或 UNC 路徑的 `\\?\`、`\\.\` 前綴，NTFS 資料流算檔案本身，其他裝置路徑（GLOBALROOT、volume GUID）一律擋（H01、H02）。目標或它的上層資料夾已存在時，再用檔案識別（磁碟序號＋檔案編號）和 `DIRECTOR_LOG.md`、`orders/` 底下每個項目比對，UNC 別名和既有檔案的 hardlink 也擋得到。
   - `setup_project_settings.py`：已裝的 hook_guard 指令和這份工具要寫的不是逐字相同，就是 `MISSING (hooks.PreToolUse command)`，`--apply` 換掉。項目到位後實際跑一次 hook（一筆要放行、一筆要擋，有 `--protect` 時再加一筆寫進 `orders/` 的 Write），答得不對是 `HOOK_FAIL`、exit 1（H04）。
   - `gate_check.py --preflight 報告 工單`（只讀）：舊版本做的審查要照現在的 Strict 重審前，一項一行 `LACKS` 列出缺什麼，並給補法（M01–M03，見遷移第 7 步）。
-  - 證據綁工單（G03b）：`evidence_record.py run --order 工單` 把工單 ID、REVISION 和雜湊寫進紀錄的 `order` 欄；雜湊就是 `gate_check.py --hash` 印給 DISPATCH 行的那一個（同一個函式、同樣讀工單檔的位元組）。`--match --evidence-dir` 時，有綁的紀錄要和工單現在的 ID、版次、雜湊相同，或 `--dispatch-log` 有總監寫的整行 `EVIDENCE_EQUIVALENT <WO-ID> rev=<舊> sha=<舊雜湊> to rev=<新>`（和 DISPATCH 用同一套整行規則：引文、縮排、code fence、寫在 NOTE 句子裡的都不算）。沒綁的紀錄：REVISION 1 照收，印 `WARN evidence not bound to the order`；REVISION 2 以上 Strict 失敗、Standard 提示。`--preflight` 對 REVISION 2 以上沒綁的紀錄印 `LACKS`。
+  - 證據綁工單（G03b）：`evidence_record.py run --order 工單` 把工單 ID、REVISION 和雜湊寫進紀錄的 `order` 欄；雜湊就是 `gate_check.py --hash` 印給 DISPATCH 行的那一個（同一個函式、同樣讀工單檔的位元組）。`--match --evidence-dir` 時，有綁的紀錄要和工單現在的 ID、版次、雜湊相同，或 `--dispatch-log` 有總監寫的整行 `EVIDENCE_EQUIVALENT <WO-ID> rev=<舊> sha=<舊雜湊> to rev=<新>`（和 DISPATCH 用同一套整行規則：引文、縮排、code fence、寫在 NOTE 句子裡的都不算）。沒綁的紀錄：REVISION 1 照收，印 `WARN evidence not bound to the order`；REVISION 2 以上 Strict 失敗、Standard 提示。`--preflight` 對 REVISION 2 以上沒綁的紀錄印 `LACKS`。`evidence_record.py verify --rerun` 也用同一套規則（同一個 `check_binding`）比對紀錄的 `order` 欄：Strict 工單綁錯工單、綁舊版次又沒有 EVIDENCE_EQUIVALENT 行、或 REVISION 2 以上沒綁，結論是 `MISMATCH`、exit 1；Standard 印 `~` 提示。
 - `selftest.py` 加上面各項的正反案例（285 → 486 項）。
 
 對齊初衷：
@@ -73,6 +73,7 @@ Deprecated：
 - `REQUIRED_CHANGES` 對 SCOPE / FORBIDDEN 的檢查是把每一條當路徑比對，glob 對 glob 只是近似。
 - `hook_guard.py --protect` 的已知限制（審查 H03、H05）：經由別名（網路磁碟、`subst`、UNC 共用）建立還不存在的 `DIRECTOR_LOG.md` 或 `orders/` 資料夾、hook 執行時目標還不存在的 junction、沒權限建立而沒測的 symlink、MultiEdit、NotebookEdit 都擋不到。真的要擋，請用作業系統的寫入權限保護 DIRECTOR 資料夾。
 - 清單項目沒包反引號時，` #` 之後仍是註解（設計如此，S02）；檔名含 ` #` 請用反引號包起來。
+- 派工後沒有 ACK 的閒置監看工具（`NO_ACK` 狀態）：這版只在 `docs/06b` 寫規則和三個測試案例的規格，`tools/` 沒有監看工具，延到之後的版本。
 
 ## 0.12.0 — 2026-11-06
 

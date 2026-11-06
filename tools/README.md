@@ -182,6 +182,7 @@ python -I -X utf8 evidence_record.py verify <紀錄.json> --rerun-recorded   # �
   4. 指令的程式要是絕對路徑、候選 commit 裡的檔（`./tools/check`）或 `python` / `python3`（就是跑這支工具的 Python）；只寫程式名、要靠 PATH 找的一律 exit 2，避免 PATH 換掉程式。
   5. 從 git 物件把候選 commit 的 tree 寫進新的暫存資料夾，每個檔案都核對雜湊，在那裡跑核准的指令，不在 `--repo` 的工作樹裡跑。紀錄的 git HEAD 不是候選 commit、或紀錄的 command 和核准的不同，都是 `MISMATCH`、exit 1；紀錄的 command 只拿來比對，不會執行。產物在暫存資料夾裡、照它相對紀錄 cwd 的路徑重新算雜湊，不同就是 `MISMATCH`。
   6. 跑完再讀一次 `--repo`：HEAD、tree、狀態或旗標有變，就是 `MISMATCH`、exit 1。
+  7. 紀錄的 `order` 欄（`run --order` 寫的工單 ID、REVISION、雜湊）照 `gate_check.py --match --evidence-dir` 的規則比對，LOG 裡的整行 `EVIDENCE_EQUIVALENT` 也照算：Strict 工單不符是 `MISMATCH`、exit 1，Standard 印 `~` 提示；沒綁的紀錄 REVISION 1 印 WARN。
   結論行最後加 `check=AC-1 source=order candidate=<12 位>`。
 - 暫存資料夾只有已 commit 的檔，沒有 `.git`、未追蹤檔和被忽略的檔，跑完就刪。這證明「跑的是總監核准的檢查、在候選 commit 的 tree 上」，但檢查仍會執行候選 commit 裡 worker 寫的測試碼，不是沙箱。`--repo` 仍要乾淨，建議用 `git worktree add --detach <目錄> <候選 commit>` 新開（只新增 worktree，不刪別的）。
 - `--rerun-recorded` 是 v0.12 的 `--rerun`：在紀錄的 cwd 跑紀錄寫的指令。能改紀錄的人就能決定跑什麼，所以結論是 `test=recorded-command-passed source=record`，永遠不印 `test=passed`。v0.12 只寫 `--rerun` 的指令現在會 exit 2，改成上面的完整寫法。

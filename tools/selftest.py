@@ -1688,6 +1688,79 @@ def test_trusted_rerun(tmp):
            says=[f"- recorded at HEAD {first[:12]}, the candidate is {second[:12]}", "MISMATCH"])
 
 
+def test_rerun_binding(tmp):
+    """v0.13 batch 5 (G03b): `verify --rerun` judges the record's `order` binding by gate_check's rules
+    (check_binding): Strict fails a record bound to another order, or to another REVISION or hash without an
+    EVIDENCE_EQUIVALENT whole line, and an unbound record from REVISION 2; Standard notes them; REVISION 1 unbound
+    is a WARN."""
+    root = tmp / "rerun_binding"
+    repo, out = root / "repo", root / "records"
+    repo.mkdir(parents=True)
+    py = sys.executable
+
+    def git(*args):
+        return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args], cwd=repo, check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    (repo / "check.py").write_text("print('checked')\n", encoding="utf-8")
+    git("init", "-q", "-b", "main")
+    git("add", "-A")
+    git("commit", "-q", "-m", "a")
+    head = git("rev-parse", "HEAD")
+    expect("rerun binding: record the approved check", "evidence_record.py", 0, "run", "--out-dir", out, "--label", "AC-1",
+           "--cwd", repo, "--", py, "check.py", says="exit=0")
+    data = json.loads(next(out.glob("*-AC-1.json")).read_text(encoding="utf-8"))
+    data.pop("order", None)
+
+    def text_of(governance, rev):
+        return (with_checks(TYPED_ORDER.format(base=head), f"AC-1: {json.dumps([py, 'check.py'])}")
+                .replace("GOVERNANCE     = Standard", f"GOVERNANCE     = {governance}")
+                .replace("REVISION       = 1", f"REVISION       = {rev}"))
+
+    def digest_of(text):
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    def case(name, code, says=None, lacks=None, governance="Strict", rev=2, order="unbound", log_extra=""):
+        """order: "unbound", "current" (this order now), "old" (REVISION 1 of the same order) or a dict to write."""
+        folder = root / governance / name
+        folder.mkdir(parents=True)
+        text = text_of(governance, rev)
+        digest, old = digest_of(text), digest_of(text_of(governance, 1))
+        path = folder / "WO-001-parser.md"
+        path.write_bytes(text.encode("utf-8"))
+        field = {"unbound": None, "current": {"id": "WO-001", "rev": rev, "sha": digest},
+                 "old": {"id": "WO-001", "rev": 1, "sha": old}}.get(order) if isinstance(order, str) else order
+        record = folder / "e.json"
+        record.write_text(json.dumps({**data, **({} if field is None else {"order": field})}), encoding="utf-8")
+        log = folder / "log.md"
+        log.write_text(f"# DIRECTOR_LOG\n2026-01-02 10:00 +08:00 | DISPATCH WO-001 rev={rev} sha={digest}\n"
+                       + log_extra.format(old=old), encoding="utf-8")
+        expect(f"rerun binding {governance} {name}", "evidence_record.py", code, "verify", record, "--rerun", "--order", path,
+               "--dispatch-log", log, "--repo", repo, "--candidate", head, says=says, lacks=lacks)
+
+    ok = "EVIDENCE_VERIFY: OK integrity=same test=passed"
+    equivalent = "EVIDENCE_EQUIVALENT WO-001 rev=1 sha={old} to rev=2"
+    case("bound_current", 0, ok, ["  - ", "  ~ "], order="current")
+    case("unbound_rev2", 1, ["- AC-1: e.json: not bound to an order revision and the order is at REVISION 2",
+                             "EVIDENCE_VERIFY: MISMATCH", "test=passed"])
+    case("bound_old_revision", 1, ["- AC-1: e.json: recorded for WO-001 REVISION 1 (sha ", "EVIDENCE_VERIFY: MISMATCH"],
+         order="old")
+    case("equivalent_line", 0, ok, "  - ", order="old",
+         log_extra="2026-01-03 09:00 +08:00 | " + equivalent + " | AC-1 unchanged by rev 2\n")
+    for name, extra in (("equivalent_quoted", "> " + equivalent + "\n"),
+                        ("equivalent_in_code_fence", "```\n" + equivalent + "\n```\n"),
+                        ("equivalent_in_note", "NOTE: " + equivalent + "\n"),
+                        ("equivalent_other_target", equivalent.replace("to rev=2", "to rev=3") + "\n")):
+        case(name, 1, ["recorded for WO-001 REVISION 1 (sha ", "EVIDENCE_VERIFY: MISMATCH"], order="old", log_extra=extra)
+    case("bound_other_order", 1, ["- AC-1: e.json: recorded for order WO-002, this order is WO-001",
+                                  "EVIDENCE_VERIFY: MISMATCH"], order={"id": "WO-002", "rev": 2, "sha": "a" * 64})
+    case("unbound_rev1_warns", 0, [ok, "~ AC-1: e.json: WARN evidence not bound to the order"], "  - ", rev=1)
+    case("unbound_rev2", 0, [ok, "~ AC-1: e.json: not bound to an order revision and the order is at REVISION 2"],
+         ["  - ", "Strict:"], governance="Standard")
+    case("bound_old_revision", 0, [ok, "~ AC-1: e.json: recorded for WO-001 REVISION 1 (sha "], "  - ",
+         governance="Standard", order="old")
+
+
 def test_trusted_isolation(tmp):
     """v0.13 (R02-R06): the trusted rerun refuses hidden index flags, replace refs and PATH-chosen programs, runs the
     check in a copy of the candidate's tree, hashes artifacts there, and reads REPO again after the check."""
@@ -1806,6 +1879,7 @@ def main():
         test_preflight(tmp)
         test_order_binding(tmp)
         test_trusted_rerun(tmp)
+        test_rerun_binding(tmp)
         test_trusted_isolation(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
