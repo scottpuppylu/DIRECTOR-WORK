@@ -525,6 +525,32 @@ def test_trace(tmp):
                  "報告資料夾裡沒有 `TASK_ID` 行的檔案（沒算成報告）：1 份\n- ", "notes.md",
                  "裁決資料夾裡沒有 `## A` 的檔案（沒算成裁決）：1 份\n- ", "draft.md"])
     expect("trace without a pattern accepts any ID", "trace_report.py", 0, *base, says="## 編號格式不符 trace_id_pattern\n- 無")
+    many = tmp / "trace_many"
+    (many / "reports").mkdir(parents=True)
+    shutil.copytree(root / "orders", many / "orders")
+    passed = match_report(list(ACCEPTANCE.values()), "PARTIAL")
+    failed = passed.replace("| AC-1 | exit 0 | e.json | PASS |", "| AC-1 | exit 1 | e.json | FAIL |")
+    (many / "reports" / "report-9.md").write_text(passed, encoding="utf-8")
+    (many / "reports" / "report-10.md").write_text(failed.replace("REVISION 1", "REVISION 2"), encoding="utf-8")
+    trace_many = ("--orders", many / "orders", "--reports", many / "reports")
+    expect("trace picks the higher order revision, not the last file name", "trace_report.py", 0, *trace_many,
+           says=["| DD-1 | WO-001 | AC-1 | AUTO | FAIL | e.json |", "報告 2 份對到工單",
+                 f"- WO-001：選 {many / 'reports' / 'report-10.md'}", "REVISION 2、ATTEMPT —、日期 —、HEAD d0d0d0d ← 選這份",
+                 "report-9.md：REVISION 1"])
+    (many / "reports" / "report-10.md").write_text(failed.replace("RESULT:", "ATTEMPT: 1\nRESULT:", 1), encoding="utf-8")
+    (many / "reports" / "report-9.md").write_text(passed.replace("RESULT:", "ATTEMPT: 2\nRESULT:", 1), encoding="utf-8")
+    expect("trace picks the higher ATTEMPT at the same revision", "trace_report.py", 0, *trace_many,
+           says=["| DD-1 | WO-001 | AC-1 | AUTO | PASS |", f"選 {many / 'reports' / 'report-9.md'}"])
+    (many / "reports" / "report-10.md").write_text(failed.replace("RESULT:", "2026-01-04 09:00\nRESULT:", 1), encoding="utf-8")
+    (many / "reports" / "report-9.md").write_text(passed.replace("RESULT:", "2026-01-03 18:00\nRESULT:", 1), encoding="utf-8")
+    expect("trace picks the later date when revision and attempt tie", "trace_report.py", 0, *trace_many,
+           says=["| DD-1 | WO-001 | AC-1 | AUTO | FAIL |", "日期 2026-01-04 09:00"])
+    (many / "reports" / "report-10.md").write_text(failed, encoding="utf-8")
+    (many / "reports" / "report-9.md").write_text(passed, encoding="utf-8")
+    expect("trace takes neither of two reports it cannot order", "trace_report.py", 0, *trace_many,
+           says=["| DD-1 | WO-001 | AC-1 | AUTO | 多份報告分不出先後 |", "分不出先後，表內兩份都不取"], lacks="← 選這份")
+    expect("trace with one report per order lists none", "trace_report.py", 0, *base,
+           says="## 同一工單有多份報告（依 REVISION、ATTEMPT、日期選，不看檔名）\n- 無")
     expect("trace with a missing folder", "trace_report.py", 1, "--orders", root / "nope", "--reports", root / "reports",
            says="folder not found")
 

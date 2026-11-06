@@ -6,9 +6,13 @@ so nobody keeps a separate table up to date. Only reads; prints Markdown.
 An order is a .md file with ISSUED_BY; it lists what it serves in `TRACES_TO = DD-03, OD-12` (NONE when nothing).
 A report (a .md file with TASK_ID) belongs to the order whose file name its `ORDER:` line holds, else to the order
 whose ID its TASK_ID starts with; a verdict (a .md file with `## A`) to the order whose ID its title holds. A .md
-file in one of the folders that is not what that folder holds is listed by name at the end, never skipped quietly. When
-several match, the last by path is shown. `trace_id_pattern` in the config (a regex) flags IDs written in another
-format; without it every ID is accepted. Exit 0, or 1 when a folder is missing.
+file in one of the folders that is not what that folder holds is listed by name at the end, never skipped quietly.
+When several reports belong to one order, the table uses the newest, never the last by file name: the higher order
+REVISION on the `ORDER:` line, then the higher `ATTEMPT: n`, then the later first date (YYYY-MM-DD[ HH:MM]) in the
+report. HEAD is listed but cannot order commits without git. When the best two tie on all three, the table takes
+neither and says so. Every such order is listed with all its reports, the chosen one marked. When several verdicts
+match, the last by path is shown. `trace_id_pattern` in the config (a regex) flags IDs written in another format;
+without it every ID is accepted. Exit 0, or 1 when a folder is missing.
 """
 import argparse
 import importlib.util
@@ -57,6 +61,26 @@ def owner(orders, text, by_name):
     return hit[-1] if hit else None
 
 
+def report_info(path, text):
+    """What tells one report for an order from another: order revision, attempt, first date, HEAD."""
+    line = re.search(r"^\s*ORDER\s*:\s*(.+)$", text, re.M)
+    rev = re.search(r"(?:REVISION|\brev)\s*[=:]?\s*(\d+)", line.group(1), re.I) if line else None
+    attempt = re.search(r"^\s*ATTEMPT\s*[:=]\s*(\d+)", text, re.M | re.I)
+    when = re.search(r"(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2}))?", text)
+    info = {"path": path, "table": gate.ac_table(text), "head": gate.report_head_value(text),
+            "rev": int(rev.group(1)) if rev else None, "attempt": int(attempt.group(1)) if attempt else None,
+            "when": " ".join(g for g in when.groups() if g) if when else None}
+    info["key"] = (-1 if info["rev"] is None else info["rev"], -1 if info["attempt"] is None else info["attempt"],
+                   info["when"] or "")
+    return info
+
+
+def describe(info):
+    return (f"{info['path']}：REVISION {info['rev'] if info['rev'] is not None else '—'}、"
+            f"ATTEMPT {info['attempt'] if info['attempt'] is not None else '—'}、日期 {info['when'] or '—'}、"
+            f"HEAD {info['head'] or '—'}")
+
+
 def cell(value):
     return (value or "").replace("|", "/").strip() or "—"
 
@@ -86,14 +110,20 @@ def main():
         m = re.search(r"^\s*TRACES_TO\s*=\s*([^#\n]*)", text, re.M)
         ids = [i for i in re.split(r"[\s,，、]+", m.group(1)) if i and i.upper() != "NONE"] if m else None
         orders.append({"path": path, "id": first_id(text, path.stem), "traces": ids, "acs": gate.ac_table(text),
-                       "report": None, "verdict": None})
+                       "reports": [], "report": None, "tie": False, "verdict": None})
     stray = []
     for path, text in files(a.reports, r"^\s*TASK_ID\b", slots[1]):
         order = owner(orders, text, by_name=True)
         if order:
-            order["report"] = gate.ac_table(text)
+            order["reports"].append(report_info(path, text))
         else:
             stray.append(path)
+    for order in orders:
+        order["reports"].sort(key=lambda r: r["key"], reverse=True)
+        if len(order["reports"]) > 1 and order["reports"][0]["key"] == order["reports"][1]["key"]:
+            order["tie"] = True
+        elif order["reports"]:
+            order["report"] = order["reports"][0]["table"]
     for path, text in files(a.verdicts, r"^##\s*A\b", slots[2]) if a.verdicts else []:
         order = owner(orders, text, by_name=False)
         section = re.search(r"^##\s*A\b.*?$(.*?)(?=^##\s|\Z)", text, re.M | re.S)
@@ -106,10 +136,11 @@ def main():
         for req in order["traces"] or ["（無）"]:
             for ac, spec_row in order["acs"].items():
                 got = order["report"].get(ac) if order["report"] is not None else None
-                status = got.get("status") if got else "沒有報告" if order["report"] is None else "報告缺這條"
+                status = (got.get("status") if got else "多份報告分不出先後" if order["tie"]
+                          else "沒有報告" if order["report"] is None else "報告缺這條")
                 rows.append((req, order["id"], ac, spec_row.get("type"), status, got and got.get("evidence"), order["verdict"]))
     left = sum(len(paths) for paths in skipped.values())
-    print(f"# 追溯表\n\n工單 {len(orders)} 份，報告 {sum(o['report'] is not None for o in orders)} 份對到工單。"
+    print(f"# 追溯表\n\n工單 {len(orders)} 份，報告 {sum(len(o['reports']) for o in orders)} 份對到工單。"
           + (f"沒計入的檔案 {left} 份，列在文末。" if left else "") + "\n")
     print("| 需求 | 工單 | AC | 類型 | 狀態 | 證據 | 裁決 |\n|---|---|---|---|---|---|---|")
     for row in sorted(rows, key=lambda r: (r[0] == "（無）", r[0], r[1], r[2])):
@@ -119,6 +150,15 @@ def main():
     for title, items in (("沒有 TRACES_TO 的工單", untraced), ("編號格式不符 trace_id_pattern", odd),
                          ("對不到工單的報告", [str(p) for p in stray])):
         print(f"\n## {title}\n" + ("\n".join(f"- {i}" for i in items) if items else "- 無"))
+    several = [o for o in orders if len(o["reports"]) > 1]
+    print("\n## 同一工單有多份報告（依 REVISION、ATTEMPT、日期選，不看檔名）")
+    if not several:
+        print("- 無")
+    for order in several:
+        print(f"- {order['id']}：" + ("最新的幾份 REVISION、ATTEMPT、日期都相同，分不出先後，表內兩份都不取；請在報告寫 ATTEMPT"
+                                      if order["tie"] else f"選 {order['reports'][0]['path']}"))
+        for n, info in enumerate(order["reports"]):
+            print(f"  - {describe(info)}" + (" ← 選這份" if n == 0 and not order["tie"] else ""))
     print("\n## 沒計入的檔案")
     for title, paths in skipped.items():
         print(f"\n{title}：{len(paths)} 份" + "".join(f"\n- {p}" for p in paths))
