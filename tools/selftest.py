@@ -1322,6 +1322,202 @@ def test_hook(tmp):
     expect("config without a version counts as 1", *setup[:1], 0, "--repo", repo, "--only-this", "--config", future, says="OK")
 
 
+def test_hook_rules(tmp):
+    """1.1.0 item 1: hook_guard --rules / --profile. Every rule's examples under both profiles, bypass forms, MCP read-only
+    and internal-report exemptions, config paths, self-protection, determinism, bad rules files, setup --guard-profile."""
+    global total
+    rules_path = TOOLS / "guard_rules.json"
+    rules = json.loads(rules_path.read_text(encoding="utf-8"))
+    home = pathlib.Path.home().as_posix()
+
+    def hook(call, profile, rules_file=rules_path):
+        return subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), "--rules", str(rules_file),
+                               "--profile", profile], capture_output=True, encoding="utf-8", input=json.dumps(call))
+
+    def outcome(done):
+        """deny:ID / ask:ID / legacy / silent / bad / other(...), from exit code, stdout and stderr."""
+        if done.returncode == 1 and done.stderr.startswith("hook_guard: bad rules file: ") and not done.stdout:
+            return "bad"
+        if done.returncode == 2 and not done.stdout:
+            found = re.match(r"BLOCKED by hook_guard \[(G\d+)\]: \S", done.stderr)
+            if found:
+                return f"deny:{found.group(1)}"
+            if done.stderr.startswith("BLOCKED by hook_guard: "):
+                return "legacy"
+        if done.returncode == 0 and not done.stderr:
+            if not done.stdout:
+                return "silent"
+            try:
+                out = json.loads(done.stdout)["hookSpecificOutput"]
+                found = re.match(r"\[(G\d+)\] \S", out["permissionDecisionReason"])
+                if out["hookEventName"] == "PreToolUse" and out["permissionDecision"] == "ask" and found and len(out) == 3:
+                    return f"ask:{found.group(1)}"
+            except (ValueError, KeyError, TypeError):
+                pass
+        return f"other(exit {done.returncode}: {(done.stdout + done.stderr).strip()[:160]!r})"
+
+    def check(name, call, profile, want, rules_file=rules_path):
+        global total
+        total += 1
+        done = hook(call, profile, rules_file)
+        got = outcome(done)
+        if got != want:
+            failures.append(f"hook_guard rules {name} [{profile}]: expected {want}, got {got}")
+        elif re.search(r"<[^>]*>", done.stdout + done.stderr):
+            failures.append(f"hook_guard rules {name} [{profile}]: message has a <...> placeholder")
+        return done
+
+    bash = lambda command: {"tool_name": "Bash", "tool_input": {"command": command}}
+    shell = lambda command: {"tool_name": "PowerShell", "tool_input": {"command": command}}
+    tool = lambda name, **kw: {"tool_name": name, "tool_input": kw}
+    write = lambda path, **kw: {"tool_name": "Write", "tool_input": {"file_path": str(path), "content": "x"}, **kw}
+
+    # every rule: its example_block gives that rule's decision and id, its example_allow is silent, in both profiles
+    for rule in rules["rules"]:
+        for profile in ("worker", "director"):
+            decision = rule["decision"][profile]
+            for n, call in enumerate(rule["example_block"] if isinstance(rule["example_block"], list) else [rule["example_block"]]):
+                check(f"{rule['id']} example_block {n}", call, profile, "silent" if decision == "none" else f"{decision}:{rule['id']}")
+            for n, call in enumerate(rule["example_allow"] if isinstance(rule["example_allow"], list) else [rule["example_allow"]]):
+                check(f"{rule['id']} example_allow {n}", call, profile, "silent")
+
+    # push written to slip past a text match is still push (F6)
+    for command in ("git -C . push", "git 'push'", "/usr/bin/git push", 'bash -c "git push"', 'powershell -c "git push"',
+                    "cmd /c git push", "cd x && git push", "echo $(git push)", r'"C:\Program Files\Git\bin\git.exe" push'):
+        for profile in ("worker", "director"):
+            check(f"push bypass {command!r}", bash(command), profile, "deny:G02")
+    check("force push wins over push (lowest id)", bash("git push -f origin main"), "worker", "deny:G01")
+    check("delete of a remote branch is G01", bash("git push origin :old"), "director", "deny:G01")
+    # deleting, every way of writing it
+    for call in (bash("bash -c 'rm -rf x'"), bash("/bin/rm -rf x"), bash("find . -name '*.tmp' -delete"), bash("ls | xargs rm"),
+                 bash("cmd /c rd /s /q build"), bash("del /s x"), shell("Get-ChildItem x | Remove-Item"), shell("ri build"),
+                 shell("Remove-Item -Recurse -Force build")):
+        check(f"delete {call['tool_input']['command']!r}", call, "worker", "deny:G10")
+        check(f"delete {call['tool_input']['command']!r}", call, "director", "ask:G10")
+    done = check("worker delete message names the next step", bash("rm -rf build"), "worker", "deny:G10")
+    total += 1
+    if "deletable list" not in done.stderr or "cleaner" not in done.stderr:
+        failures.append(f"G10 deny message lacks the next step: {done.stderr.strip()}")
+    # MCP: only the action part counts; read-only prefixes never match (D3 b)
+    for name in ("mcp__vendor__get_order", "mcp__vendor__get_domain_order", "mcp__vendor__list_billing_charges",
+                 "mcp__vendor__get_purchase_quote", "mcp__vendor__read_payment_status", "mcp__vendor__search_orders",
+                 "mcp__vendor__query_subscriptions", "mcp__vendor__status_of_transfer", "mcp__buy_tools__get_status",
+                 "mcp__ccd_session_mgmt__get_session", "mcp__ccd_settings__get_settings"):
+        for profile in ("worker", "director"):
+            check(f"read-only MCP {name}", tool(name), profile, "silent")
+    for name, worker, director in (("mcp__vendor__buy_domain", "deny:G30", "deny:G30"),
+                                   ("mcp__shop__checkoutCart", "deny:G30", "deny:G30"),
+                                   ("mcp__drive__trash_file", "deny:G11", "ask:G11"),
+                                   ("mcp__drive__share_file", "deny:G21", "ask:G21"),
+                                   ("mcp__github__createPullRequest", "deny:G21", "ask:G21"),
+                                   ("mcp__chat__send_message", "deny:G21", "ask:G21"),
+                                   ("mcp__ccd_session_mgmt__set_session_permission_mode", "deny:G42", "ask:G42")):
+        check(f"MCP {name}", tool(name), "worker", worker)
+        check(f"MCP {name}", tool(name), "director", director)
+    # the internal report channel is not "sending" (D3 c)
+    for name in ("SendMessage", "mcp__ccd_session_mgmt__send_message"):
+        for profile in ("worker", "director"):
+            check(f"internal report {name}", tool(name, to="x", message="done"), profile, "silent")
+    # config files, not all of ~/.claude (D3 a)
+    for path, want in ((f"{home}/.claude/settings.json", "G40"), (f"{home}/.claude/.credentials.json", "G40"),
+                       (f"{home}/.claude/CLAUDE.md", "G40"), (f"{home}/.claude.json", "G40"),
+                       ("D:/proj/.claude/settings.local.json", "G40"), ("D:/proj/.mcp.json", "G40"),
+                       ("C:/ProgramData/ClaudeCode/managed-settings.json", "G40"),
+                       (f"{home}/.claude/projects/p/memory/MEMORY.md", None), (f"{home}/.claude/plans/plan.md", None),
+                       ("D:/proj/docs/settings.md", None), ("D:/proj/CLAUDE.md.bak", None)):
+        check(f"Write {path}", write(path), "worker", f"deny:{want}" if want else "silent")
+        check(f"Write {path}", write(path), "director", f"ask:{want}" if want else "silent")
+    check("relative path read against the hook cwd", write(".claude/settings.local.json", cwd=str(tmp)), "worker", "deny:G40")
+    check("~ in the path", write("~/.claude/settings.json"), "worker", "deny:G40")
+    if os.name == "nt":
+        check("other case on Windows", write("D:/PROJ/.CLAUDE/Settings.Local.JSON"), "worker", "deny:G40")
+        check("backslashes", write(r"D:\proj\.claude\settings.json"), "worker", "deny:G40")
+    check("reading a settings file is not a change", tool("Read", file_path=f"{home}/.claude/settings.json"), "worker", "silent")
+    for path in (rules_path, TOOLS / "hook_guard.py"):
+        check(f"self-protection {path.name}", write(path), "worker", "deny:G00")
+        check(f"self-protection {path.name}", write(path), "director", "ask:G00")
+    # legacy checks still run with --rules, and plain commands stay silent with nothing on stdout (F2)
+    check("legacy stash is still blocked", bash("git stash"), "director", "legacy")
+    check("legacy reset --hard is still blocked", bash("git reset --hard HEAD~1"), "director", "legacy")
+    for profile in ("worker", "director"):
+        check("git status is silent", bash("git status"), profile, "silent")
+        check("a build is silent", bash("python -m unittest"), profile, "silent")
+        check("Read is silent", tool("Read", file_path="README.md"), profile, "silent")
+    # determinism: the same input twice gives the same bytes; the rules in reverse order give the same result
+    reverse = tmp / "rules_reversed.json"
+    reverse.write_text(json.dumps({**rules, "rules": rules["rules"][::-1]}), encoding="utf-8")
+    for call, profile in ((bash("git push --force"), "worker"), (bash("rm x && gh pr create"), "director"),
+                          (bash("gh pr create && rm x"), "director"), (tool("mcp__shop__buy_and_send"), "director"),
+                          (write(rules_path), "director")):
+        runs = [hook(call, profile), hook(call, profile), hook(call, profile, reverse)]
+        total += 1
+        if len({(d.returncode, d.stdout, d.stderr) for d in runs}) != 1:
+            failures.append(f"hook_guard rules not deterministic for {call} [{profile}]: "
+                            f"{[(d.returncode, d.stdout + d.stderr) for d in runs]}")
+    check("two ask rules: the lowest id wins", bash("gh pr create && rm x"), "director", "ask:G10")
+    check("deny beats ask whatever the order", tool("mcp__shop__buy_and_send"), "director", "deny:G30")
+    # a broken rules file stops the hook with exit 1, which "onFailure": "block" turns into a block
+    broken = {"not json": "{", "no rules": json.dumps({"schema_version": 1, "rules": []}),
+              "bad decision": json.dumps({**rules, "rules": [{**rules["rules"][0], "decision": {"worker": "maybe", "director": "deny"}}]}),
+              "angle brackets": json.dumps({**rules, "rules": [{**rules["rules"][0], "reason": "ask <someone>"}]}),
+              "duplicate id": json.dumps({**rules, "rules": [rules["rules"][0], rules["rules"][0]]}),
+              "reserved id": json.dumps({**rules, "rules": [{**rules["rules"][0], "id": "G00"}]}),
+              "bad regex": json.dumps({**rules, "rules": [{**rules["rules"][0], "match": {"kind": "shell", "cmd": ["git"], "flags": ["("]}}]}),
+              "unknown kind": json.dumps({**rules, "rules": [{**rules["rules"][0], "match": {"kind": "url", "cmd": ["x"]}}]})}
+    for name, text in broken.items():
+        bad = tmp / f"rules_{name.replace(' ', '_')}.json"
+        bad.write_text(text, encoding="utf-8")
+        check(f"bad rules file: {name}", bash("git status"), "worker", "bad", rules_file=bad)
+    check("bad rules file: missing", bash("git status"), "worker", "bad", rules_file=tmp / "no_such_rules.json")
+
+    # setup --guard-profile: report, apply, rerun, permissions, switching profile, the Director's worktree
+    repo = tmp / "guarded"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    (repo / ".git" / "info" / "exclude").write_text(".claude/settings.local.json\n", encoding="utf-8")
+    settings = repo / ".claude" / "settings.local.json"
+    settings.parent.mkdir()
+    settings.write_text(json.dumps({"permissions": {"deny": ["Read(./private/**)"], "allow": ["Bash(git status)"]}}), encoding="utf-8")
+    setup = ("--repo", repo, "--only-this")
+    expect("guard profile missing", "setup_project_settings.py", 1, *setup, "--guard-profile", "worker",
+           says=["MISSING", "hooks.PreToolUse", "permissions.deny"])
+    expect("guard profile written and tested", "setup_project_settings.py", 0, *setup, "--guard-profile", "worker", "--apply",
+           says=["SET", "guard_profile=worker", "(hook test: allow=0 block=2 block-rule=2)"])
+    expect("guard profile kept on rerun", "setup_project_settings.py", 0, *setup, "--guard-profile", "worker", says="OK")
+    expect("plain --hooks keeps the installed profile", "setup_project_settings.py", 0, *setup, "--hooks", says=["OK", "block-rule=2"])
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    entry = data["hooks"]["PreToolUse"]
+    wanted_deny = [p for r in rules["rules"] if r["decision"]["worker"] == "deny" for p in r.get("permissions", [])]
+    total += 1
+    if (len(entry) != 1 or entry[0]["matcher"] != "*" or entry[0]["hooks"][0].get("onFailure") != "block"
+            or "--profile worker" not in entry[0]["hooks"][0]["command"] or "--rules" not in entry[0]["hooks"][0]["command"]):
+        failures.append(f"setup --guard-profile worker: PreToolUse is {entry}")
+    total += 1
+    if (data["permissions"]["deny"][0] != "Read(./private/**)" or data["permissions"]["allow"] != ["Bash(git status)"]
+            or any(p not in data["permissions"]["deny"] for p in wanted_deny) or data["permissions"].get("ask")):
+        failures.append(f"setup --guard-profile worker: permissions are {data['permissions']}")
+    expect("another profile is not OK", "setup_project_settings.py", 1, *setup, "--guard-profile", "director",
+           says=["hooks.PreToolUse matcher", "permissions.deny", "permissions.ask"])
+    expect("switching to director", "setup_project_settings.py", 0, *setup, "--guard-profile", "director", "--apply", says="SET")
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    total += 1
+    if ("Bash(rm *)" in data["permissions"]["deny"] or "Bash(rm *)" not in data["permissions"]["ask"]
+            or "Bash(git push *)" not in data["permissions"]["deny"] or "Read(./private/**)" not in data["permissions"]["deny"]
+            or len(data["hooks"]["PreToolUse"]) != 1 or "--profile director" not in data["hooks"]["PreToolUse"][0]["hooks"][0]["command"]):
+        failures.append(f"setup --guard-profile director after worker: {data['permissions']} {data['hooks']}")
+    expect("the Director's worktree keeps the director profile", "setup_project_settings.py", 0, *setup, "--guard-profile",
+           "worker", "--director-worktree", repo, says="OK")
+    director = tmp / "guarded_DIRECTOR"
+    (director / "orders").mkdir(parents=True)
+    expect("guard profile with --protect-director", "setup_project_settings.py", 0, *setup, "--guard-profile", "worker",
+           "--protect-director", director, "--apply", says=["SET", "block-write=2", "block-rule=2"])
+    command = json.loads(settings.read_text(encoding="utf-8"))["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    total += 1
+    if "--protect" not in command or "--profile worker" not in command:
+        failures.append(f"setup --guard-profile --protect-director: command is {command!r}")
+    expect("an unknown profile is refused", "setup_project_settings.py", 2, *setup, "--guard-profile", "admin")
+
+
 def test_evidence(tmp):
     out = tmp / "evidence"
     work = tmp / "work"
@@ -1874,6 +2070,7 @@ def main():
         test_must_read_reasons()
         test_hook(tmp)
         test_hook_protect(tmp)
+        test_hook_rules(tmp)
         test_evidence(tmp)
         test_order_checks(tmp)
         test_preflight(tmp)

@@ -27,6 +27,20 @@ This guards against a slip, not against a worker that means to: it does not see 
 MultiEdit, NotebookEdit or an MCP tool, a DIRECTOR_LOG.md or orders/ folder that does not exist yet and is created
 through another name (network drive, subst drive letter, UNC share), or a junction whose target does not exist yet.
 Protect the folder with OS write permissions when that matters. The Director's own worktree keeps the hook without --protect (--director-worktree).
+
+With --rules FILE (tools/guard_rules.json) and --profile worker|director (setup_project_settings.py --guard-profile),
+every tool call is also checked against the rules: shell commands by their words (the same split as above, also inside
+bash -c / cmd /c / powershell -Command / eval / iex), Write / Edit / MultiEdit / NotebookEdit by the resolved path, MCP
+tools by the action part of their name (the text after the last __). An MCP action that starts with get, list, read,
+search, query or status never matches, and SendMessage / mcp__ccd_session_mgmt__send_message (the internal report
+channel) never match. The strictest decision wins: deny (exit 2, "BLOCKED by hook_guard [ID]: reason" on stderr), then
+the checks above, then ask (exit 0 and a PreToolUse permissionDecision "ask" JSON on stdout). Between equal decisions
+the lowest ID wins, so the result does not depend on the order of rules, the time, the network or a model. Otherwise it
+exits 0 with no output: it never answers allow, so Claude Code's own permission rules still apply. A rules file that
+cannot be read or is malformed gives exit 1 (install with "onFailure": "block" so that blocks). Rule G00 is built in:
+Write / Edit of the rules file in use, of guard_rules.json beside this script or of this script is denied for a
+worker and asked for a Director.
+Without --rules the output is the same as before, byte for byte.
 """
 import argparse
 import json
@@ -262,10 +276,236 @@ def protected_reason(file_path, cwd, protect):
     return None
 
 
+PROFILES = ("worker", "director")
+DECISIONS = ("deny", "ask", "none")
+KINDS = {"shell": ("cmd",), "path": ("tools", "globs"), "mcp": ("words",)}
+WRITE_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
+PATH_FIELDS = ("file_path", "notebook_path", "path")
+OPTS_WITH_VALUE = {"git": GIT_OPTS_WITH_VALUE, "gh": {"-R", "--repo"}}
+SELF_RULE = {"id": "G00", "decision": {"worker": "deny", "director": "ask"},
+             "reason": "the guard rules and hook_guard.py are changed by the PO or the Director, not by a guarded session; report the change you need"}
+
+
+class RulesError(Exception):
+    pass
+
+
+def string_list(value, empty=False):
+    return isinstance(value, list) and (empty or value) and all(isinstance(v, str) and v for v in value)
+
+
+def rule_problems(rule, seen):
+    """What is wrong with one rule, as a list of strings."""
+    if not isinstance(rule, dict):
+        return ["a rule is not an object"]
+    rid = rule.get("id")
+    if not (isinstance(rid, str) and re.fullmatch(r"G\d{2,}", rid)) or rid == "G00":
+        return [f"rule id {rid!r} is not G01, G02, ... (G00 is built in)"]
+    out = [f"{rid}: duplicate id"] if rid in seen else []
+    seen.add(rid)
+    decision = rule.get("decision")
+    if not (isinstance(decision, dict) and set(decision) == set(PROFILES) and all(d in DECISIONS for d in decision.values())):
+        out.append(f"{rid}: decision must give worker and director each deny, ask or none")
+    text = rule.get("reason")
+    if not (isinstance(text, str) and text.strip()) or re.search(r"[<>]", text or ""):
+        out.append(f"{rid}: reason must be text without angle brackets")
+    if not isinstance(rule.get("category"), str):
+        out.append(f"{rid}: category missing")
+    matches = rule.get("match")
+    matches = [matches] if isinstance(matches, dict) else matches
+    if not (isinstance(matches, list) and matches):
+        out.append(f"{rid}: match must be an object or a list of objects")
+        matches = []
+    for m in matches:
+        if not isinstance(m, dict) or m.get("kind") not in KINDS:
+            out.append(f"{rid}: match kind must be one of {', '.join(KINDS)}")
+            continue
+        out += [f"{rid}: match {m['kind']} needs a list {key}" for key in KINDS[m["kind"]] if not string_list(m.get(key))]
+        if "args" in m and not (isinstance(m["args"], list) and all(string_list(alts) for alts in m["args"])):
+            out.append(f"{rid}: args must be a list of word lists")
+        for key in ("flags", "not_flags", "except"):
+            if key not in m:
+                continue
+            if not string_list(m[key], empty=True):
+                out.append(f"{rid}: {key} must be a list of strings")
+                continue
+            for flag in m[key] if key != "except" else []:
+                try:
+                    re.compile(flag)
+                except re.error as error:
+                    out.append(f"{rid}: flag {flag!r} is not a regex: {error}")
+    for key in ("example_block", "example_allow"):
+        examples = rule.get(key)
+        examples = [examples] if isinstance(examples, dict) else examples
+        if not (isinstance(examples, list) and examples and all(isinstance(e, dict) for e in examples)):
+            out.append(f"{rid}: {key} must be a hook input or a list of them")
+    if "permissions" in rule and not string_list(rule["permissions"]):
+        out.append(f"{rid}: permissions must be a list of permission rules")
+    return out
+
+
+def load_rules(path):
+    try:
+        data = json.loads(pathlib.Path(path).read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as error:
+        raise RulesError(f"cannot read {path}: {error}")
+    if not isinstance(data, dict) or data.get("schema_version") != 1 or not isinstance(data.get("rules"), list) or not data["rules"]:
+        raise RulesError(f"{path}: needs schema_version 1 and a non-empty rules list")
+    seen, problems = set(), []
+    for rule in data["rules"]:
+        problems += rule_problems(rule, seen)
+    for key in ("internal_report_tools", "read_only_mcp_prefixes"):
+        if key in data and not string_list(data[key], empty=True):
+            problems.append(f"{key} must be a list of strings")
+    if problems:
+        raise RulesError(f"{path}: " + "; ".join(problems))
+    return data
+
+
+def as_list(value):
+    return [value] if isinstance(value, dict) else list(value)
+
+
+def command_name(word):
+    return re.sub(r"\.exe$", "", re.split(r"[\\/]", word)[-1].lower())
+
+
+def simple_commands(command, shell="bash", depth=0):
+    """(name, args) of every simple command of a line, also those a wrapper runs (bash -c, cmd /c, eval, ...)."""
+    for args in parse(command, shell):
+        while args and (re.fullmatch(r"\w+=.*", args[0]) or args[0].lower() in WRAPPERS):
+            args = args[1:]
+        if not args:
+            continue
+        name, rest = command_name(args[0]), args[1:]
+        yield name, rest
+        inner = string_run(name, rest)
+        if inner and depth < 8:
+            yield from simple_commands(*inner, depth + 1)
+
+
+def positional(name, rest):
+    """The words of a command that are not options (git -C dir / gh -R repo skip their value too), lower case."""
+    out, i, with_value = [], 0, OPTS_WITH_VALUE.get(name, set())
+    while i < len(rest):
+        if rest[i].startswith("-") and len(rest[i]) > 1:
+            i += 2 if rest[i] in with_value else 1
+        else:
+            out.append(rest[i].lower())
+            i += 1
+    return out
+
+
+def shell_match(m, name, rest):
+    if name not in [c.lower() for c in m["cmd"]]:
+        return False
+    words = positional(name, rest)
+    if len(words) < len(m.get("args", [])) or any(words[k] not in [w.lower() for w in alts] for k, alts in enumerate(m.get("args", []))):
+        return False
+    hit = lambda key: any(re.fullmatch(f, a, re.I) for f in m.get(key, []) for a in rest)
+    return (not m.get("flags") or hit("flags")) and not hit("not_flags")
+
+
+def rule_path(value, cwd):
+    """A tool's path as an absolute, resolved path with / separators (lower case on Windows)."""
+    text = os.path.expanduser(plain(value) or value)
+    try:
+        full = canonical(text, cwd)
+    except (OSError, ValueError, RuntimeError):
+        full = os.path.normcase(os.path.abspath(os.path.join(cwd or os.getcwd(), text)))
+    return full.replace("\\", "/")
+
+
+def glob_regex(glob, home):
+    """~/x is under the home folder, **/x at any depth, anything else is a whole absolute path; * stays in one folder."""
+    glob, prefix = glob.replace("\\", "/"), ""
+    if glob.startswith("~/"):
+        glob, prefix = glob[2:], re.escape(home.rstrip("/")) + "/"
+    out, i = prefix, 0
+    while i < len(glob):
+        if glob.startswith("**/", i):
+            out, i = out + "(?:.*/)?", i + 3
+        elif glob.startswith("**", i):
+            out, i = out + ".*", i + 2
+        else:
+            out, i = out + {"*": "[^/]*", "?": "[^/]"}.get(glob[i], re.escape(glob[i])), i + 1
+    return re.compile(out, re.I if os.name == "nt" else 0)
+
+
+def path_match(m, tool, target, home):
+    if tool not in m["tools"] or target is None:
+        return False
+    hit = lambda globs: any(glob_regex(g, home).fullmatch(target) for g in globs)
+    return hit(m["globs"]) and not hit(m.get("except", []))
+
+
+def mcp_action(tool):
+    """The action part of an MCP tool name as lower-case words joined by _ (createPullRequest -> create_pull_request)."""
+    action = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", tool.rsplit("__", 1)[-1])
+    return re.sub(r"[^a-z0-9]+", "_", action.lower()).strip("_")
+
+
+def mcp_match(m, action, read_only):
+    if action is None:
+        return False
+    words = action.split("_")
+    if words[0] in read_only:
+        return False
+    return any(f"_{w}_" in f"_{action}_" if "_" in w else w in words for w in m["words"])
+
+
+def decide(data, profile, call, rules_path):
+    """All (decision, id, reason) the rules give for one hook input; empty when none applies."""
+    tool = call.get("tool_name") if isinstance(call.get("tool_name"), str) else ""
+    if tool in data.get("internal_report_tools", []):
+        return []
+    tool_input = call.get("tool_input") if isinstance(call.get("tool_input"), dict) else {}
+    cwd = call.get("cwd") if isinstance(call.get("cwd"), str) else None
+    command = tool_input.get("command")
+    commands = (list(simple_commands(command, "powershell" if tool == "PowerShell" else "bash"))
+                if tool in ("Bash", "PowerShell") and isinstance(command, str) else [])
+    value = next((tool_input[f] for f in PATH_FIELDS if isinstance(tool_input.get(f), str) and tool_input[f]), None)
+    target = rule_path(value, cwd) if value else None
+    home = rule_path(str(pathlib.Path.home()), None)
+    action = mcp_action(tool) if tool.startswith("mcp__") else None
+    read_only = data.get("read_only_mcp_prefixes", ["get", "list", "read", "search", "query", "status"])
+    hits = []
+    own = pathlib.Path(__file__)
+    guarded = {rule_path(str(rules_path), None), rule_path(str(own), None), rule_path(str(own.with_name("guard_rules.json")), None)}
+    if tool in WRITE_TOOLS and target in guarded:
+        hits.append((SELF_RULE["decision"][profile], "G00", SELF_RULE["reason"]))
+    for rule in data["rules"]:
+        decision = rule["decision"][profile]
+        if decision == "none":
+            continue
+        for m in as_list(rule["match"]):
+            if (m["kind"] == "shell" and any(shell_match(m, n, r) for n, r in commands)
+                    or m["kind"] == "path" and path_match(m, tool, target, home)
+                    or m["kind"] == "mcp" and mcp_match(m, action, read_only)):
+                hits.append((decision, rule["id"], rule["reason"]))
+                break
+    return hits
+
+
+def first(hits, decision):
+    """The hit with the lowest id among those with this decision, or None."""
+    found = sorted((h for h in hits if h[0] == decision), key=lambda h: int(h[1][1:]))
+    return found[0] if found else None
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--protect", action="append", default=[], help="DIRECTOR folder whose orders/ and DIRECTOR_LOG.md Write / Edit may not touch")
+    ap.add_argument("--rules", help="rules file (tools/guard_rules.json): check every tool call against it")
+    ap.add_argument("--profile", choices=PROFILES, default="worker", help="which decision of each rule applies (default worker)")
     a = ap.parse_args()
+    data = None
+    if a.rules:
+        try:
+            data = load_rules(a.rules)
+        except RulesError as error:
+            print(f"hook_guard: bad rules file: {error}", file=sys.stderr)
+            return 1
     try:
         call = json.load(sys.stdin)
     except ValueError:
@@ -274,20 +514,25 @@ def main():
         return 0
     tool_input = call.get("tool_input") or {}
     file_path = tool_input.get("file_path") if isinstance(tool_input, dict) else None
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
     if a.protect and call.get("tool_name") in ("Write", "Edit") and isinstance(file_path, str) and file_path:
         cwd = call.get("cwd") if isinstance(call.get("cwd"), str) else None
         why = protected_reason(file_path, cwd, a.protect)
-        if why:
-            print(f"BLOCKED by hook_guard: {why}", file=sys.stderr)
-            return 2
-        return 0
-    command = tool_input.get("command") if isinstance(tool_input, dict) else None
-    if not isinstance(command, str):
-        return 0
-    why = reason(command, "powershell" if call.get("tool_name") == "PowerShell" else "bash")
+    elif isinstance(command, str):
+        why = reason(command, "powershell" if call.get("tool_name") == "PowerShell" else "bash")
+    else:
+        why = None
+    hits = decide(data, a.profile, call, a.rules) if data is not None else []
+    deny, ask = first(hits, "deny"), first(hits, "ask")
+    if deny:
+        print(f"BLOCKED by hook_guard [{deny[1]}]: {deny[2]}", file=sys.stderr)
+        return 2
     if why:
         print(f"BLOCKED by hook_guard: {why}", file=sys.stderr)
         return 2
+    if ask:
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "ask",
+                                                 "permissionDecisionReason": f"[{ask[1]}] {ask[2]}"}}))
     return 0
 
 
