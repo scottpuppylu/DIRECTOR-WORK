@@ -48,7 +48,7 @@ FORBIDDEN:
 """
 REPORT = """done
 ```text
-TASK_ID / WORKER / MODEL / BRANCH / BASE / HEAD / WORKTREE_CLEAN: T / a / sonnet / b / c / d / yes
+TASK_ID / WORKER / MODEL / BRANCH / BASE / HEAD / WORKTREE_CLEAN: T / a / sonnet / b / c / d0d0d0d / yes
 RESULT: {result}
   ENGINEERING: builds
   PRODUCT（成品）: not applicable
@@ -331,10 +331,16 @@ def test_dispatch(tmp):
     expect("--hash prints the DISPATCH line to log", "gate_check.py", 0, "--hash", order, says=f"\n  DISPATCH WO-001 rev=1 sha={sha}")
 
 
-def evidence_file(folder, name, head, exit_code=0, timed_out=False, dirty=False, label="AC-1", sha256="ab" * 32):
-    """An evidence_record.py file, written directly so the case does not depend on git."""
-    record = {"schema": 1, "label": label, "command": ["python", "-c", "0"], "exit_code": exit_code, "timed_out": timed_out,
-              "git": {"head": head, "dirty": dirty}, "artifacts": [{"path": "out.txt", "kind": "file", "size": 1, "sha256": sha256}]}
+def evidence_file(folder, name, head, exit_code=0, timed_out=False, dirty=False, label="AC-1", sha256="ab" * 32, drop=(), **override):
+    """An evidence_record.py file with every field `run` writes, written directly so the case does not depend on git.
+    drop: field names to leave out; override: field values to replace."""
+    record = {"schema": 1, "label": label, "command": ["python", "-c", "0"], "cwd": str(folder), "started": "2026-01-02T10:00:00+08:00",
+              "finished": "2026-01-02T10:00:01+08:00", "seconds": 1.0, "exit_code": exit_code, "timed_out": timed_out,
+              "git": {"head": head, "dirty": dirty}, "output_lines": 1, "output_tail": ["ok"], "log": None,
+              "artifacts": [{"path": "out.txt", "kind": "file", "size": 1, "sha256": sha256}]}
+    record.update(override)
+    for key in drop:
+        record.pop(key, None)
     (folder / name).write_text(json.dumps(record), encoding="utf-8")
 
 
@@ -349,13 +355,25 @@ def test_evidence_match(tmp):
     folder.mkdir()
     good = list(ACCEPTANCE.values())
 
-    def ev(name, code, record=None, says=None, lacks=None, rows=good, title=f"/ c / {head} / yes", extra="", result="PASS"):
+    strict_text = typed.replace("GOVERNANCE     = Standard", "GOVERNANCE     = Strict")
+    if strict_text == typed:
+        failures.append("TYPED_ORDER has no `GOVERNANCE     = Standard` line; update test_evidence_match")
+    strict = tmp / "WO-003-strict.md"
+    strict.write_bytes(strict_text.encode("utf-8"))
+    strict_sha = hashlib.sha256(strict_text.encode("utf-8")).hexdigest()
+
+    def ev(name, code, record=None, says=None, lacks=None, rows=good, title=f"/ c / {head} / yes", extra="", result="PASS",
+           against=order, digest=sha):
         if record is not None:
             evidence_file(folder, "e.json", **{"head": head, **record})
         report = tmp / f"{name}.md"
-        text = match_report(rows, result, sha).replace("/ c / d / yes", title, 1).replace("RESULT:", extra + "RESULT:", 1)
+        text = match_report(rows, result, digest).replace("RESULT:", extra + "RESULT:", 1)
+        if title is None:  # a title line that does not name HEAD at all
+            text = text.replace(" / HEAD / WORKTREE_CLEAN: T / a / sonnet / b / c / d0d0d0d / yes", " / WORKTREE_CLEAN: T / a / sonnet / b / c / yes", 1)
+        else:
+            text = text.replace("/ c / d0d0d0d / yes", title, 1)
         report.write_text(text, encoding="utf-8")
-        expect(name, "gate_check.py", code, "--match", report, order, "--evidence-dir", folder, says=says, lacks=lacks)
+        expect(name, "gate_check.py", code, "--match", report, against, "--evidence-dir", folder, says=says, lacks=lacks)
         return report
 
     ev("ev_ok", 0, {}, "OK   match", "  ~ ")  # AC-2 (REVIEW) names out.txt: only AUTO rows are read
@@ -370,10 +388,34 @@ def test_evidence_match(tmp):
        rows=["| AC-1 | exit 0 | log.txt | PASS |"] + good[1:])
     ev("ev_missing_record", 1, {}, "AC-1: gone.json is not an evidence_record file",
        rows=["| AC-1 | exit 0 | gone.json | PASS |"] + good[1:])
-    ev("ev_head_line", 0, {}, "OK   match", "  ~ ", title="/ c / d / yes", extra=f"HEAD: {head}\n")
+    ev("ev_head_line", 0, {}, "OK   match", "  ~ ", title=None, extra=f"HEAD: {head}\n")
     ev("ev_branch_slash", 0, {}, "OK   match", "  ~ ", title=f"/ feature/x / c / {head} / yes")
     ev("ev_no_head", 0, {"head": "fedcba9876543210fedcba9876543210fedcba98"},
-       "~ HEAD: the report names no commit hash; evidence HEAD not compared", title="/ c / d / yes")
+       ["~ HEAD: pending is not a commit hash (7 to 40 hex digits)", "~ HEAD: the report names no commit hash (see above); evidence HEAD not compared"],
+       title="/ c / pending / yes")
+    # v0.12: a record must have every field `run` writes; HEAD must be a commit hash; Strict fails on dirty / other label
+    (folder / "e.json").write_text('{"exit_code": 0}', encoding="utf-8")
+    ev("ev_shell_record", 1, None, "AC-1: e.json is not an evidence_record file: missing field command (+1 more)")
+    ev("ev_wrong_type", 1, {"exit_code": "0"}, "is not an evidence_record file: field exit_code is not int")
+    ev("ev_bool_exit", 1, {"exit_code": False}, "field exit_code is not int")
+    ev("ev_bad_record_head", 1, {"head": "not-a-commit"}, "git.head is not a commit hash: not-a-commit")
+    ev("ev_bad_artifact_entry", 1, {"artifacts": [{"kind": "file"}]}, "artifact 1 has no path or sha256")
+    ev("ev_legacy_record", 0, {"drop": ("schema", "cwd", "started", "finished")},
+       ["OK   match", "~ AC-1: e.json: legacy record without `schema`; only command, exit_code and artifacts checked"])
+    ev("ev_legacy_still_needs_core", 1, {"drop": ("schema", "artifacts")}, "is not an evidence_record file: missing field artifacts")
+    ev("ev_record_without_git_head", 0, {"head": None}, "~ AC-1: e.json: recorded with no git HEAD; not compared with the report's")
+    ev("ev_bad_head_standard_notes", 0, {}, ["OK   match", "~ HEAD: not-a-commit is not a commit hash (7 to 40 hex digits)"],
+       title="/ c / not-a-commit / yes")
+    ev("ev_bad_head_strict_fails", 1, {}, "- HEAD: not-a-commit is not a commit hash (7 to 40 hex digits)",
+       title="/ c / not-a-commit / yes", against=strict, digest=strict_sha)
+    ev("ev_strict_dirty_fails", 1, {"dirty": True}, "- AC-1: e.json: recorded with uncommitted changes; Strict: commit, then record again",
+       against=strict, digest=strict_sha)
+    ev("ev_strict_other_label_fails", 1, {"label": "AC-9"}, "- AC-1: e.json: its label is AC-9, not AC-1; Strict: record once per AC, or label both",
+       against=strict, digest=strict_sha)
+    ev("ev_strict_label_lists_both", 0, {"label": "AC-1 AC-2"}, "OK   match", against=strict, digest=strict_sha)
+    ev("ev_strict_clean_ok", 0, {}, "OK   match", lacks="  - ", against=strict, digest=strict_sha)
+    expect("--report notes a HEAD that is not a commit hash", "gate_check.py", 0, "--report", tmp / "ev_bad_head_standard_notes.md",
+           says="~ HEAD: not-a-commit is not a commit hash")
     ev("ev_fail_row_unchecked", 0, {"exit_code": 3}, "OK   match", rows=["| AC-1 | exit 3 | e.json | FAIL |"] + good[1:],
        result="FAIL")
     plain = ev("ev_flag_off_base", 1, {"exit_code": 3})
@@ -638,14 +680,31 @@ def test_evidence(tmp):
     total += 1
     if data["output_tail"] != ["hello"] or len(data["artifacts"]) != 1 or data["artifacts"][0]["sha256"] is None:
         failures.append(f"record content: {data}")
-    expect("verify same", *common, 0, "verify", record, says="OK")
-    expect("verify with rerun", *common, 0, "verify", record, "--rerun", says="OK")
+    expect("verify same", *common, 0, "verify", record, says="EVIDENCE_VERIFY: OK integrity=same test=not-rerun artifacts=1 missing=0 rerun=no")
+    expect("verify with rerun", *common, 0, "verify", record, "--rerun", says="EVIDENCE_VERIFY: OK integrity=same test=passed artifacts=1 missing=0 rerun=yes")
     art.write_text("changed", encoding="utf-8")
-    expect("verify sees a changed artifact", *common, 1, "verify", record, says="MISMATCH")
+    expect("verify sees a changed artifact", *common, 1, "verify", record, says=["artifact changed: ", "MISMATCH integrity=changed"])
     expect("rerun rebuilds it", *common, 0, "verify", record, "--rerun", says="OK")
+    art.unlink()
+    expect("verify sees a gone artifact", *common, 1, "verify", record, says=["artifact gone: ", "MISMATCH integrity=same test=not-rerun artifacts=1 missing=1"])
+    expect("rerun rebuilds a gone artifact", *common, 0, "verify", record, "--rerun", says="OK")
+    shell = out / "shell.json"
+    shell.write_text('{"exit_code": 0}', encoding="utf-8")
+    expect("verify refuses a record without the fields", *common, 2, "verify", shell, says=["- missing field command", "- missing field artifacts", "NOT_RUN not an evidence record (2 problems)"])
+    legacy = json.loads(record.read_text(encoding="utf-8"))
+    for key in ("schema", "cwd", "started", "finished"):
+        legacy.pop(key)
+    (out / "legacy.json").write_text(json.dumps(legacy), encoding="utf-8")
+    expect("verify reads a legacy record with a note", *common, 0, "verify", out / "legacy.json", says=["~ legacy record without `schema`", "OK"])
 
     expect("exit code passes through", *common, 7, "run", "--out-dir", out, "--label", "AC-2", "--", py, "-c", "raise SystemExit(7)")
     expect("missing artifact fails", *common, 3, "run", "--out-dir", out, "--label", "AC-3", "--artifact", tmp / "nope", "--", py, "-c", "0", says="missing=1")
+    expect("verify never passes a record whose artifact was missing", *common, 1, "verify", next(out.glob("*-AC-3.json")),
+           says=["artifact missing when recorded: ", "MISMATCH integrity=same test=not-rerun artifacts=1 missing=1"])
+    expect("verify never passes a record whose artifact was missing, even rerun", *common, 1, "verify", next(out.glob("*-AC-3.json")), "--rerun",
+           says=["artifact missing when recorded: ", "MISMATCH integrity=same test=passed artifacts=1 missing=1 rerun=yes"])
+    expect("verify reports a failing command as test=failed", *common, 1, "verify", next(out.glob("*-AC-2.json")),
+           says="MISMATCH integrity=same test=failed(recorded exit 7) artifacts=0 missing=0")
     expect("unknown command", *common, 127, "run", "--out-dir", out, "--label", "AC-4", "--", "no-such-command-xyz")
     expect("timeout", *common, 124, "run", "--out-dir", out, "--label", "AC-5", "--timeout", "1", "--", py, "-c", "import time;time.sleep(30)")
     expect("no command", *common, 2, "run", "--out-dir", out, "--label", "AC-6")

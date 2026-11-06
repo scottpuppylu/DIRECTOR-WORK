@@ -17,7 +17,12 @@ evidence and the product is still the Director's job (docs/02, docs/07).
              from the header's; a `|` inside backticks or written `\\|` does not split a cell
   --evidence-dir DIR
              with --match: an AUTO row marked PASS must name in 證據 an evidence_record.py file (.json) in DIR whose
-             command exited 0, with no artifact missing, recorded at the HEAD the report names
+             command exited 0, with no artifact missing, recorded at the HEAD the report names. A file without the
+             record's fields and types (schema, label, command, cwd, started, finished, exit_code, timed_out, git,
+             artifacts) is not evidence; one without `schema` is read as legacy and noted. Uncommitted changes or a
+             label naming another AC fail a Strict order and are noted otherwise. The report's HEAD must be 7 to 40
+             hex digits: Strict fails, Standard and --report note it. The records are read, not rerun: only
+             `evidence_record.py verify --rerun` runs a command again
   --dispatch-log LOG
              with --match: the order's hash now must equal the one the Director logged at dispatch, as a line
              `DISPATCH <WO-ID> rev=<n> sha=<64 hex>` in LOG (the last line for an order wins; the ID is the order's
@@ -318,37 +323,73 @@ def check_report(text, notes):
             problems.append("RESULT PASS with a scope violation")
         if scope.startswith("NOT_RUN"):
             problems.append("RESULT PASS with SCOPE_CHECK NOT_RUN: the scope was not checked")
+    check_head(text, problems, notes)
     if not ac_table(text, problems):
         notes.append("ACCEPTANCE: no table; give each AC of the order its own row and check it with --match")
     return problems
 
 
-def report_head(text):
-    """The commit a report names: `HEAD: <sha>`, or its place in `TASK_ID / ... / HEAD / WORKTREE_CLEAN: ... / <sha> / yes`.
-    Counted from the right, so a branch name with slashes does not shift it. None when there is no commit hash."""
+def report_head_value(text):
+    """What a report writes as HEAD: the value after `HEAD:`, or its place in
+    `TASK_ID / ... / HEAD / WORKTREE_CLEAN: ... / <value> / yes` (counted from the right, so a branch name with slashes
+    does not shift it). None when no line names HEAD."""
     for line in text.splitlines():
         keys, sep, values = line.partition(":")
         names = [key.strip() for key in keys.split("/")]
         if sep and "HEAD" in names:
             parts = [value.strip() for value in values.split("/")]
             back = len(names) - names.index("HEAD")
-            if len(parts) >= back and SHA.fullmatch(parts[-back]):
-                return parts[-back].lower()
+            if len(parts) >= back:
+                return parts[-back]
     return None
 
 
-def check_evidence(ac, evidence, folder, head, problems, notes):
-    """An AUTO row marked PASS against the evidence_record.py files its 證據 cell names."""
+def report_head(text):
+    """The commit a report names, lower-case, or None when the HEAD value is not 7 to 40 hex digits."""
+    value = report_head_value(text)
+    return value.lower() if value and SHA.fullmatch(value) else None
+
+
+def check_head(text, problems, notes, strict=False):
+    """HEAD must be a commit hash (7 to 40 hex digits): a problem for a Strict order, otherwise a note."""
+    value = report_head_value(text)
+    if value is not None and not SHA.fullmatch(value):
+        (problems if strict else notes).append(f"HEAD: {value or 'empty'} is not a commit hash (7 to 40 hex digits)")
+    return value
+
+
+def evidence_module():
+    """evidence_record.py next to this file, for its record checks."""
+    import importlib.util
+    path = pathlib.Path(__file__).resolve().parent / "evidence_record.py"
+    spec = importlib.util.spec_from_file_location("evidence_record", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def check_evidence(ac, evidence, folder, head, problems, notes, strict=False):
+    """An AUTO row marked PASS against the evidence_record.py files its 證據 cell names.
+    strict: uncommitted changes or a label naming another AC fail instead of being noted."""
     names = EVIDENCE_FILE.findall(evidence)
     if not names:
         problems.append(f"{ac}: PASS names no evidence_record file (.json) in 證據")
+        return
+    ev = evidence_module()
     for name in names:
         try:
             record = json.loads((pathlib.Path(folder) / name).read_text(encoding="utf-8-sig"))
-            code, git = record["exit_code"], record.get("git") or {}
-        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        except (OSError, ValueError):
             problems.append(f"{ac}: {name} is not an evidence_record file in {folder}")
             continue
+        bad = ev.record_problems(record)
+        if bad:
+            more = f" (+{len(bad) - 1} more)" if len(bad) > 1 else ""
+            problems.append(f"{ac}: {name} is not an evidence_record file: {bad[0]}{more}")
+            continue
+        if "schema" not in record:
+            notes.append(f"{ac}: {name}: legacy record without `schema`; only command, exit_code and artifacts checked")
+        code, git = record["exit_code"], record.get("git") or {}
         if code != 0 or record.get("timed_out"):
             problems.append(f"{ac}: {name}: the command exited {code}{' (timed out)' if record.get('timed_out') else ''}")
         lost = [item.get("path") for item in record.get("artifacts", []) if item.get("sha256") is None]
@@ -358,10 +399,15 @@ def check_evidence(ac, evidence, folder, head, problems, notes):
         if head and recorded and not (recorded.startswith(head) or head.startswith(recorded)):
             problems.append(f"{ac}: {name}: recorded at HEAD {recorded[:12]}, the report says {head[:12]}; "
                             "record again after the last commit")
+        elif head and not recorded:
+            notes.append(f"{ac}: {name}: recorded with no git HEAD; not compared with the report's")
         if git.get("dirty"):
-            notes.append(f"{ac}: {name}: recorded with uncommitted changes")
-        if record.get("label") not in (None, ac):
-            notes.append(f"{ac}: {name}: its label is {record['label']}")
+            (problems if strict else notes).append(
+                f"{ac}: {name}: recorded with uncommitted changes" + ("; Strict: commit, then record again" if strict else ""))
+        label = record.get("label")
+        if label is not None and ac not in re.split(r"[\s,;/+]+", str(label)):
+            (problems if strict else notes).append(
+                f"{ac}: {name}: its label is {label}, not {ac}" + ("; Strict: record once per AC, or label both" if strict else ""))
 
 
 def check_match(report, order, notes, evidence_dir=None, dispatch=None, order_path=None, log_name=None):
@@ -372,9 +418,12 @@ def check_match(report, order, notes, evidence_dir=None, dispatch=None, order_pa
     order_problems = []
     wanted, got = ac_table(order_text, order_problems), ac_table(report, problems)
     problems.extend(f"order: {p}" for p in order_problems)
+    strict = bool(re.search(r"^\s*GOVERNANCE\s*=\s*Strict\b", order_text, re.M))
+    head_value = check_head(report, problems, notes, strict)
     head = report_head(report) if evidence_dir else None
     if evidence_dir and not head:
-        notes.append("HEAD: the report names no commit hash; evidence HEAD not compared")
+        notes.append("HEAD: the report names no commit hash" + ("" if head_value is None else " (see above)")
+                     + "; evidence HEAD not compared")
     if not wanted:
         problems.append("order: no AC-<n> row")
     for ac, spec in wanted.items():
@@ -396,7 +445,7 @@ def check_match(report, order, notes, evidence_dir=None, dispatch=None, order_pa
         if status == "PASS" and (blank(evidence) or evidence.upper().startswith("NONE")):
             problems.append(f"{ac}: PASS without evidence")
         elif status == "PASS" and kind == "AUTO" and evidence_dir:
-            check_evidence(ac, evidence, evidence_dir, head, problems, notes)
+            check_evidence(ac, evidence, evidence_dir, head, problems, notes, strict)
         if status in ("PASS", "FAIL") and blank(row.get("actual", "")):
             problems.append(f"{ac}: {status} with 實際 empty")
     for ac in sorted(got.keys() - wanted.keys()):
@@ -414,7 +463,7 @@ def check_match(report, order, notes, evidence_dir=None, dispatch=None, order_pa
                         "compare it with its 變更紀錄 and the hash logged at dispatch")
     if dispatch is not None:
         check_dispatch(order_text, order_path, now, dispatch, log_name, problems, notes)
-    elif re.search(r"^\s*GOVERNANCE\s*=\s*Strict\b", order_text, re.M):
+    elif strict:
         notes.append("DISPATCH: Strict order checked without --dispatch-log; the hash was only compared with the order as it is now")
     return problems
 
