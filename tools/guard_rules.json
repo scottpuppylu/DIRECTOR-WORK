@@ -147,6 +147,75 @@
       "match": {"kind": "mcp", "words": ["setting", "settings", "permission_mode"]},
       "example_block": {"tool_name": "mcp__ccd_settings__set_setting", "tool_input": {"key": "x"}},
       "example_allow": {"tool_name": "mcp__ccd_settings__get_settings", "tool_input": {}}
+    },
+    {
+      "id": "G50",
+      "category": "secret",
+      "decision": {"worker": "deny", "director": "deny"},
+      "reason": "credential files are not read in a session (docs/08); if the task needs a credential, report which one and why to the Director",
+      "match": [
+        {"kind": "path", "tools": ["Read", "Grep", "Glob", "NotebookRead"],
+         "globs": ["**/.env", "**/.env.*", "**/.envrc", "**/*.pem", "**/*.key", "**/*.p12", "**/*.pfx", "**/id_rsa*", "**/id_ecdsa*", "**/id_ed25519*", "**/.ssh/**", "**/.aws/credentials", "**/.config/gh/hosts.yml", "**/.git-credentials", "**/.npmrc", "**/.pypirc", "**/.netrc", "**/_netrc", "**/.claude/.credentials.json", "**/credentials.json", "**/secrets.*"],
+         "except": ["**/.env.example", "**/.env.sample", "**/.env.template", "**/.env.dist", "**/*.pub", "**/.ssh/known_hosts*", "**/.ssh/config"]},
+        {"kind": "shell", "cmd": ["cat", "tac", "nl", "more", "less", "bat", "head", "tail", "sed", "awk", "gawk", "grep", "egrep", "fgrep", "rg", "findstr", "select-string", "sls", "get-content", "gc", "type", "cp", "copy", "copy-item", "cpi", "scp", "rsync", "base64", "certutil", "xxd", "od", "hexdump", "strings", "format-hex", "fhx", "import-csv", "get-filehash"],
+         "path_args": ["**/.env", "**/.env.*", "**/.envrc", "**/*.pem", "**/*.key", "**/*.p12", "**/*.pfx", "**/id_rsa*", "**/id_ecdsa*", "**/id_ed25519*", "**/.ssh/**", "**/.aws/credentials", "**/.config/gh/hosts.yml", "**/.git-credentials", "**/.npmrc", "**/.pypirc", "**/.netrc", "**/_netrc", "**/.claude/.credentials.json", "**/credentials.json", "**/secrets.*"],
+         "path_except": ["**/.env.example", "**/.env.sample", "**/.env.template", "**/.env.dist", "**/*.pub", "**/.ssh/known_hosts*", "**/.ssh/config"]}
+      ],
+      "example_block": [{"tool_name": "Read", "tool_input": {"file_path": ".env"}},
+                        {"tool_name": "Bash", "tool_input": {"command": "cat ~/.ssh/id_ed25519"}}],
+      "example_allow": [{"tool_name": "Read", "tool_input": {"file_path": ".env.example"}},
+                        {"tool_name": "Bash", "tool_input": {"command": "cat README.md"}}],
+      "permissions": ["Read(//**/.env)", "Read(//**/.env.local)", "Read(//**/.env.production)", "Read(//**/*.pem)", "Read(//**/*.key)",
+                      "Read(//**/*.p12)", "Read(//**/*.pfx)", "Read(//**/id_rsa)", "Read(//**/id_ed25519)", "Read(~/.ssh/**)",
+                      "Read(~/.aws/credentials)", "Read(~/.config/gh/hosts.yml)", "Read(~/.git-credentials)", "Read(~/.netrc)",
+                      "Read(~/.claude/.credentials.json)"]
+    },
+    {
+      "id": "G51",
+      "category": "secret",
+      "decision": {"worker": "deny", "director": "deny"},
+      "reason": "printing the environment or a secret variable puts credentials in the transcript (docs/08); use the variable without printing it, or report what you need to the Director",
+      "match": [
+        {"kind": "shell", "cmd": ["env", "printenv", "set", "export"], "bare": true},
+        {"kind": "shell", "cmd": ["env"], "flags": ["-.*", "\\w+=.*"]},
+        {"kind": "shell", "cmd": ["export"], "flags": ["-p"]},
+        {"kind": "shell", "cmd": ["declare", "typeset"], "flags": ["-[a-z]*[px][a-z]*"]},
+        {"kind": "shell", "cmd": ["printenv"], "arg_search": ["(?i)(token|secret|passw(or)?d|passphrase|credential|api_?key|access_?key|private_?key|(?<![a-z])key|auth(?!or))"]},
+        {"kind": "shell", "cmd": ["get-childitem", "gci", "dir", "ls", "get-item", "gi", "get-itemproperty", "gp", "get-content", "gc", "cat", "type"],
+         "flags": ["(-path:|-literalpath:)?(env|variable):.*"]},
+        {"kind": "shell", "cmd": ["echo", "echo.", "printf", "print", "write-output", "write", "write-host", "write-information", "out-host", "say"],
+         "arg_search": ["(?i)[$%][{(]?(env:)?\\w*(token|secret|passw(or)?d|passphrase|credential|api_?key|access_?key|private_?key|(?<![a-z])key|auth(?!or))"]},
+        {"kind": "shell", "cmd": ["[$%].*(token|secret|passw(or)?d|passphrase|credential|api_?key|access_?key|private_?key|(?<![a-z])key|auth(?!or)).*", "\\[(system\\.)?environment\\]::getenvironmentvariables?.*"]}
+      ],
+      "example_block": [{"tool_name": "Bash", "tool_input": {"command": "printenv"}},
+                        {"tool_name": "Bash", "tool_input": {"command": "echo $GITHUB_TOKEN"}},
+                        {"tool_name": "PowerShell", "tool_input": {"command": "Get-ChildItem env:"}}],
+      "example_allow": [{"tool_name": "Bash", "tool_input": {"command": "echo $HOME"}},
+                        {"tool_name": "Bash", "tool_input": {"command": "set -e"}},
+                        {"tool_name": "Bash", "tool_input": {"command": "printenv PATH"}}]
+    },
+    {
+      "id": "G52",
+      "category": "secret",
+      "decision": {"worker": "deny", "director": "deny"},
+      "reason": "commands that print a token or a stored password put it in the transcript (docs/08); report what you need the credential for to the Director",
+      "match": [
+        {"kind": "shell", "cmd": ["gh"], "args": [["auth"], ["token"]]},
+        {"kind": "shell", "cmd": ["gh"], "args": [["auth"], ["status"]], "flags": ["--show-token", "-t"]},
+        {"kind": "shell", "cmd": ["git"], "args": [["credential"], ["fill"]]},
+        {"kind": "shell", "cmd": ["git"], "args": [["credential-manager", "credential-manager-core", "credential-store", "credential-cache", "credential-wincred", "credential-osxkeychain", "credential-libsecret"], ["get"]]},
+        {"kind": "shell", "cmd": ["aws"], "args": [["configure"], ["get", "export-credentials"]]},
+        {"kind": "shell", "cmd": ["aws"], "args": [["sts"], ["get-session-token"]]},
+        {"kind": "shell", "cmd": ["az"], "args": [["account"], ["get-access-token"]]},
+        {"kind": "shell", "cmd": ["gcloud"], "args": [["auth"], ["print-access-token", "print-identity-token"]]},
+        {"kind": "shell", "cmd": ["gcloud"], "args": [["auth"], ["application-default"], ["print-access-token"]]},
+        {"kind": "shell", "cmd": ["kubectl"], "args": [["config"], ["view"]], "flags": ["--raw"]},
+        {"kind": "shell", "cmd": ["security"], "args": [["find-generic-password", "find-internet-password"]], "flags": ["-w", "-g"]}
+      ],
+      "example_block": [{"tool_name": "Bash", "tool_input": {"command": "gh auth token"}},
+                        {"tool_name": "Bash", "tool_input": {"command": "git credential fill"}}],
+      "example_allow": [{"tool_name": "Bash", "tool_input": {"command": "gh auth status"}},
+                        {"tool_name": "Bash", "tool_input": {"command": "aws configure list"}}]
     }
   ]
 }

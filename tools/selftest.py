@@ -4,6 +4,7 @@ not drifted.
 Prints one line per failed case and a summary; exit 1 when anything fails. Writes only to the temporary folder.
 """
 import hashlib
+import importlib.util
 import json
 import os
 import pathlib
@@ -1443,6 +1444,87 @@ def test_hook_rules(tmp):
         check("git status is silent", bash("git status"), profile, "silent")
         check("a build is silent", bash("python -m unittest"), profile, "silent")
         check("Read is silent", tool("Read", file_path="README.md"), profile, "silent")
+    # 1.1.0 item 4: reading credential files, printing the environment or a token is denied in both profiles
+    grep = lambda **kw: tool("Grep", pattern="KEY", **kw)
+    blocked = {
+        "G50": [tool("Read", file_path=".env"), tool("Read", file_path="~/.ssh/id_ed25519"),
+                grep(path=f"{home}/.aws/credentials"), grep(glob=".env"), grep(path=".", glob="*.pem"),
+                tool("Glob", pattern="**/.env"), bash("cat .env"), shell(r"Get-Content .\.env"), bash("type .env"),
+                bash("copy .env x"), bash("base64 id_rsa"), bash("cat $HOME/.ssh/id_rsa"), bash("bash -c 'cat .env'"),
+                bash("sed -n 1p .env.local"), shell("Select-String -Path .env -Pattern KEY"),
+                tool("Read", file_path="D:/proj/sub/../.env"), bash("cp ./sub/../.env x"),
+                tool("Read", file_path="D:/proj/.claude/.credentials.json"), tool("Read", file_path="D:/proj/config/secrets.yaml")]
+               + ([tool("Read", file_path=r"D:\proj\.ENV"), bash("cat .ENV")] if os.name == "nt" else []),
+        "G51": [bash("printenv"), bash("env"), bash("env -0"), shell("gci env:"), shell("Get-ChildItem Env:\\"),
+                bash("echo $GITHUB_TOKEN"), bash('echo "token is ${GITHUB_TOKEN}"'), shell("Write-Output $env:API_KEY"),
+                bash("echo %OPENAI_API_KEY%"), shell("$env:GITHUB_TOKEN"), bash("set"), bash("cmd /c set"), bash("export -p"),
+                bash("printenv AWS_SECRET_ACCESS_KEY"), shell("[Environment]::GetEnvironmentVariables()")],
+        "G52": [bash("gh auth token"), bash("gh auth status --show-token"), bash("git credential fill"),
+                bash("git credential-manager get"), bash("aws --profile x configure get aws_secret_access_key"),
+                bash("az account get-access-token"), bash("gcloud auth print-access-token"), bash("kubectl config view --raw")],
+    }
+    for rid, calls in blocked.items():
+        for call in calls:
+            for profile in ("worker", "director"):
+                check(f"secret {rid} {json.dumps(call['tool_input'])}", call, profile, f"deny:{rid}")
+    for call in (tool("Read", file_path=".env.example"), bash("cat README.md"), bash("echo $HOME"), bash("echo $AUTHOR"),
+                 bash("grep TODO src/"), bash("grep -r password ."), bash("set -e"), bash("export FOO=1"), bash("printenv PATH"),
+                 shell("Get-ChildItem"), shell("Get-ChildItem src"), shell("Write-Output $env:PATH"), bash("cat ~/.ssh/id_rsa.pub"),
+                 bash("cat ~/.ssh/config"), bash("env FOO=1 python x.py"), bash("gh auth status"), bash("aws configure list"),
+                 bash("gcloud auth application-default login"), grep(path="src"), tool("Glob", pattern="**/*.py"),
+                 bash("kubectl config view")):
+        for profile in ("worker", "director"):
+            check(f"not a secret {json.dumps(call['tool_input'])}", call, profile, "silent")
+    done = check("secret deny message names the next step", bash("cat .env"), "worker", "deny:G50")
+    total += 1
+    if "report which one and why to the Director" not in done.stderr:
+        failures.append(f"G50 deny message lacks the next step: {done.stderr.strip()}")
+    g50 = next(r for r in rules["rules"] if r["id"] == "G50")
+    paths, shells = (next(m for m in g50["match"] if m["kind"] == k) for k in ("path", "shell"))
+    total += 1
+    if (paths["globs"], paths["except"]) != (shells["path_args"], shells["path_except"]):
+        failures.append("G50: the path globs and the shell path_args differ; keep one list")
+    # secret_mask: every kind is masked with nothing of the secret left; SHAs, counts and names stay
+    spec = importlib.util.spec_from_file_location("secret_mask_under_test", TOOLS / "secret_mask.py")
+    masker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(masker)
+    fake = {  # built at run time so that the source holds no token-shaped string
+        "private_key": ("-----BEGIN OPENSSH " + "PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH " + "PRIVATE KEY-----", "b3BlbnNzaC1rZXktdjEAAAAA"),
+        "aws_access_key": ("AKIA" + "IOSFODNN7EXAMPLE", "IOSFODNN7EXAMPLE"),
+        "github_token": ("gh" + "p_" + "a1B2" * 9, "a1B2" * 9),
+        "github_pat": ("github" + "_pat_11ABCDEFG0123456789_abcdefghijKLMNOP", "11ABCDEFG0123456789"),
+        "anthropic_key": ("sk-" + "ant-api03-" + "x7" * 15, "x7" * 15),
+        "openai_key": ("sk-" + "proj-" + "Ab1" * 10, "Ab1" * 10),
+        "slack_token": ("xo" + "xb-1234567890-abcdefghij", "1234567890-abcdefghij"),
+        "google_api_key": ("AI" + "za" + "B9" * 17 + "C", "B9" * 17),
+        "npm_token": ("np" + "m_" + "c4" * 18, "c4" * 18),
+        "jwt": ("ey" + "JhbGciOiJIUzI1NiJ9.ey" + "JzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N", "dozjgNryP4J3jVmNHl0w5N"),
+        "bearer": ("Authorization: Bearer abc.def-ghi", "abc.def-ghi"),
+        "url_password": ("https://user:hunter2pass@example.com/r.git", "hunter2pass"),
+        "assignment": ("GITHUB_TOKEN=s3cr3tvalue; password: 'p@ss w'", "s3cr3tvalue"),
+    }
+    for kind, (text, secret) in fake.items():
+        total += 1
+        masked, kinds = masker.mask(f"before {text} after")
+        if f"[MASKED:{kind}]" not in masked or secret in masked or kind not in kinds or not masked.startswith("before "):
+            failures.append(f"secret_mask {kind}: got {masked!r} {kinds}")
+    for text in ("commit 4b825dc642cb6eb9a060e54bf8d69288fbee4904", "sha256 " + hashlib.sha256(b"").hexdigest(),
+                 "max_tokens=4096 author=Bob PWD=/home/x", "Authorization: Bearer [MASKED:jwt]"):
+        total += 1
+        if masker.mask(text) != (text, []):
+            failures.append(f"secret_mask changed text with no new secret: {text!r} -> {masker.mask(text)}")
+    for text, want_exit, want_out in (("id " + fake["aws_access_key"][0], 1, "FOUND aws_access_key\nSECRETS: 1 kind(s)\n"),
+                                      ("plain text", 0, "SECRETS: 0 kind(s)\n")):
+        total += 1
+        done = subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "secret_mask.py"), "--check"], input=text,
+                              capture_output=True, encoding="utf-8")
+        if (done.returncode, done.stdout) != (want_exit, want_out):
+            failures.append(f"secret_mask --check {text!r}: exit {done.returncode} {done.stdout!r}")
+    total += 1
+    done = subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "secret_mask.py")], input="k: " + fake["github_token"][0] + "\n",
+                          capture_output=True, encoding="utf-8")
+    if (done.returncode, done.stdout) != (0, "k: [MASKED:github_token]\n"):
+        failures.append(f"secret_mask stdin: exit {done.returncode} {done.stdout!r}")
     # determinism: the same input twice gives the same bytes; the rules in reverse order give the same result
     reverse = tmp / "rules_reversed.json"
     reverse.write_text(json.dumps({**rules, "rules": rules["rules"][::-1]}), encoding="utf-8")
@@ -1463,7 +1545,11 @@ def test_hook_rules(tmp):
               "duplicate id": json.dumps({**rules, "rules": [rules["rules"][0], rules["rules"][0]]}),
               "reserved id": json.dumps({**rules, "rules": [{**rules["rules"][0], "id": "G00"}]}),
               "bad regex": json.dumps({**rules, "rules": [{**rules["rules"][0], "match": {"kind": "shell", "cmd": ["git"], "flags": ["("]}}]}),
-              "unknown kind": json.dumps({**rules, "rules": [{**rules["rules"][0], "match": {"kind": "url", "cmd": ["x"]}}]})}
+              "unknown kind": json.dumps({**rules, "rules": [{**rules["rules"][0], "match": {"kind": "url", "cmd": ["x"]}}]}),
+              "bad cmd regex": json.dumps({**rules, "rules": [{**rules["rules"][0], "match": {"kind": "shell", "cmd": ["git("]}}]}),
+              "bare not a bool": json.dumps({**rules, "rules": [{**rules["rules"][0], "match": {"kind": "shell", "cmd": ["env"], "bare": "yes"}}]}),
+              "path_args not globs": json.dumps({**rules, "rules": [{**rules["rules"][0], "match": {"kind": "shell", "cmd": ["cat"], "path_args": ".env"}}]}),
+              "bad arg_search": json.dumps({**rules, "rules": [{**rules["rules"][0], "match": {"kind": "shell", "cmd": ["echo"], "arg_search": ["[$"]}}]})}
     for name, text in broken.items():
         bad = tmp / f"rules_{name.replace(' ', '_')}.json"
         bad.write_text(text, encoding="utf-8")

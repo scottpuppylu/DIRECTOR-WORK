@@ -281,7 +281,9 @@ DECISIONS = ("deny", "ask", "none")
 KINDS = {"shell": ("cmd",), "path": ("tools", "globs"), "mcp": ("words",)}
 WRITE_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
 PATH_FIELDS = ("file_path", "notebook_path", "path")
-OPTS_WITH_VALUE = {"git": GIT_OPTS_WITH_VALUE, "gh": {"-R", "--repo"}}
+PATTERN_FIELDS = {"Grep": "glob", "Glob": "pattern"}  # a file pattern under the search path, checked like a path
+OPTS_WITH_VALUE = {"git": GIT_OPTS_WITH_VALUE, "gh": {"-R", "--repo"}, "aws": {"--profile", "--region", "--output", "--endpoint-url"},
+                   "az": {"--subscription", "--output", "-o", "--query"}, "gcloud": {"--project", "--account", "--configuration"}}
 SELF_RULE = {"id": "G00", "decision": {"worker": "deny", "director": "ask"},
              "reason": "the guard rules and hook_guard.py are changed by the PO or the Director, not by a guarded session; report the change you need"}
 
@@ -323,6 +325,20 @@ def rule_problems(rule, seen):
         out += [f"{rid}: match {m['kind']} needs a list {key}" for key in KINDS[m["kind"]] if not string_list(m.get(key))]
         if "args" in m and not (isinstance(m["args"], list) and all(string_list(alts) for alts in m["args"])):
             out.append(f"{rid}: args must be a list of word lists")
+        if "bare" in m and not isinstance(m["bare"], bool):
+            out.append(f"{rid}: bare must be true or false")
+        for key in ("path_args", "path_except"):
+            if key in m and not string_list(m[key], empty=key == "path_except"):
+                out.append(f"{rid}: {key} must be a list of globs")
+        for key in ("cmd", "arg_search") if m["kind"] == "shell" else ():
+            if not string_list(m.get(key, []), empty=True):
+                out.append(f"{rid}: {key} must be a list of regexes")
+                continue
+            for pattern in m.get(key, []):
+                try:
+                    re.compile(pattern)
+                except re.error as error:
+                    out.append(f"{rid}: {key} {pattern!r} is not a regex: {error}")
         for key in ("flags", "not_flags", "except"):
             if key not in m:
                 continue
@@ -374,6 +390,8 @@ def simple_commands(command, shell="bash", depth=0):
     """(name, args) of every simple command of a line, also those a wrapper runs (bash -c, cmd /c, eval, ...)."""
     for args in parse(command, shell):
         while args and (re.fullmatch(r"\w+=.*", args[0]) or args[0].lower() in WRAPPERS):
+            if args[0].lower() == "env" and all(re.fullmatch(r"-.*|\w+=.*", a) for a in args[1:]):
+                break  # env with no command after it prints the environment
             args = args[1:]
         if not args:
             continue
@@ -396,14 +414,30 @@ def positional(name, rest):
     return out
 
 
-def shell_match(m, name, rest):
-    if name not in [c.lower() for c in m["cmd"]]:
+def shell_match(m, name, rest, cwd=None, home=""):
+    """cmd: regexes for the whole command name (lower case); args: the first non-option words in turn; flags /
+    not_flags: regexes, some / no word must match whole; bare: no words at all; arg_search: a regex found in some word;
+    path_args: some non-option word, as a path from the hook cwd, matches a glob (and no path_except glob)."""
+    if not any(re.fullmatch(c, name, re.I) for c in m["cmd"]):
         return False
     words = positional(name, rest)
     if len(words) < len(m.get("args", [])) or any(words[k] not in [w.lower() for w in alts] for k, alts in enumerate(m.get("args", []))):
         return False
+    if m.get("bare") and rest:
+        return False
+    if m.get("arg_search") and not any(re.search(r, a) for r in m["arg_search"] for a in rest):
+        return False
+    if m.get("path_args") and not any(globs_match(m["path_args"], m.get("path_except", []), arg_path(a, cwd), home)
+                                      for a in rest if not a.startswith("-")):
+        return False
     hit = lambda key: any(re.fullmatch(f, a, re.I) for f in m.get(key, []) for a in rest)
     return (not m.get("flags") or hit("flags")) and not hit("not_flags")
+
+
+def arg_path(word, cwd):
+    """A command word as rule_path gives it: $VAR, ${VAR}, %VAR% and PowerShell $env:VAR expanded first."""
+    word = re.sub(r"\$env:(\w+)", lambda v: os.environ.get(v.group(1), v.group(0)), word, flags=re.I)
+    return rule_path(os.path.expandvars(word), cwd)
 
 
 def rule_path(value, cwd):
@@ -432,11 +466,13 @@ def glob_regex(glob, home):
     return re.compile(out, re.I if os.name == "nt" else 0)
 
 
-def path_match(m, tool, target, home):
-    if tool not in m["tools"] or target is None:
-        return False
-    hit = lambda globs: any(glob_regex(g, home).fullmatch(target) for g in globs)
-    return hit(m["globs"]) and not hit(m.get("except", []))
+def globs_match(globs, excepts, target, home):
+    hit = lambda patterns: any(glob_regex(g, home).fullmatch(target) for g in patterns)
+    return hit(globs) and not hit(excepts)
+
+
+def path_match(m, tool, targets, home):
+    return tool in m["tools"] and any(globs_match(m["globs"], m.get("except", []), t, home) for t in targets if t)
 
 
 def mcp_action(tool):
@@ -466,6 +502,9 @@ def decide(data, profile, call, rules_path):
                 if tool in ("Bash", "PowerShell") and isinstance(command, str) else [])
     value = next((tool_input[f] for f in PATH_FIELDS if isinstance(tool_input.get(f), str) and tool_input[f]), None)
     target = rule_path(value, cwd) if value else None
+    pattern = tool_input.get(PATTERN_FIELDS.get(tool, ""))
+    targets = [target] + ([rule_path(os.path.join(value or cwd or os.getcwd(), pattern), cwd)]
+                          if isinstance(pattern, str) and pattern else [])
     home = rule_path(str(pathlib.Path.home()), None)
     action = mcp_action(tool) if tool.startswith("mcp__") else None
     read_only = data.get("read_only_mcp_prefixes", ["get", "list", "read", "search", "query", "status"])
@@ -479,8 +518,8 @@ def decide(data, profile, call, rules_path):
         if decision == "none":
             continue
         for m in as_list(rule["match"]):
-            if (m["kind"] == "shell" and any(shell_match(m, n, r) for n, r in commands)
-                    or m["kind"] == "path" and path_match(m, tool, target, home)
+            if (m["kind"] == "shell" and any(shell_match(m, n, r, cwd, home) for n, r in commands)
+                    or m["kind"] == "path" and path_match(m, tool, targets, home)
                     or m["kind"] == "mcp" and mcp_match(m, action, read_only)):
                 hits.append((decision, rule["id"], rule["reason"]))
                 break

@@ -16,6 +16,7 @@ Python 3.9 以上，只用標準函式庫。一律用 `python -I -X utf8 <tool> 
 | `scope_check.py` | 比對實際改動和工單的 SCOPE / FORBIDDEN | 不寫 | 不花 |
 | `evidence_record.py` | 跑驗收指令，留下 exit code、輸出結尾、產物 SHA-256；之後可重新比對 | `run` 寫一份小 JSON，不覆蓋舊的 | 不花 |
 | `hook_guard.py` | PreToolUse hook：擋下 push、`reset --hard`、`git clean`、裸 stash、刪 worktree / 分支 / tag、依名稱結束程序；加 `--protect` 時另擋 Write / Edit 改工單和 `DIRECTOR_LOG.md`；加 `--rules` 時依 `guard_rules.json` 對每個工具呼叫回 deny / ask / 不出聲 | 不寫 | 不花；放行時不輸出 |
+| `secret_mask.py` | 把文字裡的私鑰、token、API key、JWT、`password=` 這類值換成 `[MASKED:種類]`；`--check` 只列出找到的種類 | 不寫 | 不花 |
 | `guard_rules.json` | `hook_guard.py --rules` 的規則檔：每條規則的類別、worker / director 的結論、比對方式、正反例子和要寫進 settings 的權限規則 | — | — |
 | `selftest.py` | 用正反案例測 gate_check、trace_report、metrics_report、scope_check、evidence_record、hook_guard 和 `--hooks` 安裝；查用詞、必讀文件大小、`PURPOSE.md` 結構和 CHANGELOG 的「對齊初衷」 | 只寫暫存資料夾，結束刪除 | 不花 |
 
@@ -72,8 +73,12 @@ hook_guard.py --rules <tools>/guard_rules.json --profile worker|director [--prot
 
 - 規則檔每條：`id`（`G` 加兩位以上數字，`G00` 保留）、`category`、`decision`（worker 和 director 各一個：`deny` / `ask` / `none`）、`reason`（不可有 `<...>`）、`match`、`example_block`、`example_allow`，選用 `permissions`。
 - `match` 三種：
-  - `shell`：Bash / PowerShell 指令拆成每個子指令（含 `bash -c`、`cmd /c`、`powershell -c`、`eval`、`xargs` 這類包起來的），比指令名稱（去掉路徑和 `.exe`、不分大小寫）、依序的非選項字（`args`，`git -C`、`gh -R` 的值會跳過）、選項 regex（`flags` 至少一個、`not_flags` 一個都不能有）。
-  - `path`：`tools` 列的工具，`file_path`（或 `notebook_path`、`path`）比 `globs`，`except` 除外。`~/` 是家目錄，`**/` 是任意層，`*` 不跨 `/`；相對路徑以 hook 輸入的 `cwd` 為準；Windows 不分大小寫、反斜線視同 `/`。
+  - `shell`：Bash / PowerShell 指令拆成每個子指令（含 `bash -c`、`cmd /c`、`powershell -c`、`eval`、`xargs` 這類包起來的），比指令名稱（`cmd` 是完整比對的 regex，去掉路徑和 `.exe`、不分大小寫）、依序的非選項字（`args`，`git -C`、`gh -R`、`aws --profile` 這類選項的值會跳過）、選項 regex（`flags` 至少一個、`not_flags` 一個都不能有）。另有三個選用欄位：
+    - `bare: true`：指令完全沒有參數才算（`env`、`set`）。
+    - `arg_search`：任一參數用 regex 搜得到（`echo $GITHUB_TOKEN`）。
+    - `path_args` / `path_except`：每個非選項參數以 hook 的 `cwd` 解析成路徑（展開 `~`、`$HOME`、`${VAR}`、`%VAR%`、`$env:VAR`），比 glob，規則同 `path`。
+    - `env` 後面只有選項或 `X=1` 指派時，`env` 本身就是印環境變數的指令；`env X=1 python a.py` 比的是 `python`。
+  - `path`：`tools` 列的工具，`file_path`（或 `notebook_path`、`path`）比 `globs`，`except` 除外。Grep 的 `glob`、Glob 的 `pattern` 接在搜尋路徑後面，也當成一個目標比。`~/` 是家目錄，`**/` 是任意層，`*` 不跨 `/`；相對路徑以 hook 輸入的 `cwd` 為準；Windows 不分大小寫、反斜線視同 `/`。
   - `mcp`：只看 MCP 工具名稱最後一段（`mcp__伺服器__動作`），駝峰拆成底線、轉小寫後比 `words`。開頭是 `read_only_mcp_prefixes`（get、list、read、search、query、status）的一律不比，所以 `get_order`、`list_billing_charges` 不會被「付費」擋。
 - `internal_report_tools`（`SendMessage`、`mcp__ccd_session_mgmt__send_message`）是回報總監的管道，任何規則都不比。
 - 內建 `G00`：Write / Edit / MultiEdit / NotebookEdit 改使用中的規則檔、`hook_guard.py` 旁邊的 `guard_rules.json` 或 `hook_guard.py` 本身，worker deny、director ask。
@@ -94,11 +99,29 @@ hook_guard.py --rules <tools>/guard_rules.json --profile worker|director [--prot
 | G40 | 改設定 | deny | ask | Write / Edit 到 `.claude/settings*.json`、`managed-settings.json`、`.credentials.json`、`CLAUDE.md`、`CLAUDE.local.md`、`~/.claude.json`、`.mcp.json`；`~/.claude/projects/*/memory/**` 和 `~/.claude/plans/**` 除外 |
 | G41 | 改設定 | deny | ask | `git config --global/--system`、`claude config/mcp` 的寫入、`setx`、`reg add` 等、PowerShell 改 HKLM / HKCU |
 | G42 | 改設定 | deny | ask | MCP 動作含 setting、settings、permission_mode |
+| G50 | 機密 | deny | deny | Read / Grep / Glob / NotebookRead 和讀檔類指令（`cat`、`head`、`grep`、`sed`、`Get-Content`、`type`、`cp`、`base64`、`certutil` 等）碰到 `.env`、`.env.*`、`.envrc`、`*.pem`、`*.key`、`*.p12`、`*.pfx`、`id_rsa*` 等私鑰、`.ssh/**`、`.aws/credentials`、`gh/hosts.yml`、`.git-credentials`、`.npmrc`、`.pypirc`、`.netrc`、`.claude/.credentials.json`、`credentials.json`、`secrets.*`；`.env.example`、`.env.sample`、`.env.template`、`.env.dist`、`*.pub`、`known_hosts`、`.ssh/config` 除外 |
+| G51 | 機密 | deny | deny | 印出環境變數：不帶參數的 `env`、`printenv`、`set`、`export`；`export -p`、`declare -x`；`gci env:`；`echo` / `Write-Output` 帶名稱含 token、secret、password、key、credential、auth 的變數；單獨一行 `$env:GITHUB_TOKEN`；`[Environment]::GetEnvironmentVariable(s)` |
+| G52 | 機密 | deny | deny | 印出 token 或密碼的指令：`gh auth token`、`gh auth status --show-token`、`git credential fill`、credential helper 的 `get`、`aws configure get`、`aws configure export-credentials`、`aws sts get-session-token`、`az account get-access-token`、`gcloud auth print-*-token`、`kubectl config view --raw`、`security find-*-password -w` |
 
 - worker 的刪除是 deny，訊息會說下一步：把可刪清單（路徑、大小、原因）送給總監或清理員。
 - push 對總監也是 deny：沒加 `--rules` 時 `git push` 本來就對每個人擋（PO 自己執行），規則檔沿用。
+- G50–G52 對總監也是 deny：讀到的機密會留在對話紀錄裡，誰讀都一樣。需要憑證時回報要哪一個、做什麼用。
+- G50 只看讀取工具；寫 `.credentials.json` 仍由 G40 處理。
+- G50–G52 擋不到的（寫進限制）：`grep -r` 不指定檔案時掃到 `.env`；`python -c`、`node -e` 這類直譯器讀檔；`$X` 間接展開的變數名；指令輸出本身帶出的 token（例如程式把 token 印到 log）。輸出遮罩屬於下一批。
 - 仍然只是安全帶：寫進腳本再執行、變數拼出來的指令、編碼過的指令看不到（Claude Code 文件也說 Bash 權限規則不是安全邊界）。
 - selftest 會跑每條規則的 `example_block` 和 `example_allow`（兩個身分各一次），所以規則檔加一條，案例就自動多幾個。
+
+### secret_mask.py（1.1.0）
+
+```text
+python -I -X utf8 secret_mask.py [FILE]          # 印出遮罩後的 FILE（沒給就讀 stdin），exit 0
+python -I -X utf8 secret_mask.py --check [FILE]  # 每種找到的機密印一行 FOUND kind，最後 SECRETS: n kind(s)；有找到就 exit 1
+```
+
+- 整段換成 `[MASKED:種類]`：私鑰區塊、AWS access key、GitHub token 和 fine-grained PAT、Anthropic / OpenAI key、Slack token、Google API key、npm token、JWT。
+- 保留前段、只遮值：`Authorization: Bearer` / `Basic` / `token` 後面的值、URL 裡的密碼（`https://user:密碼@host`）、名稱含 password、passphrase、token、secret、api_key、access_key、private_key、client_secret、auth 的 `名稱=值` 或 `名稱: 值`。
+- 不遮：40 碼 git SHA、sha256、`max_tokens=4096`、`author=...`、`PWD=...`、已經遮過的值。已知會多遮：`"token_type": "Bearer"`。
+- 只認得常見格式，沒見過的 token 格式會原樣通過。也可當模組用：`mask(text)` 回傳 `(遮罩後文字, 種類清單)`。
 
 ## context_probe.py
 
