@@ -36,6 +36,13 @@ FORBIDDEN:
 
 `*` 不跨資料夾，`**` 跨資料夾，沒有萬用字元的名稱連底下全部都算。兩邊都符合時以 FORBIDDEN 為準。不要寫「相關檔案」這種話。
 
+選用：一定要改到的路徑。`scope_check.py` 會查每一條都有對到改動，沒對到就印 `MISSING` 並判越界；每一條都要在 SCOPE 裡、不在 FORBIDDEN 裡（`gate_check.py --order` 會查）。不需要就整段不寫。
+
+```text
+REQUIRED_CHANGES:
+- <一定要改到的路徑或 glob，例如 src/parser.py>
+```
+
 ## C. 執行前檢查
 repo 與分支、工作樹乾淨、未提交修改、相關規範、相依、實際行為、能否重現、基準測試。路徑不存在先搜尋，不假設。
 

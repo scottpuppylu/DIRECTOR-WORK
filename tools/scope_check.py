@@ -9,6 +9,10 @@ Globs are relative to the repo root: `*` stays inside one folder, `**` crosses f
 covers everything below it. A leading `/` is ignored. Case is ignored on Windows.
 Not seen: ignored files, files outside the repo. Only reads.
 
+An optional `REQUIRED_CHANGES:` list in the order names globs the work must change: each one that no changed path
+matches prints `MISSING <glob>` and makes it a VIOLATION, and the last line ends with ` missing=n`. An order without
+the list gets the same output as before.
+
 The last line is the one to paste into the TASK REPORT. Exit 0 pass, 1 violation, 2 could not check.
 """
 import argparse
@@ -89,6 +93,7 @@ def main():
     if not scope or not forbidden:
         return cannot("SCOPE: / FORBIDDEN: has no `- item` line right below it (run gate_check.py --order)")
     scope, forbidden = [s for s in scope if s != "NONE"], [f for f in forbidden if f != "NONE"]
+    required = parse_list(text, "REQUIRED_CHANGES")
     base = a.base
     if not base:
         m = re.search(r"^\s*BASE_REF\s*=\s*(.*)$", text, re.M)
@@ -118,14 +123,16 @@ def main():
             hits.append(("FORBIDDEN", path, rule))
         elif not matches(path, scope_rx):
             hits.append(("OUTSIDE", path, ""))
+    count = sum(1 for hit in hits if hit[0] == "FORBIDDEN")
+    missing = [g for g in required or [] if g != "NONE" and not any(glob_regex(g).fullmatch(path) for path in changed)]
+    hits += [("MISSING", glob, "") for glob in missing]
     for kind, path, rule in hits[:a.max_lines]:
         print(f"{kind:9} {path}" + (f"  ({rule})" if rule else ""))
     if len(hits) > a.max_lines:
         print(f"... {len(hits) - a.max_lines} more")
-    count = sum(1 for hit in hits if hit[0] == "FORBIDDEN")
     print("STATES: " + " ".join(f"{state}={len(paths)}" for state, paths in states.items()))
     print(f"SCOPE_CHECK: {'VIOLATION' if hits else 'PASS'} base={merge_base[:10]} changed={len(changed)} "
-          f"forbidden={count} outside={len(hits) - count}")
+          f"forbidden={count} outside={len(hits) - count - len(missing)}" + ("" if required is None else f" missing={len(missing)}"))
     return 1 if hits else 0
 
 

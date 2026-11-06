@@ -9,7 +9,8 @@ evidence and the product is still the Director's job (docs/02, docs/07).
   --order    required fields filled in; SCOPE / FORBIDDEN are concrete path lists; acceptance rows are concrete;
              an optional `CHECKS:` list holds one `- AC-n: ["program", "arg"]` line (JSON array of strings) per AUTO
              criterion: the check the Director approves, locked by the dispatch hash. A Strict order with an AUTO
-             criterion and no check is noted
+             criterion and no check is noted. An optional `REQUIRED_CHANGES:` list (globs the work must change, read
+             by scope_check.py) must lie inside SCOPE and outside FORBIDDEN, or the order cannot be done
   --report   required fields filled in; RESULT in the vocabulary; PASS is refused with NOT_RUN tests or a scope violation
   --verdict  verdict and next step in the vocabulary; status split by aspect; stop state written
   --match REPORT ORDER
@@ -306,6 +307,7 @@ def check_order(text, notes):
             problems.append(f"GOVERNANCE: must be one of {', '.join(GOVERNANCE)}")
     check_paths("SCOPE", text, problems)
     check_paths("FORBIDDEN", text, problems)
+    required_changes(text, problems)
     rows = ac_table(text, problems)
     if not rows:
         problems.append("acceptance: no AC-<n> row")
@@ -424,6 +426,27 @@ def check_head(text, problems, notes, strict=False):
     if value is not None and not SHA.fullmatch(value):
         (problems if strict else notes).append(f"HEAD: {value or 'empty'} is not a commit hash (7 to 40 hex digits)")
     return value
+
+
+def required_changes(text, problems):
+    """An optional REQUIRED_CHANGES list must be concrete and lie inside SCOPE and outside FORBIDDEN."""
+    required = parse_list(text, "REQUIRED_CHANGES")
+    if required is None:
+        return
+    check_paths("REQUIRED_CHANGES", text, problems)
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("scope_check", pathlib.Path(__file__).resolve().parent / "scope_check.py")
+    scope_check = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(scope_check)
+    scope = [scope_check.glob_regex(g) for g in parse_list(text, "SCOPE") or [] if g != "NONE"]
+    forbidden = [(g, scope_check.glob_regex(g)) for g in parse_list(text, "FORBIDDEN") or [] if g != "NONE"]
+    for item in required:
+        path = item.replace("\\", "/").lstrip("/")
+        rule = next((g for g, rx in forbidden if rx.fullmatch(path)), None)
+        if rule:
+            problems.append(f"REQUIRED_CHANGES: {item} is FORBIDDEN ({rule}); the order cannot be done")
+        elif item != "NONE" and not any(rx.fullmatch(path) for rx in scope):
+            problems.append(f"REQUIRED_CHANGES: {item} is outside SCOPE; the order cannot be done")
 
 
 def evidence_module():

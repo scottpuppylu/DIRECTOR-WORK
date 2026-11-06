@@ -147,7 +147,8 @@ python -I -X utf8 scope_check.py --order <WO.md> --base <ref>        # 取代工
 
 - 改動＝和 BASE_REF 的 merge base 比（已提交、已暫存、未暫存都算），再加上沒被 git 忽略的新檔案。在 worktree 裡也能用。
 - 看不到被 git 忽略的檔案和 repo 外的檔案。
-- 最後一行貼進 TASK REPORT。exit 0 通過、1 越界、2 沒辦法檢查（`NOT_RUN`，包括 SCOPE / FORBIDDEN 下一行不是 `- 項目`）。
+- 工單有 `REQUIRED_CHANGES:` 清單時，每一條 glob 都要對到至少一個改動的檔案；沒對到的印 `MISSING   <glob>`，結果是 VIOLATION，最後一行多一個 ` missing=n`。沒有這個清單，輸出和以前一樣。`gate_check.py --order` 另外查每一條都在 SCOPE 裡、不在 FORBIDDEN 裡，否則這張工單做不到。
+- 最後一行貼進 TASK REPORT。exit 0 通過、1 越界或缺必要改動、2 沒辦法檢查（`NOT_RUN`，包括 SCOPE / FORBIDDEN 下一行不是 `- 項目`）。
 
 ## evidence_record.py
 

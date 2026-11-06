@@ -127,6 +127,11 @@ def test_gate(tmp):
     gate(tmp, "order_noscope", "order", ORDER.format(base="abc123").replace("SCOPE:", "NOTES:"), 1, "SCOPE: missing")
     gate(tmp, "order_ac", "order", ORDER.format(base="abc123").replace("run test_parser", ""), 1, "how verified")
     gate(tmp, "order_gov", "order", ORDER.format(base="abc123").replace("Standard", "Loose"), 1, "GOVERNANCE")
+    # v0.13: optional REQUIRED_CHANGES must lie inside SCOPE and outside FORBIDDEN
+    required = lambda item: ORDER.format(base="abc123").replace("- src/frozen/**\n", "- src/frozen/**\nREQUIRED_CHANGES:\n- " + item + "\n")
+    gate(tmp, "order_required_ok", "order", required("src/parser.py"), 0)
+    gate(tmp, "order_required_forbidden", "order", required("src/frozen/b.py"), 1, "is FORBIDDEN")
+    gate(tmp, "order_required_outside", "order", required("docs/x.md"), 1, "outside SCOPE")
     gate(tmp, "report_ok", "report", REPORT.format(**good_report), 0)
     done_line = "DONE: parser fix, evidence e.json"
     gate(tmp, "report_code_span", "report", REPORT.format(**good_report).replace(done_line, done_line + ", ids are `AC-<n>`, mail <a@b.example>"), 0)
@@ -919,6 +924,14 @@ def test_scope(tmp):
     (repo / "src" / "frozen" / "new.py").write_text("x", encoding="utf-8")
     expect("untracked-only forbidden file", "scope_check.py", 1, *check, says=["untracked=1", "forbidden=1"])
     (repo / "src" / "frozen" / "new.py").unlink()
+
+    # v0.13: optional REQUIRED_CHANGES; the changes now are src/a.py and .config/app.json
+    expect("no REQUIRED_CHANGES keeps the old last line", "scope_check.py", 0, *check, says="outside=0", lacks="missing=")
+    for name, item, code, says in (("required file not changed", "src/parser.py", 1, ["MISSING   src/parser.py", "VIOLATION", "outside=0 missing=1"]),
+                                   ("required file changed", "src/a.py", 0, ["PASS", "missing=0"])):
+        wanted = tmp / f"{name}.md"
+        wanted.write_text(ORDER.format(base=base).replace("- src/frozen/**\n", "- src/frozen/**\nREQUIRED_CHANGES:\n- " + item + "\n"), encoding="utf-8")
+        expect(name, "scope_check.py", code, "--order", wanted, "--repo", repo, says=says)
 
 
 def test_shared_code():
