@@ -1467,6 +1467,43 @@ def test_hook_rules(tmp):
                  shell(r"Get-Content tools\guard_rules.json | Select-Object -First 5"), bash("sed -i s/a/b/ notes.md")):
         for profile in ("worker", "director"):
             check(f"G00 shell read {call['tool_input']['command']!r}", call, profile, "silent")
+    # batch 2 commit 1: a { } next to the > no longer hides the redirect (probe miss on e6a9959)
+    for call in (bash("echo {}>tools/guard_rules.json"), bash("echo {} >tools/guard_rules.json"), bash("echo a{}>tools/guard_rules.json"),
+                 bash("{ echo x; }>tools/hook_guard.py"), bash("echo }>>tools/hook_guard.py"), bash("(echo x)>tools/guard_rules.json"),
+                 bash("echo x >&tools/guard_rules.json"), shell("@{}>tools/guard_rules.json")):
+        check(f"G00 brace redirect {call['tool_input']['command']!r}", call, "worker", "deny:G00")
+        check(f"G00 brace redirect {call['tool_input']['command']!r}", call, "director", "ask:G00")
+    # (a quoted "{}>tools/guard_rules.json" stays G00 as on e6a9959: the parsed word holds > and names the file)
+    for call in (bash("echo {}>/tmp/x.json"), bash("jq '{}' tools/guard_rules.json > /tmp/out.json")):
+        for profile in ("worker", "director"):
+            check(f"G00 brace not a write {call['tool_input']['command']!r}", call, profile, "silent")
+    # G40 shell_write: writing a settings or CLAUDE.md file from the shell is G40 like Write / Edit
+    for call in (bash("sed -i s/a/b/ .claude/settings.local.json"), bash("echo x > CLAUDE.md"), bash("echo x>>CLAUDE.local.md"),
+                 bash("cp a.json ~/.claude/settings.json"), bash("tee .mcp.json < x"), bash("echo {}>.claude/settings.json"),
+                 bash("touch .claude/settings.json"), bash("cp new/settings.json ~/.claude/"), bash("echo x > ~/.claude.json"),
+                 shell("Set-Content ~/.claude.json x"), shell(r"Copy-Item a -Destination .claude\settings.json"),
+                 shell(r"[IO.File]::WriteAllText('.claude\settings.json', 'x')"), shell(r"'x' | Out-File D:\proj\CLAUDE.md")):
+        check(f"G40 shell write {call['tool_input']['command']!r}", call, "worker", "deny:G40")
+        check(f"G40 shell write {call['tool_input']['command']!r}", call, "director", "ask:G40")
+    for call in (bash("cat CLAUDE.md"), bash("grep x .claude/settings.json"), bash("cp CLAUDE.md /tmp/backup.md"),
+                 bash("echo x > ~/.claude/projects/p/memory/note.md"), bash("echo x > ~/.claude/plans/plan.md"),
+                 bash("echo x > docs/settings.md"), bash("sed -n 1p CLAUDE.md > /tmp/c.txt"), bash("echo CLAUDE.md > list.txt"),
+                 shell(r"Copy-Item .claude\settings.json -Destination backup\settings.json")):
+        for profile in ("worker", "director"):
+            check(f"G40 shell not a write {call['tool_input']['command']!r}", call, profile, "silent")
+    # Monitor runs a shell command (hooks see it since Claude Code 2.1.314): checked as Bash; no string command is silent
+    monitor = lambda **kw: tool("Monitor", description="watch", **kw)
+    for call, worker, director in ((monitor(command="git push"), "deny:G02", "deny:G02"),
+                                   (monitor(command="cat .env"), "deny:G50", "deny:G50"),
+                                   (monitor(command="echo x > CLAUDE.md"), "deny:G40", "ask:G40"),
+                                   (monitor(command="echo {}>tools/guard_rules.json"), "deny:G00", "ask:G00"),
+                                   (monitor(command="tail -f log.txt"), "silent", "silent"),
+                                   (monitor(), "silent", "silent"), (monitor(command=["git", "push"]), "silent", "silent"),
+                                   (monitor(command=None), "silent", "silent"), (monitor(command=42), "silent", "silent"),
+                                   ({"tool_name": "Monitor", "tool_input": "git push"}, "silent", "silent"),
+                                   (tool("OtherTool", command="rm -rf x"), "silent", "silent")):
+        check(f"Monitor {json.dumps(call['tool_input'])}", call, "worker", worker)
+        check(f"Monitor {json.dumps(call['tool_input'])}", call, "director", director)
     # 3: the gh token file on Windows (%APPDATA%/GitHub CLI) is a credential file like ~/.config/gh/hosts.yml
     gh_win = f"{home}/AppData/Roaming/GitHub CLI"
     gh_calls = [tool("Read", file_path=f"{gh_win}/hosts.yml"), tool("Grep", pattern="oauth", path=gh_win),
@@ -1590,6 +1627,7 @@ def test_hook_rules(tmp):
               "unknown kind": json.dumps({**rules, "rules": [{**rules["rules"][0], "match": {"kind": "url", "cmd": ["x"]}}]}),
               "bad cmd regex": json.dumps({**rules, "rules": [{**rules["rules"][0], "match": {"kind": "shell", "cmd": ["git("]}}]}),
               "bare not a bool": json.dumps({**rules, "rules": [{**rules["rules"][0], "match": {"kind": "shell", "cmd": ["env"], "bare": "yes"}}]}),
+              "shell_write not a bool": json.dumps({**rules, "rules": [{**rules["rules"][0], "match": {"kind": "path", "tools": ["Write"], "globs": ["**/x"], "shell_write": 1}}]}),
               "path_args not globs": json.dumps({**rules, "rules": [{**rules["rules"][0], "match": {"kind": "shell", "cmd": ["cat"], "path_args": ".env"}}]}),
               "bad arg_search": json.dumps({**rules, "rules": [{**rules["rules"][0], "match": {"kind": "shell", "cmd": ["echo"], "arg_search": ["[$"]}}]})}
     for name, text in broken.items():

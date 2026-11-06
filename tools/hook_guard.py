@@ -291,6 +291,7 @@ PROFILES = ("worker", "director")
 DECISIONS = ("deny", "ask", "none")
 KINDS = {"shell": ("cmd",), "path": ("tools", "globs"), "mcp": ("words",)}
 WRITE_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
+SHELL_TOOLS = ("Bash", "PowerShell", "Monitor")  # Monitor runs a shell command; checked as Bash
 PATH_FIELDS = ("file_path", "notebook_path", "path")
 PATTERN_FIELDS = {"Grep": "glob", "Glob": "pattern"}  # a file pattern under the search path, checked like a path
 OPTS_WITH_VALUE = {"git": GIT_OPTS_WITH_VALUE, "gh": {"-R", "--repo"}, "aws": {"--profile", "--region", "--output", "--endpoint-url"},
@@ -336,8 +337,9 @@ def rule_problems(rule, seen):
         out += [f"{rid}: match {m['kind']} needs a list {key}" for key in KINDS[m["kind"]] if not string_list(m.get(key))]
         if "args" in m and not (isinstance(m["args"], list) and all(string_list(alts) for alts in m["args"])):
             out.append(f"{rid}: args must be a list of word lists")
-        if "bare" in m and not isinstance(m["bare"], bool):
-            out.append(f"{rid}: bare must be true or false")
+        for key in ("bare", "shell_write"):
+            if key in m and not isinstance(m[key], bool):
+                out.append(f"{rid}: {key} must be true or false")
         for key in ("path_args", "path_except"):
             if key in m and not string_list(m[key], empty=key == "path_except"):
                 out.append(f"{rid}: {key} must be a list of globs")
@@ -414,11 +416,12 @@ def pause_state(flag):
 FD_DUP = re.compile(r"[\d*]?>&(\d+|-)")  # 2>&1, *>&1, >&2, 3>&-: joins or closes a stream, writes no file
 
 
-def has_redirect(command, shell="bash"):
-    """True when the line sends output to a file: an unquoted > / >> / &> / >| / >(...), also inside $(...) or `...`
-    in double quotes. Stream joins such as 2>&1 do not count."""
+def redirect_targets(command, shell="bash"):
+    """The file words of the line's output redirects (> >> &> >| *>), quotes removed, also inside $(...) or `...` in
+    double quotes; "" for a > with no file word, such as >(...). Read from the raw line, so { } ( ) next to the >
+    cannot hide it (echo {}>file). Stream joins such as 2>&1 are not redirects."""
     quotes, esc = SHELLS[shell]
-    quote, i = None, 0
+    out, quote, i = [], None, 0
     while i < len(command):
         c = command[i]
         if quote == "'":
@@ -430,8 +433,7 @@ def has_redirect(command, shell="bash"):
                 i += 1
             elif shell != "cmd" and (c == "`" and shell == "bash" or command.startswith("$(", i)):
                 end = matching_end(command, i + (c == "$"))
-                if has_redirect(command[i + 2 - (c == "`"):end - 1], shell):
-                    return True
+                out += redirect_targets(command[i + 2 - (c == "`"):end - 1], shell)
                 i = end
                 continue
         elif c in quotes:
@@ -440,12 +442,51 @@ def has_redirect(command, shell="bash"):
             i += 1
         elif c == ">":
             dup = FD_DUP.match(command, i - 1 if i and command[i - 1] in "0123456789*" else i)
-            if not dup or dup.end() <= i:
-                return True
-            i = dup.end()
+            if dup and dup.end() > i:
+                i = dup.end()
+                continue
+            i += 1
+            while i < len(command) and command[i] in ">|&":  # >> >| >&file
+                i += 1
+            word, i = target_word(command, i, shell)
+            out.append(word)
             continue
         i += 1
-    return False
+    return out
+
+
+def target_word(command, i, shell):
+    """(word, end) of the redirect target that starts at i, after blanks, quotes removed; ("", i) when a separator
+    or ( comes first."""
+    quotes, esc = SHELLS[shell]
+    while i < len(command) and command[i] in " \t":
+        i += 1
+    word, quote = "", None
+    while i < len(command):
+        c, nxt = command[i], command[i + 1:i + 2]
+        if quote:
+            if c == quote:
+                quote = None
+            elif c == esc and quote == '"' and nxt in ('"', esc):
+                word, i = word + nxt, i + 1
+            else:
+                word += c
+        elif c in quotes:
+            quote = c
+        elif c == esc and nxt and (shell != "bash" or nxt in " \t'\"\\;|&<>()"):
+            word, i = word + nxt, i + 1
+        elif c in " \t\r\n;|&<>()":
+            break
+        else:
+            word += c
+        i += 1
+    return word, i
+
+
+def has_redirect(command, shell="bash"):
+    """True when the line sends output to a file: an unquoted > / >> / &> / >| / >(...), also inside $(...) or `...`
+    in double quotes. Stream joins such as 2>&1 do not count."""
+    return bool(redirect_targets(command, shell))
 
 
 def redirect_word(word):
@@ -472,14 +513,17 @@ def writes_file(name, rest):
     return name == "git" and positional("git", rest)[:1] in [[w] for w in GIT_WRITES]
 
 
-def self_write(commands, names):
+def self_write(commands, names, targets=()):
     """True when a command writes a guarded file (named by file name in any word): a write verb that names it, a >
     whose target names it, or a .NET write call ([IO.File]::WriteAllText) on a line that names it. A > with no target
-    in its command (>| splits there) counts when the line names the file."""
+    in its command (>| splits there) counts when the line names the file. targets: redirect_targets of the raw line,
+    which still sees the > of echo {}>file after { } split the parsed words."""
     named = lambda words: any(n in w.lower() for n in names for w in words)
     line_named = any(named([n] + list(r)) for n, r in commands)
     if line_named and any(DOTNET_WRITE.search(n) for n, _ in commands):
         return True  # the ( of the call splits it from its path
+    if any(named([t]) if t else line_named for t in targets):
+        return True
     for name, rest in commands:
         words = [name] + list(rest)
         if named(words) and writes_file(name, rest):
@@ -490,6 +534,45 @@ def self_write(commands, names):
                 if named([target]) if target is not None else line_named:
                     return True
     return False
+
+
+COPY_VERBS = {"cp", "copy", "copy-item", "cpi", "install", "ln", "scp", "xcopy", "robocopy", "rsync"}  # write only the destination
+
+
+def written_words(name, rest, cwd):
+    """The words a write verb writes to: for a copy, its destination (joined with each source's name when it is a
+    folder); for the others, every non-option word."""
+    words = [a for a in rest if not a.startswith("-")]
+    if name not in COPY_VERBS:
+        return words
+    lower = [a.lower() for a in rest]
+    flag = next((k for k, a in enumerate(lower) if a in ("-destination", "-t", "--target-directory")), None)
+    if flag is not None and flag + 1 < len(rest):
+        dest = rest[flag + 1]
+        sources = [w for w in words if w != dest]
+    elif words:
+        dest, sources = words[-1], words[:-1]
+    else:
+        return []
+    if dest.endswith(("/", "\\")) or os.path.isdir(arg_path(dest, cwd)):
+        base = dest.rstrip("/\\")
+        return [dest] + [base + "/" + re.split(r"[/\\]", s.rstrip("/\\"))[-1] for s in sources]
+    return [dest]
+
+
+LINE_WORD = re.compile(r"""'([^']*)'|"([^"]*)"|([^\s'"(),;|&<>]+)""")
+
+
+def shell_write_match(m, commands, targets, cwd, home, line=""):
+    """A path rule's globs read as files a shell line writes: a write verb's destination, a > target, or a .NET write
+    call on a line that names a matching path (read from the raw line: the ( of the call splits the path off)."""
+    def hit(word):
+        return bool(word) and globs_match(m["globs"], m.get("except", []), arg_path(word, cwd), home)
+    if any(hit(t) for t in targets):
+        return True
+    if DOTNET_WRITE.search(line) and any(hit("".join(w)) for w in LINE_WORD.findall(line)):
+        return True
+    return any(writes_file(n, r) and any(hit(w) for w in written_words(n, r, cwd)) for n, r in commands)
 
 
 def pause_allows(data, profile, call):
@@ -658,9 +741,12 @@ def decide(data, profile, call, rules_path):
     tool_input = call.get("tool_input") if isinstance(call.get("tool_input"), dict) else {}
     cwd = call.get("cwd") if isinstance(call.get("cwd"), str) else None
     command = tool_input.get("command")
+    # Monitor's command goes through PreToolUse hooks since Claude Code 2.1.314 (input field NOT_VERIFIED: command)
+    shell_call = tool in SHELL_TOOLS and isinstance(command, str)
+    shell = "powershell" if tool == "PowerShell" else "bash"
     # 2>&1 is dropped first: its & would otherwise split the line and leave "2>" looking like a redirect
-    commands = (list(simple_commands(FD_DUP.sub(" ", command), "powershell" if tool == "PowerShell" else "bash"))
-                if tool in ("Bash", "PowerShell") and isinstance(command, str) else [])
+    commands = list(simple_commands(FD_DUP.sub(" ", command), shell)) if shell_call else []
+    line_targets = redirect_targets(command, shell) if shell_call else []
     value = next((tool_input[f] for f in PATH_FIELDS if isinstance(tool_input.get(f), str) and tool_input[f]), None)
     target = rule_path(value, cwd) if value else None
     pattern = tool_input.get(PATTERN_FIELDS.get(tool, ""))
@@ -673,7 +759,7 @@ def decide(data, profile, call, rules_path):
     own = pathlib.Path(__file__)
     guarded = {rule_path(str(rules_path), None), rule_path(str(own), None), rule_path(str(own.with_name("guard_rules.json")), None)}
     names = {pathlib.Path(str(rules_path)).name.lower(), "guard_rules.json", own.name.lower()}
-    if tool in WRITE_TOOLS and target in guarded or self_write(commands, names):
+    if tool in WRITE_TOOLS and target in guarded or self_write(commands, names, line_targets):
         hits.append((SELF_RULE["decision"][profile], "G00", SELF_RULE["reason"]))
     for rule in data["rules"]:
         decision = rule["decision"][profile]
@@ -682,6 +768,7 @@ def decide(data, profile, call, rules_path):
         for m in as_list(rule["match"]):
             if (m["kind"] == "shell" and any(shell_match(m, n, r, cwd, home) for n, r in commands)
                     or m["kind"] == "path" and path_match(m, tool, targets, home)
+                    or m["kind"] == "path" and m.get("shell_write") and shell_write_match(m, commands, line_targets, cwd, home, command if shell_call else "")
                     or m["kind"] == "mcp" and mcp_match(m, action, read_only)):
                 hits.append((decision, rule["id"], rule["reason"]))
                 break
