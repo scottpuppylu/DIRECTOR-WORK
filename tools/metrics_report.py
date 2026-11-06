@@ -12,8 +12,10 @@ Where each number comes from (every *.md under DIRECTOR is searched):
   額度用量           not read here: run usage_report.py
 and the spec review cost: DIRECTOR_LOG lines `SPEC_REVIEW ... tokens=N issues=... adopted=N`.
 
-A number whose source file is missing prints UNKNOWN, never 0. --since drops log lines, verdicts and orders dated
-before the day; PO_PENDING entries carry no date and are always all counted. Exit 0, or 1 when DIRECTOR is missing.
+A number with nothing to count from prints UNKNOWN, never 0: no verdict, no order, no RESUMED line, or a missing
+source file. --since drops log lines, verdicts and orders dated before the day; PO_PENDING entries carry no date and
+are always all counted. Files that look like orders (WO-*.md, or under a folder named orders) but were not counted
+are listed by name at the end, with the reason. Exit 0, or 1 when DIRECTOR is missing.
 """
 import argparse
 import importlib.util
@@ -28,15 +30,29 @@ spec.loader.exec_module(gate)  # reuse its date and section parsing; `python -I`
 SENT_BACK = ("CONTINUE_SAME_WORKER", "SWITCH_TO_OTHER_WORKER")
 
 
-def documents(folder, marker, kind, since):
-    """(path, text) of the .md files holding marker, dated on or after since (undated files are kept)."""
+def documents(folder, marker, kind, since, dropped=None, undated=None):
+    """(path, text) of the .md files holding marker, dated on or after since (undated files are kept).
+    dropped / undated, when given, collect the paths left out by since and the paths kept with no date."""
     found = []
     for path in sorted(pathlib.Path(folder).rglob("*.md")):
         text = path.read_text(encoding="utf-8-sig")
+        if not re.search(marker, text, re.M):
+            continue
         day = gate.dated(kind, text) if since else None
-        if re.search(marker, text, re.M) and not (day and day < since):
-            found.append((path, text))
+        if day and day < since:
+            if dropped is not None:
+                dropped.append(path)
+            continue
+        if since and not day and undated is not None:
+            undated.append(path)
+        found.append((path, text))
     return found
+
+
+def order_like(root):
+    """.md files named WO-* or kept under a folder named orders: what a reader would count as work orders."""
+    return [path for path in sorted(root.rglob("*.md"))
+            if path.name.upper().startswith("WO-") or "orders" in (p.name.lower() for p in path.relative_to(root).parents)]
 
 
 def next_step(text):
@@ -68,14 +84,15 @@ def main():
     verdicts = [(path, text) for path, text in documents(root, r"^##\s*A\b", "verdict", a.since) if next_step(text)]
     steps = [next_step(text) for _, text in verdicts]
     back = {word: steps.count(word) for word in SENT_BACK}
-    orders = documents(root, r"^\s*ISSUED_BY\s*=", "order", a.since)
+    dropped, undated = [], []
+    orders = documents(root, r"^\s*ISSUED_BY\s*=", "order", a.since, dropped, undated)
     revised = [int(m.group(1)) - 1 for _, text in orders
                for m in [re.search(r"^[ \t]*REVISION[ \t]*=[ \t]*(\d+)", text, re.M)] if m and int(m.group(1)) > 1]
-    if verdicts or orders:
-        rework = (f"{sum(back.values())}（{'、'.join(f'{k} {v}' for k, v in back.items())}）；"
-                  f"工單改版 {sum(revised)} 次（{len(revised)} 份工單）")
-    else:
-        rework = "UNKNOWN：找不到裁決或工單"
+    rework = (f"{sum(back.values())}（{'、'.join(f'{k} {v}' for k, v in back.items())}）" if verdicts
+              else "UNKNOWN：找不到裁決") + "；" + (
+              f"工單改版 {sum(revised)} 次（{len(revised)} 份工單）" if orders else "工單改版 UNKNOWN：找不到工單")
+    counted = {path for path, _ in orders} | set(dropped)
+    skipped = [path for path in order_like(root) if path not in counted]
 
     if log is None:
         lost = stuck = "UNKNOWN：沒有 DIRECTOR_LOG.md"
@@ -84,7 +101,8 @@ def main():
         resumed = [line for line in log if re.search(r"\bRESUMED\b", line)]
         redo = [m.group(1) for line in resumed for m in [re.search(r"\bredo=([^;|]*)", line)] if m]
         lost_count = sum(1 for value in redo if value.strip().upper() not in ("NONE", ""))
-        lost = f"{lost_count} / 恢復 {len(resumed)} 次" + (f"；{len(resumed) - len(redo)} 次沒寫 redo=" if len(redo) < len(resumed) else "")
+        lost = (f"{lost_count} / 恢復 {len(resumed)} 次" + (f"；{len(resumed) - len(redo)} 次沒寫 redo=" if len(redo) < len(resumed) else "")
+                if resumed else "UNKNOWN：DIRECTOR_LOG 沒有 RESUMED 行（沒中斷過，或沒記）")
         stuck = str(sum(1 for line in log if "BOOTSTRAP_STUCK" in line))
         reviews = [line for line in log if re.search(r"\bSPEC_REVIEW\b.*\btokens=", line)]
 
@@ -107,6 +125,12 @@ def main():
     tokens, adopted = numbers("tokens"), numbers("adopted")
     print(f"\n## 規格審查\n\n{len(reviews)} 次" + (f"，tokens 合計 {sum(tokens)}，採用的問題 {sum(adopted)} 個" if reviews else "")
           + ("" if len(tokens) == len(reviews) == len(adopted) else "；有幾行少了 tokens= 或 adopted="))
+    names = lambda paths: "、".join(str(path.relative_to(root)) for path in paths)
+    print("\n## 沒計入的檔案\n")
+    print(f"- 像工單但沒有 `ISSUED_BY =` 行，返工和改版都沒算到：{len(skipped)} 份" + (f"：{names(skipped)}" if skipped else ""))
+    if a.since:
+        print(f"- 工單日期在 {a.since} 之前，照 --since 略過：{len(dropped)} 份" + (f"：{names(dropped)}" if dropped else ""))
+        print(f"- 工單沒有日期，照算：{len(undated)} 份" + (f"：{names([p for p in undated])}" if undated else ""))
     return 0
 
 

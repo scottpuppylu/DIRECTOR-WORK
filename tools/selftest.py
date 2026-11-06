@@ -445,18 +445,28 @@ def test_metrics(tmp):
         "2026-01-02 12:00 +08:00 | SPEC_REVIEW WO-001 tokens=1200 issues=0/1/2 adopted=2\n", encoding="utf-8")
     (root / "PO_PENDING.md").write_text("ID: OD-1\nSTATUS: open\n\nID: OD-2\nSTATUS: closed\n\nID: ACT-1\nSTATUS: answered\n",
                                         encoding="utf-8")
+    (root / "orders" / "WO-009-old.md").write_text("# WO-009 old style\nGOVERNANCE = Strict\n", encoding="utf-8")
+    (root / "orders" / "WO-010.md").write_text(typed.replace("# WO-001", "# WO-010").replace("ISSUED_BY      = director 2026-01-02 10:00",
+                                                                                            "ISSUED_BY      = director"), encoding="utf-8")
     expect("metrics counts", "metrics_report.py", 0, "--director", root,
-           says=["| 返工次數 | 1（CONTINUE_SAME_WORKER 1、SWITCH_TO_OTHER_WORKER 0）；工單改版 2 次（1 份工單） | 裁決 2 份、工單 2 份 |",
+           says=["| 返工次數 | 1（CONTINUE_SAME_WORKER 1、SWITCH_TO_OTHER_WORKER 0）；工單改版 2 次（1 份工單） | 裁決 2 份、工單 3 份 |",
+                 "- 像工單但沒有 `ISSUED_BY =` 行，返工和改版都沒算到：1 份：" + str(pathlib.Path("orders", "WO-009-old.md")),
                  "| 中斷後遺失的工作 | 1 / 恢復 3 次；1 次沒寫 redo= |", "| PO 介入次數 | 3（OD 2、ACT 1），還在等 PO 1 |",
                  "| 新專案導入卡住 | 1 |", "1 次，tokens 合計 1200，採用的問題 2 個", "UNKNOWN：跑 `usage_report.py`"])
     expect("metrics --since drops older lines", "metrics_report.py", 0, "--director", root, "--since", "2026-01-01",
            says=["| 中斷後遺失的工作 | 1 / 恢復 2 次 |", "範圍：2026-01-01 起"])
     expect("metrics --since drops older orders", "metrics_report.py", 0, "--director", root, "--since", "2026-01-05",
-           says=["工單改版 0 次（0 份工單）", "| 新專案導入卡住 | 0 |", "0 次"])
+           says=["工單改版 0 次（0 份工單）", "| 新專案導入卡住 | 0 |", "0 次", "| 中斷後遺失的工作 | UNKNOWN：DIRECTOR_LOG 沒有 RESUMED 行",
+                 "照 --since 略過：2 份", "- 工單沒有日期，照算：1 份"])
+    no_verdict = tmp / "metrics" / "no_verdict"
+    shutil.copytree(root / "orders", no_verdict / "orders")
+    expect("metrics with orders but no verdict says UNKNOWN, not 0", "metrics_report.py", 0, "--director", no_verdict,
+           says="| 返工次數 | UNKNOWN：找不到裁決；工單改版 2 次（1 份工單） | 裁決 0 份、工單 3 份 |", lacks="| 返工次數 | 0")
     empty = tmp / "metrics" / "empty"
     empty.mkdir()
     expect("metrics with nothing recorded", "metrics_report.py", 0, "--director", empty,
-           says=["UNKNOWN：找不到裁決或工單", "UNKNOWN：沒有 DIRECTOR_LOG.md", "UNKNOWN：沒有 PO_PENDING.md"], lacks="| 0 |")
+           says=["UNKNOWN：找不到裁決；工單改版 UNKNOWN：找不到工單", "UNKNOWN：沒有 DIRECTOR_LOG.md", "UNKNOWN：沒有 PO_PENDING.md",
+                 "沒有 `ISSUED_BY =` 行，返工和改版都沒算到：0 份"], lacks="| 0 |")
     expect("metrics bad --since", "metrics_report.py", 2, "--director", root, "--since", "Jan 1")
     expect("metrics missing folder", "metrics_report.py", 1, "--director", tmp / "metrics" / "nope", says="folder not found")
 
@@ -474,6 +484,9 @@ def test_trace(tmp):
     (root / "reports" / "stray.md").write_text(REPORT.format(result="PASS", tests="t", scope="PASS", evidence="e"), encoding="utf-8")
     (root / "reviews" / "v1.md").write_text(VERDICT.format(verdict="PASS_WITH_WARNINGS", step="ACCEPT_AND_CLOSE")
                                             .replace("# GATE VERDICT", "# GATE VERDICT WO-001"), encoding="utf-8")
+    (root / "orders" / "WO-004-old.md").write_text("# WO-004 old style\nGOVERNANCE = Strict\n", encoding="utf-8")
+    (root / "reports" / "notes.md").write_text("# notes\n", encoding="utf-8")
+    (root / "reviews" / "draft.md").write_text("# draft verdict\n", encoding="utf-8")
     config = root / "director_work.json"
     config.write_text(json.dumps({"schema_version": 1, "trace_id_pattern": r"^(DD|OD)-\d+$"}), encoding="utf-8")
     base = ("--orders", root / "orders", "--reports", root / "reports")
@@ -481,7 +494,10 @@ def test_trace(tmp):
            says=["| DD-1 | WO-001 | AC-2 | REVIEW | READY_FOR_REVIEW | out.txt | PASS_WITH_WARNINGS |",
                  "| DD-1 | WO-001 | AC-1 | AUTO | PASS | e.json | PASS_WITH_WARNINGS |",
                  "| REQ7 | WO-003 | AC-1 | AUTO | 沒有報告 |", "## 沒有 TRACES_TO 的工單\n- WO-002",
-                 "## 編號格式不符 trace_id_pattern\n- WO-003: REQ7", "stray.md"])
+                 "## 編號格式不符 trace_id_pattern\n- WO-003: REQ7", "stray.md", "沒計入的檔案 3 份，列在文末。",
+                 "工單資料夾裡沒有 `ISSUED_BY =` 行的檔案（沒算成工單）：1 份\n- ", "WO-004-old.md",
+                 "報告資料夾裡沒有 `TASK_ID` 行的檔案（沒算成報告）：1 份\n- ", "notes.md",
+                 "裁決資料夾裡沒有 `## A` 的檔案（沒算成裁決）：1 份\n- ", "draft.md"])
     expect("trace without a pattern accepts any ID", "trace_report.py", 0, *base, says="## 編號格式不符 trace_id_pattern\n- 無")
     expect("trace with a missing folder", "trace_report.py", 1, "--orders", root / "nope", "--reports", root / "reports",
            says="folder not found")
