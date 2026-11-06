@@ -17,6 +17,9 @@ CLAUDE_CODE_AUTO_COMPACT_WINDOW was confirmed to work. Both are written.
 Plugins: "enabledPlugins": {"name@marketplace": false} turns off a USER-installed plugin for this project only.
 Plugins that come from the desktop app / claude.ai: whether this setting turns them off is not tested.
 --hooks also adds a PreToolUse hook that runs hook_guard.py (next to this file) before every Bash / PowerShell call.
+--protect-director DIR makes that hook also cover Write / Edit with --protect DIR (no edits to DIR/orders/** and
+DIR/DIRECTOR_LOG.md); the worktree named by --director-worktree keeps the plain hook. An installed hook_guard entry
+that differs from the wanted one shows MISSING (hooks.PreToolUse matcher), and --apply replaces it in place.
 """
 import argparse
 import datetime
@@ -24,6 +27,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -34,6 +38,14 @@ ENV_KEY = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
 GUARD = pathlib.Path(__file__).resolve().parent / "hook_guard.py"
 HOOK = {"matcher": "Bash|PowerShell", "hooks": [{"type": "command", "command":
         f'"{pathlib.Path(sys.executable).as_posix()}" -I -X utf8 "{GUARD.as_posix()}"'}]}
+
+
+def hook_entry(protect):
+    """The PreToolUse entry wanted: the plain HOOK, or one that also covers Write / Edit for a protected DIRECTOR."""
+    if not protect:
+        return HOOK
+    command = HOOK["hooks"][0]["command"] + f' --protect "{protect.as_posix()}"'
+    return {"matcher": "Bash|PowerShell|Write|Edit", "hooks": [{"type": "command", "command": command}]}
 
 
 def git(args, cwd):
@@ -59,13 +71,46 @@ def worktrees(repo):
             yield pathlib.Path(line[len("worktree "):].strip())
 
 
-def has_hook(data):
+def guard_entries(data):
     entries = (data.get("hooks") or {}).get("PreToolUse") or []
-    return any("hook_guard.py" in str(h.get("command", "")) for e in entries if isinstance(e, dict)
-               for h in e.get("hooks") or [] if isinstance(h, dict))
+    return [e for e in entries if isinstance(e, dict) and any(
+        isinstance(h, dict) and "hook_guard.py" in str(h.get("command", "")) for h in e.get("hooks") or [])]
 
 
-def wanted_missing(data, window, plugins_off, hooks=False):
+def has_hook(data):
+    return bool(guard_entries(data))
+
+
+def protect_arg(command):
+    found = re.search(r'--protect "([^"]*)"', command)
+    return found.group(1) if found else None
+
+
+def hook_entry_matches(entry, want):
+    """Same matcher and same --protect (or none) as want; the Python path may differ."""
+    commands = [str(h.get("command", "")) for h in entry.get("hooks") or [] if isinstance(h, dict)]
+    guard = [c for c in commands if "hook_guard.py" in c]
+    return (entry.get("matcher") == want["matcher"] and len(guard) == 1
+            and protect_arg(guard[0]) == protect_arg(want["hooks"][0]["command"]))
+
+
+def install_hook(data, want):
+    """Put want where the first hook_guard entry was (or at the end); drop other hook_guard hooks."""
+    entries = data.setdefault("hooks", {}).setdefault("PreToolUse", [])
+    at, kept = None, []
+    for e in entries:
+        if isinstance(e, dict) and e in guard_entries(data):
+            at = len(kept) if at is None else at
+            rest = [h for h in e.get("hooks") or [] if not (isinstance(h, dict) and "hook_guard.py" in str(h.get("command", "")))]
+            if rest:
+                kept.append(dict(e, hooks=rest))
+        else:
+            kept.append(e)
+    kept.insert(len(kept) if at is None else at, want)
+    data["hooks"]["PreToolUse"] = kept
+
+
+def wanted_missing(data, window, plugins_off, hooks=False, want=None):
     miss = []
     if data.get("autoCompactWindow") != window:
         miss.append("autoCompactWindow")
@@ -75,6 +120,8 @@ def wanted_missing(data, window, plugins_off, hooks=False):
     miss += [f"enabledPlugins.{p}" for p in plugins_off if ep.get(p) is not False]
     if hooks and not has_hook(data):
         miss.append("hooks.PreToolUse")
+    elif hooks and want is not None and not any(hook_entry_matches(e, want) for e in guard_entries(data)):
+        miss.append("hooks.PreToolUse matcher")
     return miss
 
 
@@ -86,6 +133,9 @@ def main():
     ap.add_argument("--config", help="director_work.json (default: <repo>/, <repo>/DIRECTOR/, <repo>/../DIRECTOR/)")
     ap.add_argument("--backup-dir", help="where to copy existing files before writing (default: <git common dir>/director-settings-backup)")
     ap.add_argument("--hooks", action="store_true", help='also add the hook_guard.py PreToolUse hook (config: "hooks": true)')
+    ap.add_argument("--protect-director", help="DIRECTOR folder: the hook also blocks Write / Edit on its orders/ and "
+                    "DIRECTOR_LOG.md (implies --hooks; config: protect_director)")
+    ap.add_argument("--director-worktree", help="the Director's own worktree, which keeps the plain hook (config: director_worktree)")
     ap.add_argument("--only-this", action="store_true", help="only the worktree given by --repo, not all worktrees")
     ap.add_argument("--skip", action="append", default=[], help="skip worktrees whose path contains this text (repeatable)")
     ap.add_argument("--apply", action="store_true", help="write; without it nothing is written")
@@ -111,7 +161,11 @@ def main():
     if bad_names:
         sys.exit(f"plugin names must be name@marketplace: {bad_names}")
     skip = a.skip + list(cfg.get("skip_worktrees", []))
-    hooks = a.hooks or cfg.get("hooks") is True
+    protect = a.protect_director or cfg.get("protect_director")
+    protect = pathlib.Path(protect).resolve() if protect else None
+    director_wt = a.director_worktree or cfg.get("director_worktree")
+    director_wt = pathlib.Path(director_wt).resolve() if director_wt else None
+    hooks = a.hooks or cfg.get("hooks") is True or protect is not None
 
     if a.backup_dir or cfg.get("backup_dir"):
         backup = pathlib.Path(a.backup_dir or cfg["backup_dir"])
@@ -120,7 +174,8 @@ def main():
         backup = (common if common.is_absolute() else repo / common).resolve() / "director-settings-backup"
 
     print(f"repo={repo} window={window} plugins_off={plugins_off or 'none'} config={cfg_path or 'none'} "
-          f"hooks={'on' if hooks else 'off'} mode={'APPLY' if a.apply else 'REPORT'}")
+          f"hooks={'on' if hooks else 'off'}{f' protect={protect.as_posix()}' if protect else ''} "
+          f"mode={'APPLY' if a.apply else 'REPORT'}")
     home = pathlib.Path.home().resolve()
     targets = [repo] if a.only_this else list(worktrees(repo))
     problems = 0
@@ -150,7 +205,9 @@ def main():
                   ".gitignore changes the repo and needs the PO)")
             problems += 1
             continue
-        miss = wanted_missing(data, window, plugins_off, hooks)
+        # without --protect-director any hook_guard entry counts, as in v0.12
+        want = None if protect is None else hook_entry(None if director_wt and wt.resolve() == director_wt else protect)
+        miss = wanted_missing(data, window, plugins_off, hooks, want)
         if not miss:
             print(f"OK          {wt}")
             continue
@@ -166,14 +223,14 @@ def main():
         data.setdefault("env", {})[ENV_KEY] = str(window)
         if plugins_off:
             data.setdefault("enabledPlugins", {}).update({p: False for p in plugins_off})
-        if hooks and not has_hook(data):
-            data.setdefault("hooks", {}).setdefault("PreToolUse", []).append(HOOK)
+        if hooks and any(m.startswith("hooks.PreToolUse") for m in miss):
+            install_hook(data, want or HOOK)
         path.parent.mkdir(exist_ok=True)
         tmp = path.with_name(path.name + ".tmp")
         with open(tmp, "w", encoding="utf-8", newline="\n") as fh:  # Path.write_text(newline=) needs 3.10
             fh.write(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
         os.replace(tmp, path)
-        again = wanted_missing(json.loads(path.read_text(encoding="utf-8")), window, plugins_off, hooks)
+        again = wanted_missing(json.loads(path.read_text(encoding="utf-8")), window, plugins_off, hooks, want)
         if again:
             print(f"FAIL        {wt} (still missing: {', '.join(again)})")
             problems += 1

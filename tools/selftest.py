@@ -5,6 +5,7 @@ Prints one line per failed case and a summary; exit 1 when anything fails. Write
 """
 import hashlib
 import json
+import os
 import pathlib
 import re
 import shutil
@@ -929,6 +930,101 @@ def test_shared_code():
         failures.append("parse_list differs between gate_check.py and scope_check.py; keep the two copies identical")
 
 
+def test_hook_protect(tmp):
+    """v0.13: --protect blocks Write / Edit on DIRECTOR/orders/** and DIRECTOR_LOG.md; setup migrates old entries."""
+    global total
+    director = tmp / "protect" / "DIRECTOR"
+    (director / "orders").mkdir(parents=True)
+    (director / "orders" / "WO-001-a.md").write_text("x\n", encoding="utf-8")
+    (director / "DIRECTOR_LOG.md").write_text("x\n", encoding="utf-8")
+    worker = tmp / "protect" / "worker"
+    worker.mkdir()
+
+    def guard(name, code, tool, file_path, protect=True, cwd=None):
+        global total
+        total += 1
+        call = {"tool_name": tool, "tool_input": {"file_path": str(file_path), "content": "y"}}
+        if cwd:
+            call["cwd"] = str(cwd)
+        args = ["--protect", str(director)] if protect else []
+        done = subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), *args], capture_output=True,
+                              encoding="utf-8", input=json.dumps(call))
+        if done.returncode != code:
+            failures.append(f"hook_guard protect {name}: expected exit {code}, got {done.returncode}: {done.stderr.strip()}")
+        elif code == 2 and ("BLOCKED" not in done.stderr or re.search(r"<[^>]*>", done.stderr)):
+            failures.append(f"hook_guard protect {name}: message {done.stderr.strip()!r}")
+
+    guard("Write to orders", 2, "Write", director / "orders" / "WO-002-new.md")
+    guard("Edit of DIRECTOR_LOG", 2, "Edit", director / "DIRECTOR_LOG.md")
+    guard("relative path from the hook cwd", 2, "Write", "../DIRECTOR/orders/WO-001-a.md", cwd=worker)
+    guard("backslashes", 2, "Edit", str(director / "orders" / "WO-001-a.md").replace("/", "\\"))
+    guard(".. detour", 2, "Write", director / "orders" / ".." / "orders" / "sub" / "x.md")
+    if os.name == "nt":
+        guard("other case on Windows", 2, "Edit", str(director / "ORDERS" / "wo-001-a.md").upper())
+    guard("other file in DIRECTOR", 0, "Write", director / "notes.md")
+    guard("folder named like orders", 0, "Write", director / "orders-old" / "x.md")
+    guard("worker file", 0, "Edit", worker / "src.py")
+    guard("without --protect", 0, "Write", director / "orders" / "WO-001-a.md", protect=False)
+    guard("Bash is still checked", 0, "Bash", director / "orders" / "WO-001-a.md")
+    total += 1
+    done = subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), "--protect", str(director)],
+                          capture_output=True, encoding="utf-8", input=json.dumps({"tool_name": "Bash", "tool_input": {"command": "git push"}}))
+    if done.returncode != 2:
+        failures.append(f"hook_guard --protect stopped checking Bash: exit {done.returncode}")
+    if os.name != "nt":
+        print("SKIP hook_guard junction and 8.3 cases: not Windows")
+    else:
+        link = tmp / "protect" / "dirlink"
+        made = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(director)], capture_output=True,
+                              encoding="utf-8", errors="replace")
+        if made.returncode != 0:
+            print(f"SKIP hook_guard junction case: mklink /J failed: {(made.stdout + made.stderr).strip()}")
+        else:
+            guard("junction to DIRECTOR", 2, "Write", link / "orders" / "WO-009.md")
+            os.rmdir(link)  # removes the junction only, not its target
+        import ctypes
+        buf = ctypes.create_unicode_buffer(32768)
+        longdir = tmp / "protect" / "Long Folder Name For Short"
+        longdir.mkdir()
+        (longdir / "orders").mkdir()
+        n = ctypes.windll.kernel32.GetShortPathNameW(str(longdir), buf, len(buf))
+        short = buf.value if n else str(longdir)
+        if os.path.normcase(short) == os.path.normcase(str(longdir)):
+            print("SKIP hook_guard 8.3 case: no short name on this volume (8.3 names are off)")
+        else:
+            total += 1
+            done = subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), "--protect", str(longdir)],
+                                  capture_output=True, encoding="utf-8",
+                                  input=json.dumps({"tool_name": "Write", "tool_input": {"file_path": short + "\\orders\\x.md"}}))
+            if done.returncode != 2:
+                failures.append(f"hook_guard protect 8.3 name {short}: expected exit 2, got {done.returncode}")
+
+    repo = tmp / "protect" / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    (repo / ".git" / "info" / "exclude").write_text(".claude/settings.local.json\n", encoding="utf-8")
+    setup = ("--repo", repo, "--only-this")
+    expect("plain hook installed", "setup_project_settings.py", 0, *setup, "--hooks", "--apply", says="SET")
+    expect("old entry is not enough once protected", "setup_project_settings.py", 1, *setup, "--protect-director", director,
+           says=["MISSING", "hooks.PreToolUse matcher"])
+    expect("protected entry replaces the old one", "setup_project_settings.py", 0, *setup, "--protect-director", director,
+           "--apply", says="SET")
+    expect("protected entry kept on rerun", "setup_project_settings.py", 0, *setup, "--protect-director", director, says="OK")
+    expect("plain --hooks accepts a protected entry (v0.12 rule)", "setup_project_settings.py", 0, *setup, "--hooks", says="OK")
+    entries = json.loads((repo / ".claude" / "settings.local.json").read_text(encoding="utf-8"))["hooks"]["PreToolUse"]
+    total += 1
+    if len(entries) != 1 or entries[0]["matcher"] != "Bash|PowerShell|Write|Edit" or "--protect" not in entries[0]["hooks"][0]["command"]:
+        failures.append(f"setup --protect-director: PreToolUse is {entries}")
+    expect("the Director's worktree wants the plain hook", "setup_project_settings.py", 1, *setup, "--protect-director", director,
+           "--director-worktree", repo, says="hooks.PreToolUse matcher")
+    expect("the Director's worktree gets the plain hook back", "setup_project_settings.py", 0, *setup, "--protect-director", director,
+           "--director-worktree", repo, "--apply", says="SET")
+    entries = json.loads((repo / ".claude" / "settings.local.json").read_text(encoding="utf-8"))["hooks"]["PreToolUse"]
+    total += 1
+    if len(entries) != 1 or entries[0]["matcher"] != "Bash|PowerShell" or "--protect" in entries[0]["hooks"][0]["command"]:
+        failures.append(f"setup --director-worktree: PreToolUse is {entries}")
+
+
 def test_hook(tmp):
     global total
     blocked = ["git push origin main", "git -C . push", "git --no-pager -c a=b push --force", "cd x && git push",
@@ -1192,6 +1288,7 @@ def main():
         test_must_read_size()
         test_must_read_reasons()
         test_hook(tmp)
+        test_hook_protect(tmp)
         test_evidence(tmp)
         test_order_checks(tmp)
         test_trusted_rerun(tmp)

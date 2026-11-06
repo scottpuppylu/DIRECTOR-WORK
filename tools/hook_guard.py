@@ -13,8 +13,19 @@ The line is split only outside quotes, and a quoted string is checked as a comma
 Not covered: deleting files (rm -rf, Remove-Item -Recurse), a command hidden in a script file or built at run time.
 This is a seat belt, not a security boundary. Install with setup_project_settings.py --hooks. A push the PO approved
 is run by the PO, or after removing the hook. A cleaner session that removes worktrees does not install it.
+
+With --protect DIRECTOR_DIR (setup_project_settings.py --protect-director) it also blocks the Write and Edit tools on
+DIRECTOR_DIR/orders/** and DIRECTOR_DIR/DIRECTOR_LOG.md, so a worker cannot slip and edit its own work order or the
+dispatch log. A relative file_path is taken from the hook's cwd; both paths are resolved (junctions, symlinks, `..`),
+8.3 short names are expanded on Windows, and Windows compares without case. Without --protect, Write and Edit pass.
+This guards against a slip, not against a worker that means to: it does not see a file written by Bash / PowerShell,
+MultiEdit, NotebookEdit or an MCP tool, a hardlink, a network drive or a subst drive letter, or a junction whose
+target does not exist yet. The Director's own worktree keeps the hook without --protect (--director-worktree).
 """
+import argparse
 import json
+import os
+import pathlib
 import re
 import sys
 
@@ -166,12 +177,57 @@ def reason(command, shell="bash"):
     return None
 
 
+def long_path(path):
+    """On Windows, the long form of the longest existing part of path (8.3 names expanded); elsewhere path."""
+    if os.name != "nt":
+        return path
+    import ctypes
+    head, tail = path, []
+    while not head.exists() and head.parent != head:
+        head, tail = head.parent, [head.name] + tail
+    buf = ctypes.create_unicode_buffer(32768)
+    if ctypes.windll.kernel32.GetLongPathNameW(str(head), buf, len(buf)):
+        head = pathlib.Path(buf.value)
+    return head.joinpath(*tail)
+
+
+def canonical(path, cwd=None):
+    path = pathlib.Path(path)
+    if not path.is_absolute():
+        path = pathlib.Path(cwd or os.getcwd()) / path
+    return os.path.normcase(str(long_path(path.resolve())))
+
+
+def protected_reason(file_path, cwd, protect):
+    target = canonical(file_path, cwd)
+    for root in protect:
+        orders, log = canonical(pathlib.Path(root) / "orders"), canonical(pathlib.Path(root) / "DIRECTOR_LOG.md")
+        if target == log or target.startswith(orders + os.sep):
+            # no <...> in messages: a report quoting one must still pass gate_check
+            return "work orders and DIRECTOR_LOG.md are the Director's (docs/02); report BLOCKED with the reason instead"
+    return None
+
+
 def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--protect", action="append", default=[], help="DIRECTOR folder whose orders/ and DIRECTOR_LOG.md Write / Edit may not touch")
+    a = ap.parse_args()
     try:
         call = json.load(sys.stdin)
     except ValueError:
         return 0
-    command = (call.get("tool_input") or {}).get("command")
+    if not isinstance(call, dict):
+        return 0
+    tool_input = call.get("tool_input") or {}
+    file_path = tool_input.get("file_path") if isinstance(tool_input, dict) else None
+    if a.protect and call.get("tool_name") in ("Write", "Edit") and isinstance(file_path, str) and file_path:
+        cwd = call.get("cwd") if isinstance(call.get("cwd"), str) else None
+        why = protected_reason(file_path, cwd, a.protect)
+        if why:
+            print(f"BLOCKED by hook_guard: {why}", file=sys.stderr)
+            return 2
+        return 0
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
     if not isinstance(command, str):
         return 0
     why = reason(command, "powershell" if call.get("tool_name") == "PowerShell" else "bash")

@@ -15,7 +15,7 @@ Python 3.9 以上，只用標準函式庫。一律用 `python -I -X utf8 <tool> 
 | `vocabulary.json` | 判定、下一步、RESULT、治理模式、證據等級等固定用詞的唯一來源；`gate_check.py` 讀它 | — | — |
 | `scope_check.py` | 比對實際改動和工單的 SCOPE / FORBIDDEN | 不寫 | 不花 |
 | `evidence_record.py` | 跑驗收指令，留下 exit code、輸出結尾、產物 SHA-256；之後可重新比對 | `run` 寫一份小 JSON，不覆蓋舊的 | 不花 |
-| `hook_guard.py` | PreToolUse hook：擋下 push、`reset --hard`、`git clean`、裸 stash、刪 worktree / 分支 / tag、依名稱結束程序 | 不寫 | 不花；放行時不輸出 |
+| `hook_guard.py` | PreToolUse hook：擋下 push、`reset --hard`、`git clean`、裸 stash、刪 worktree / 分支 / tag、依名稱結束程序；加 `--protect` 時另擋 Write / Edit 改工單和 `DIRECTOR_LOG.md` | 不寫 | 不花；放行時不輸出 |
 | `selftest.py` | 用正反案例測 gate_check、trace_report、metrics_report、scope_check、evidence_record、hook_guard 和 `--hooks` 安裝；查用詞、必讀文件大小、`PURPOSE.md` 結構和 CHANGELOG 的「對齊初衷」 | 只寫暫存資料夾，結束刪除 | 不花 |
 
 ## setup_project_settings.py
@@ -26,6 +26,7 @@ python -I -X utf8 setup_project_settings.py --repo <repo> --apply             # 
 python -I -X utf8 setup_project_settings.py --config <DIRECTOR>/director_work.json --apply
 python -I -X utf8 setup_project_settings.py --plugins-off a@m,b@m --apply     # PO 勾過的才放
 python -I -X utf8 setup_project_settings.py --hooks --apply                   # 加裝 hook_guard
+python -I -X utf8 setup_project_settings.py --protect-director <DIRECTOR> --director-worktree <總監的 worktree> --apply
 ```
 
 - 預設 `--repo` = 目前資料夾所在的 git repo，預設處理它的所有 worktree（`--only-this` 只處理一個）。
@@ -36,6 +37,8 @@ python -I -X utf8 setup_project_settings.py --hooks --apply                   # 
 - 設定檔欄位見 `../director_work.example.json`；命令列參數優先於設定檔。
 - 新開 worktree 後要再跑一次（這個檔案不跟著 git 走）。
 - `--hooks`：加一個 `Bash|PowerShell` 的 PreToolUse hook，用目前的 Python 跑 `hook_guard.py`；已有就不重複加。
+- `--protect-director <DIRECTOR>`（設定檔 `protect_director`，隱含 `--hooks`）：hook 的 matcher 改成 `Bash|PowerShell|Write|Edit`，指令加 `--protect "<DIRECTOR>"`。`--director-worktree`（設定檔 `director_worktree`）指定的總監 worktree 維持原本的 hook，總監照常改工單。
+- 已裝的 hook_guard 項目和要的不同（matcher 或 `--protect` 不同）時，回報 `MISSING (hooks.PreToolUse matcher)`；`--apply` 就地換掉，不另外追加。沒給 `--protect-director` 時，和 v0.12 一樣，有任何 hook_guard 項目就算 OK。
 
 ## hook_guard.py
 
@@ -47,6 +50,8 @@ python -I -X utf8 setup_project_settings.py --hooks --apply                   # 
 - **沒有涵蓋刪檔**：`rm -rf`、`Remove-Item -Recurse` 照常執行，刪檔照 `docs/08` 和 `docs/06b`「刪檔之前」。
 - 清理員的 session 不裝這個 hook：它要刪 worktree，而 `worktree remove / prune` 會被擋。
 - 只是安全帶，不是安全邊界：寫在腳本檔裡或執行時才組出來的指令看不到。PO 核准的 push 由 PO 自己執行，或先移除 hook。
+- `--protect <DIRECTOR>`：Write / Edit 的 `file_path` 落在 `<DIRECTOR>/orders/` 底下或就是 `<DIRECTOR>/DIRECTOR_LOG.md` 時 exit 2。相對路徑以 hook 輸入的 `cwd` 為準；兩邊都先 resolve（展開 junction、symlink、`..`），Windows 再展開 8.3 短檔名、不分大小寫比對。
+- `--protect` 只防手誤，擋不到：用 Bash / PowerShell 寫檔、MultiEdit、NotebookEdit、MCP 工具寫檔、hardlink、網路磁碟和 `subst` 磁碟代號，以及 hook 執行時目標還不存在的 junction。
 
 ## context_probe.py
 
