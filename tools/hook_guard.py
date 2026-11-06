@@ -51,9 +51,13 @@ Edit of an allow_write path (progress files) and a shell line whose every simple
 profile's allow_shell regexes (tested on the command name and its words joined by single spaces) and that sends no
 output to a file (any unquoted >, >>, 2>, &>; 2>&1 is fine). A Bash call with run_in_background is always denied while paused. A call the pause lets through is then checked by the rules as usual.
 The flag stops new tool calls only; a program already running keeps running.
+With --audit FILE every deny, ask and pause is also added to the action log FILE (audit_log.py) as a kind=decision
+line with the rule ID (G.., builtin for the checks above, PAUSE), so a blocked call is on the chain too. A log that
+cannot be written (lock busy for 5 s, broken last line) never changes the decision.
 Without --rules the output is the same as before, byte for byte.
 """
 import argparse
+import importlib.util
 import json
 import os
 import pathlib
@@ -781,12 +785,26 @@ def first(hits, decision):
     return found[0] if found else None
 
 
+def audit(log, call, decision, rule):
+    """Add a decision line to the action log; any failure is ignored so the decision stays the same."""
+    if not log:
+        return
+    try:
+        spec = importlib.util.spec_from_file_location("audit_log", pathlib.Path(__file__).with_name("audit_log.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module.append_entry(log, module.decision_entry(call, decision, rule))
+    except Exception:  # noqa: BLE001 - the log is a record, never a reason to block or allow
+        pass
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--protect", action="append", default=[], help="DIRECTOR folder whose orders/ and DIRECTOR_LOG.md Write / Edit may not touch")
     ap.add_argument("--rules", help="rules file (tools/guard_rules.json): check every tool call against it")
     ap.add_argument("--profile", choices=PROFILES, default="worker", help="which decision of each rule applies (default worker)")
     ap.add_argument("--pause-flag", help="flag file (pause_ctl.py on): while it exists, deny what the rules' pause section does not allow")
+    ap.add_argument("--audit", help="action log (audit_log.py): add a decision line for every deny, ask and pause")
     a = ap.parse_args()
     data = None
     if a.rules:
@@ -809,6 +827,7 @@ def main():
     paused = pause_state(a.pause_flag) if a.pause_flag else None
     if paused and not pause_allows(data, a.profile, call):
         print(f"PAUSED by {paused[0]} at {paused[1]}: {paused[2]}; {data['pause']['reason']}", file=sys.stderr)
+        audit(a.audit, call, "pause", "PAUSE")
         return 2
     tool_input = call.get("tool_input") or {}
     file_path = tool_input.get("file_path") if isinstance(tool_input, dict) else None
@@ -824,13 +843,16 @@ def main():
     deny, ask = first(hits, "deny"), first(hits, "ask")
     if deny:
         print(f"BLOCKED by hook_guard [{deny[1]}]: {deny[2]}", file=sys.stderr)
+        audit(a.audit, call, "deny", deny[1])
         return 2
     if why:
         print(f"BLOCKED by hook_guard: {why}", file=sys.stderr)
+        audit(a.audit, call, "deny", "builtin")
         return 2
     if ask:
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "ask",
                                                  "permissionDecisionReason": f"[{ask[1]}] {ask[2]}"}}))
+        audit(a.audit, call, "ask", ask[1])
     return 0
 
 

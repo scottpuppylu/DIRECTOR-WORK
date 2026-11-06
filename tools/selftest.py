@@ -2369,6 +2369,174 @@ def test_pause(tmp):
         failures.append(f"setup director worktree: command is {command!r}")
 
 
+def test_audit(tmp):
+    """audit_log.py: the chain, its breaks, anchors (also from a commit), cited ranges, Bash output masking,
+    hook_guard decision lines and setup --audit-log."""
+    global total
+    folder = tmp / "audit"
+    folder.mkdir()
+    log = folder / "a.jsonl"
+    script = str(TOOLS / "audit_log.py")
+    spec = importlib.util.spec_from_file_location("audit_log_under_test", TOOLS / "audit_log.py")
+    audit = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(audit)
+    fake_key = "gh" + "p_" + "Q7w" * 12  # built at run time: nothing key-shaped in the source
+
+    def check(name, ok, detail=""):
+        global total
+        total += 1
+        if not ok:
+            failures.append(f"audit {name}: {detail}")
+
+    def feed(call, path=log):
+        return subprocess.run([sys.executable, "-I", "-X", "utf8", script, "append", "--log", str(path)],
+                              input=json.dumps(call), capture_output=True, encoding="utf-8")
+
+    def lines(path=log):
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+    def write(path, entries):
+        path.write_text("".join(audit.canonical(e) + "\n" for e in entries), encoding="utf-8", newline="\n")
+
+    def copy(name, change=None):
+        target = folder / name
+        entries = lines()
+        if change:
+            entries = change(entries)
+        write(target, entries)
+        return target
+
+    def anchor_of(path):
+        return subprocess.run([sys.executable, "-I", "-X", "utf8", script, "head", "--log", str(path)],
+                              capture_output=True, encoding="utf-8").stdout.strip()
+
+    bash = {"hook_event_name": "PostToolUse", "session_id": "s1", "tool_name": "Bash", "tool_use_id": "t1",
+            "tool_input": {"command": f"echo {fake_key}"}, "duration_ms": 15,
+            "tool_response": {"stdout": "RAW-OUTPUT-MARKER-77 " + fake_key, "stderr": "", "interrupted": False, "isImage": False}}
+    done = feed(bash)
+    reply = json.loads(done.stdout) if done.stdout.strip() else {}
+    out = reply.get("hookSpecificOutput", {}).get("updatedToolOutput", {})
+    check("Bash output with a secret comes back masked, same fields", done.returncode == 0
+          and out.get("stdout") == "RAW-OUTPUT-MARKER-77 [MASKED:github_token]"
+          and sorted(out) == ["interrupted", "isImage", "stderr", "stdout"], done.stdout + done.stderr)
+    done = feed(dict(bash, tool_use_id="t2", tool_response={"stdout": "plain", "stderr": "", "interrupted": False, "isImage": False}))
+    check("Bash output with nothing to mask prints nothing", done.returncode == 0 and not done.stdout.strip(), done.stdout)
+    done = feed({"hook_event_name": "PostToolUseFailure", "tool_name": "Read", "tool_use_id": "t3",
+                 "tool_input": {"file_path": "missing.txt"}, "error": "File does not exist."})
+    check("failure call appended", done.returncode == 0, done.stderr)
+    text = log.read_text(encoding="utf-8")
+    check("no raw output and no secret in the log", "RAW-OUTPUT-MARKER-77" not in text and fake_key not in text
+          and "[MASKED:github_token]" in text, text[:300])
+    entries = lines()
+    check("failure input gives kind=failure", entries[2]["kind"] == "failure" and entries[2]["result"]["status"] == "error",
+          json.dumps(entries[2]))
+    expect("audit verify after 3 appends", "audit_log.py", 0, "verify", "--log", log, says=["entries=3", "head_seq=3", " OK"])
+    done = subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), "--rules", str(TOOLS / "guard_rules.json"),
+                           "--profile", "worker", "--audit", str(log)],
+                          input=json.dumps({"tool_name": "Bash", "tool_input": {"command": "git push origin main"}}),
+                          capture_output=True, encoding="utf-8")
+    last = lines()[-1]
+    check("hook_guard deny is on the chain with its rule", done.returncode == 2 and last["kind"] == "decision"
+          and last["result"] == {"status": "deny"} and last["rule"] == "G02", json.dumps(last))
+    expect("audit verify with the decision line", "audit_log.py", 0, "verify", "--log", log, says=["entries=4", " OK"])
+    head = anchor_of(log)
+    anchors = folder / "DIRECTOR_LOG.md"
+    anchors.write_text(f"# LOG\n- 01:00 gate {head}\n", encoding="utf-8")
+    expect("audit verify with its anchor", "audit_log.py", 0, "verify", "--log", log, "--anchor-log", anchors, says=["anchors=1", " OK"])
+    done = subprocess.run([sys.executable, "-I", "-X", "utf8", script, "cite", "--log", str(log), "--from", "2", "--to", "3"],
+                          capture_output=True, encoding="utf-8")
+    cite = done.stdout.strip()
+    check("cite prints AUDIT_RANGE", done.returncode == 0 and cite.startswith("AUDIT_RANGE file=") and " seq=2..3 " in cite, cite)
+    expect("audit verify --cite", "audit_log.py", 0, "verify", "--cite", cite, says="cite=checked")
+
+    def edit_two(entries):
+        entries[1]["input"] = entries[1]["input"].replace("echo", "ECHO")
+        return entries
+    tampered = copy("tampered.jsonl", edit_two)
+    expect("audit one changed character", "audit_log.py", 1, "verify", "--log", tampered, says="BROKEN seq=2:")
+    dropped = copy("dropped.jsonl", lambda e: e[:1] + e[2:])
+    expect("audit a deleted line", "audit_log.py", 1, "verify", "--log", dropped, says="BROKEN seq=3: comes after seq=1")
+    swapped = copy("swapped.jsonl", lambda e: [e[0], e[2], e[1], e[3]])
+    expect("audit two lines swapped", "audit_log.py", 1, "verify", "--log", swapped, says="BROKEN seq=3:")
+    whole = copy("cut.jsonl")
+    cut_anchor = folder / "cut_LOG.md"
+    cut_anchor.write_text(anchor_of(whole) + "\n", encoding="utf-8")
+    write(whole, lines(whole)[:-1])
+    expect("audit a cut tail passes alone", "audit_log.py", 0, "verify", "--log", whole, says="entries=3")
+    expect("audit a cut tail is caught by the anchor", "audit_log.py", 1, "verify", "--log", whole, "--anchor-log", cut_anchor,
+           says="anchor seq=4: not in the log")
+
+    def rewrite(entries):  # every hash recomputed: the chain alone cannot tell
+        prev = audit.GENESIS
+        for entry in edit_two(entries):
+            entry["prev"] = prev
+            entry["hash"] = prev = audit.digest(entry)
+        return entries
+    fake = copy("fake.jsonl")
+    fake_anchor = folder / "fake_LOG.md"
+    fake_anchor.write_text(anchor_of(fake) + "\n", encoding="utf-8")
+    fake_cite = cite.replace(log.as_posix(), fake.as_posix())
+    write(fake, rewrite(lines(fake)))
+    expect("audit a recomputed chain passes alone", "audit_log.py", 0, "verify", "--log", fake, says=" OK")
+    expect("audit a recomputed chain is caught by the anchor", "audit_log.py", 1, "verify", "--log", fake, "--anchor-log", fake_anchor,
+           says="anchor seq=4: hash differs")
+    expect("audit a cited range that changed", "audit_log.py", 1, "verify", "--cite", fake_cite, says="not the ones cited")
+    expect("audit anchor file without a line for this log", "audit_log.py", 1, "verify", "--log", fake, "--anchor-log", anchors,
+           says="no AUDIT_HEAD line for this log")
+    # --anchor-rev: the anchor as committed; an edited working copy of the LOG does not help
+    repo = folder / "director_repo"
+    repo.mkdir()
+
+    def git(*args):
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args], cwd=repo, check=True, capture_output=True)
+    git("init", "-q", "-b", "main")
+    (repo / "DIRECTOR_LOG.md").write_text(fake_anchor.read_text(encoding="utf-8"), encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "anchor")
+    rev = ("--anchor-rev", "HEAD", "--anchor-path", "DIRECTOR_LOG.md", "--repo", repo)
+    expect("audit committed anchor vs a recomputed chain", "audit_log.py", 1, "verify", "--log", fake, *rev, says="hash differs")
+    (repo / "DIRECTOR_LOG.md").write_text(anchor_of(fake) + "\n", encoding="utf-8")
+    expect("audit edited working LOG fools --anchor-log", "audit_log.py", 0, "verify", "--log", fake, "--anchor-log", repo / "DIRECTOR_LOG.md")
+    expect("audit edited working LOG does not fool --anchor-rev", "audit_log.py", 1, "verify", "--log", fake, *rev, says="hash differs")
+    expect("audit anchor commit that does not exist", "audit_log.py", 2, "verify", "--log", fake, "--anchor-rev", "0" * 40,
+           "--anchor-path", "DIRECTOR_LOG.md", "--repo", repo, says="NOT_RUN anchor commit")
+    expect("audit missing log", "audit_log.py", 2, "verify", "--log", folder / "nope.jsonl", says="NOT_RUN")
+    empty = folder / "empty.jsonl"
+    empty.write_text("", encoding="utf-8")
+    expect("audit empty log", "audit_log.py", 0, "verify", "--log", empty, says=["entries=0", " OK"])
+    broken = folder / "broken.jsonl"
+    broken.write_text(log.read_text(encoding="utf-8").splitlines()[0] + "\n{not json\n", encoding="utf-8")
+    expect("audit a line that is not JSON", "audit_log.py", 1, "verify", "--log", broken, says="BROKEN line=2: not JSON")
+    # 8 processes x 20 lines at once: 160 lines, one chain
+    busy = folder / "busy.jsonl"
+    code = ("import importlib.util, sys\n"
+            "spec = importlib.util.spec_from_file_location('a', sys.argv[1]); a = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(a)\n"
+            "for i in range(20): a.append_entry(sys.argv[2], a.hook_entry({'tool_name': 'Bash', 'tool_input': {'n': i}}))\n")
+    procs = [subprocess.Popen([sys.executable, "-I", "-X", "utf8", "-c", code, script, str(busy)]) for _ in range(8)]
+    codes = [p.wait(timeout=120) for p in procs]
+    check("8 writers at once all finish", codes == [0] * 8, str(codes))
+    expect("audit 160 lines from 8 writers", "audit_log.py", 0, "verify", "--log", busy, says=["entries=160", " OK"])
+    # setup --audit-log: Post hooks, hook_guard --audit, and the hook test leaves the log alone
+    wt = folder / "wt"
+    wt.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=wt, check=True)
+    (wt / ".git" / "info" / "exclude").write_text(".claude/settings.local.json\n", encoding="utf-8")
+    per = folder / "logs" / "{worktree}.jsonl"
+    setup = ("--repo", wt, "--only-this", "--audit-log", per)
+    expect("setup audit hooks missing", "setup_project_settings.py", 1, *setup, says=["MISSING", "hooks.PostToolUse", "hooks.PostToolUseFailure"])
+    expect("setup audit hooks written", "setup_project_settings.py", 0, *setup, "--apply", says=["SET", "block=2"])
+    data = json.loads((wt / ".claude" / "settings.local.json").read_text(encoding="utf-8"))
+    wanted = (folder / "logs" / "wt.jsonl").as_posix()
+    posts = [data["hooks"][e][0]["hooks"][0]["command"] for e in ("PostToolUse", "PostToolUseFailure")]
+    check("setup Post hooks run audit_log append on the worktree's log",
+          all("audit_log.py" in c and f'append --log "{wanted}"' in c for c in posts)
+          and f'--audit "{wanted}"' in data["hooks"]["PreToolUse"][0]["hooks"][0]["command"], json.dumps(data["hooks"]))
+    check("setup hook test wrote nothing into the log", not (folder / "logs" / "wt.jsonl").exists())
+    expect("setup audit hooks kept on rerun", "setup_project_settings.py", 0, *setup, says="OK")
+    expect("setup plain --hooks keeps --audit", "setup_project_settings.py", 0, "--repo", wt, "--only-this", "--hooks", says="OK")
+
+
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="director_work_selftest_")).resolve()
@@ -2396,6 +2564,7 @@ def main():
         test_hook_protect(tmp)
         test_hook_rules(tmp)
         test_pause(tmp)
+        test_audit(tmp)
         test_evidence(tmp)
         test_order_checks(tmp)
         test_preflight(tmp)

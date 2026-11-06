@@ -35,6 +35,11 @@ call every profile denies (G30), which shows the rules file loaded.
 With the worker profile the hook also gets --pause-flag FILE (pause_ctl.py on|off): --pause-flag or config pause_flag,
 else DIR/PAUSE when --protect-director DIR is known. The Director's worktree never gets it: the Director stops the
 process trees while the workers are paused. Without --guard-profile an installed entry keeps its --pause-flag.
+--audit-log FILE (config audit_log; implies --hooks) adds PostToolUse and PostToolUseFailure hooks (matcher *) that
+run audit_log.py append --log FILE, and gives the hook_guard entry --audit FILE so denies and asks are logged too.
+{worktree} in FILE becomes the worktree folder name, for one log per worker. Missing ones show MISSING
+(hooks.PostToolUse / hooks.PostToolUseFailure); --apply replaces an audit_log entry in place. The hook test runs
+hook_guard without --audit, so no test line goes into the log. Without --audit-log an installed --audit is kept.
 """
 import argparse
 import datetime
@@ -54,21 +59,53 @@ CONFIG_VERSION = 1  # director_work.json without schema_version counts as 1
 ENV_KEY = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
 GUARD = pathlib.Path(__file__).resolve().parent / "hook_guard.py"
 RULES = GUARD.parent / "guard_rules.json"
+AUDIT = GUARD.parent / "audit_log.py"
+POST_EVENTS = ("PostToolUse", "PostToolUseFailure")
 HOOK = {"matcher": "Bash|PowerShell", "hooks": [{"type": "command", "command":
         f'"{pathlib.Path(sys.executable).as_posix()}" -I -X utf8 "{GUARD.as_posix()}"'}]}
 PROFILES = ("worker", "director")
 
 
-def hook_entry(protect, profile=None, pause=None):
+def hook_entry(protect, profile=None, pause=None, audit=None):
     """The PreToolUse entry wanted: the plain HOOK, one that also covers Write / Edit for a protected DIRECTOR,
-    or, with a guard profile, one that checks every tool call against the rules file and blocks when it fails."""
+    or, with a guard profile, one that checks every tool call against the rules file and blocks when it fails.
+    With audit, hook_guard also logs its decisions there."""
+    log = f' --audit "{audit.as_posix()}"' if audit else ""
     if not protect and not profile:
-        return HOOK
+        return {"matcher": HOOK["matcher"], "hooks": [{"type": "command", "command": HOOK["hooks"][0]["command"] + log}]} if log else HOOK
     command = HOOK["hooks"][0]["command"] + (f' --protect "{protect.as_posix()}"' if protect else "")
     if not profile:
-        return {"matcher": "Bash|PowerShell|Write|Edit", "hooks": [{"type": "command", "command": command}]}
+        return {"matcher": "Bash|PowerShell|Write|Edit", "hooks": [{"type": "command", "command": command + log}]}
     command += f' --rules "{RULES.as_posix()}" --profile {profile}' + (f' --pause-flag "{pause.as_posix()}"' if pause else "")
-    return {"matcher": "*", "hooks": [{"type": "command", "command": command, "onFailure": "block"}]}
+    return {"matcher": "*", "hooks": [{"type": "command", "command": command + log, "onFailure": "block"}]}
+
+
+def post_entry(audit):
+    """The PostToolUse / PostToolUseFailure entry that adds every call to the action log."""
+    return {"matcher": "*", "hooks": [{"type": "command", "command":
+            f'"{pathlib.Path(sys.executable).as_posix()}" -I -X utf8 "{AUDIT.as_posix()}" append --log "{audit.as_posix()}"'}]}
+
+
+def audit_entries(data, event):
+    entries = (data.get("hooks") or {}).get(event) or []
+    return [e for e in entries if isinstance(e, dict) and any(
+        isinstance(h, dict) and "audit_log.py" in str(h.get("command", "")) for h in e.get("hooks") or [])]
+
+
+def install_post(data, event, want):
+    """Put want where the first audit_log entry of event was (or at the end); drop other audit_log hooks."""
+    entries = data.setdefault("hooks", {}).setdefault(event, [])
+    at, kept = None, []
+    for e in entries:
+        if isinstance(e, dict) and e in audit_entries(data, event):
+            at = len(kept) if at is None else at
+            rest = [h for h in e.get("hooks") or [] if not (isinstance(h, dict) and "audit_log.py" in str(h.get("command", "")))]
+            if rest:
+                kept.append(dict(e, hooks=rest))
+        else:
+            kept.append(e)
+    kept.insert(len(kept) if at is None else at, want)
+    data["hooks"][event] = kept
 
 
 def load_guard_rules():
@@ -161,6 +198,11 @@ def pause_arg(command):
     return found.group(1) if found else None
 
 
+def audit_arg(command):
+    found = re.search(r'--audit "([^"]*)"', command)
+    return found.group(1) if found else None
+
+
 def profile_arg(command):
     found = re.search(r"--profile (\w+)", command)
     return found.group(1) if found else None
@@ -187,7 +229,7 @@ def hook_entry_matches(entry, want, exact=True):
     wanted = want["hooks"][0]["command"]
     return (entry.get("matcher") == want["matcher"] and command is not None and hook is not None
             and protect_arg(command) == protect_arg(wanted) and profile_arg(command) == profile_arg(wanted)
-            and pause_arg(command) == pause_arg(wanted)
+            and pause_arg(command) == pause_arg(wanted) and audit_arg(command) == audit_arg(wanted)
             and hook.get("onFailure") == want["hooks"][0].get("onFailure") and (not exact or command == wanted))
 
 
@@ -198,6 +240,9 @@ def hook_works(command, protect):
         argv = shlex.split(command)
     except ValueError as error:
         return False, f"command does not parse: {error}"
+    if "--audit" in argv[:-1]:  # the test calls are not tool calls: keep them out of the action log
+        at = argv.index("--audit")
+        del argv[at:at + 2]
     calls = [("allow", {"tool_name": "Bash", "tool_input": {"command": "git status"}}, 0),
              ("block", {"tool_name": "Bash", "tool_input": {"command": "git push"}}, 2)]
     if protect:
@@ -243,7 +288,7 @@ def tested(wt, label, want):
     return 0 if ok else 1
 
 
-def wanted_missing(data, window, plugins_off, hooks=False, want=None, perms=None):
+def wanted_missing(data, window, plugins_off, hooks=False, want=None, perms=None, audit=None):
     miss = []
     if data.get("autoCompactWindow") != window:
         miss.append("autoCompactWindow")
@@ -257,6 +302,8 @@ def wanted_missing(data, window, plugins_off, hooks=False, want=None, perms=None
         miss.append("hooks.PreToolUse matcher")
     elif hooks and want is not None and not any(hook_entry_matches(e, want) for e in guard_entries(data)):
         miss.append("hooks.PreToolUse command")
+    if audit:
+        miss += [f"hooks.{event}" for event in POST_EVENTS if post_entry(audit) not in audit_entries(data, event)]
     if perms:
         miss += permission_problems(data, perms)
     return miss
@@ -278,6 +325,8 @@ def main():
                     "profile and write its permission rules (implies --hooks; config: guard_profile)")
     ap.add_argument("--pause-flag", help="pause flag file for the worker hook (default DIR/PAUSE of --protect-director; "
                     "config: pause_flag)")
+    ap.add_argument("--audit-log", help="action log for audit_log.py hooks; {worktree} becomes the worktree folder "
+                    "name (config: audit_log)")
     ap.add_argument("--only-this", action="store_true", help="only the worktree given by --repo, not all worktrees")
     ap.add_argument("--skip", action="append", default=[], help="skip worktrees whose path contains this text (repeatable)")
     ap.add_argument("--apply", action="store_true", help="write; without it nothing is written")
@@ -313,7 +362,8 @@ def main():
     rules = load_guard_rules() if profile else None
     pause = a.pause_flag or cfg.get("pause_flag")
     pause = pathlib.Path(pause).resolve() if pause else None
-    hooks = a.hooks or cfg.get("hooks") is True or protect is not None or profile is not None
+    audit = a.audit_log or cfg.get("audit_log")
+    hooks = a.hooks or cfg.get("hooks") is True or protect is not None or profile is not None or bool(audit)
 
     if a.backup_dir or cfg.get("backup_dir"):
         backup = pathlib.Path(a.backup_dir or cfg["backup_dir"])
@@ -323,7 +373,8 @@ def main():
 
     print(f"repo={repo} window={window} plugins_off={plugins_off or 'none'} config={cfg_path or 'none'} "
           f"hooks={'on' if hooks else 'off'}{f' protect={protect.as_posix()}' if protect else ''}"
-          f"{f' guard_profile={profile}' if profile else ''}{f' pause_flag={pause.as_posix()}' if pause else ''} "
+          f"{f' guard_profile={profile}' if profile else ''}{f' pause_flag={pause.as_posix()}' if pause else ''}"
+          f"{f' audit_log={audit}' if audit else ''} "
           f"mode={'APPLY' if a.apply else 'REPORT'}")
     home = pathlib.Path.home().resolve()
     targets = [repo] if a.only_this else list(worktrees(repo))
@@ -358,21 +409,24 @@ def main():
         wt_profile = ("director" if is_director else profile) if profile else None
         installed = [hook_command(e) for e in guard_entries(data)]
         installed = installed[0] if installed and installed[0] else None
+        wt_audit = pathlib.Path(audit.replace("{worktree}", wt.name)).resolve() if audit else None
+        kept_audit = audit_arg(installed) if installed else None
+        wt_audit_arg = wt_audit or (pathlib.Path(kept_audit) if kept_audit else None)
         want = None
         if protect is not None or wt_profile:
             wt_protect = None if is_director else protect
             if protect is None and not is_director and installed and protect_arg(installed):  # keep an installed --protect
                 wt_protect = pathlib.Path(protect_arg(installed))
             wt_pause = pause or (wt_protect / "PAUSE" if wt_protect else None) if wt_profile == "worker" else None
-            want = hook_entry(wt_protect, wt_profile, wt_pause)
+            want = hook_entry(wt_protect, wt_profile, wt_pause, wt_audit_arg)
         if hooks and want is None:  # without --protect-director / --guard-profile the installed entry keeps both
             kept = protect_arg(installed) if installed else None
             kept_profile = profile_arg(installed) if installed else None
             kept_pause = pause_arg(installed) if installed else None
             want = hook_entry(pathlib.Path(kept) if kept else None, kept_profile if kept_profile in PROFILES else None,
-                              pathlib.Path(kept_pause) if kept_pause else None)
+                              pathlib.Path(kept_pause) if kept_pause else None, wt_audit_arg)
         perms = wanted_permissions(rules, wt_profile) if wt_profile else None
-        miss = wanted_missing(data, window, plugins_off, hooks, want, perms)
+        miss = wanted_missing(data, window, plugins_off, hooks, want, perms, wt_audit)
         if not miss:
             problems += tested(wt, "OK", want if hooks else None)
             continue
@@ -390,6 +444,9 @@ def main():
             data.setdefault("enabledPlugins", {}).update({p: False for p in plugins_off})
         if hooks and any(m.startswith("hooks.PreToolUse") for m in miss):
             install_hook(data, want or HOOK)
+        for event in POST_EVENTS:
+            if f"hooks.{event}" in miss:
+                install_post(data, event, post_entry(wt_audit))
         if perms and any(m.startswith("permissions.") for m in miss):
             install_permissions(data, perms)
         path.parent.mkdir(exist_ok=True)
@@ -397,7 +454,7 @@ def main():
         with open(tmp, "w", encoding="utf-8", newline="\n") as fh:  # Path.write_text(newline=) needs 3.10
             fh.write(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
         os.replace(tmp, path)
-        again = wanted_missing(json.loads(path.read_text(encoding="utf-8")), window, plugins_off, hooks, want, perms)
+        again = wanted_missing(json.loads(path.read_text(encoding="utf-8")), window, plugins_off, hooks, want, perms, wt_audit)
         if again:
             print(f"FAIL        {wt} (still missing: {', '.join(again)})")
             problems += 1
