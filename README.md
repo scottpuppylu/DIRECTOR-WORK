@@ -221,7 +221,7 @@ ANSWER:
 | `docs/07_quality_gates.md` | 工程與成品分開、盲審包、常識閘門、修正上限 | 審查成品時 |
 | `docs/08_safety_rules.md` | 要 PO 核准的事、git 與檔案的禁止事項 | **每輪必讀** |
 | `docs/09_memory.md` | 記憶索引的大小與整理 | 每週、超過門檻時 |
-| `docs/10_lessons_learned.md` | 原專案的教訓 | 第一次；寫新規則前 |
+| `docs/10_lessons_learned.md` | 原專案的教訓；每輪必讀規則的理由 | 第一次；寫新規則前；判斷必讀規則的邊界情況時 |
 | `docs/11_claude_desktop.md` | 在 Claude Desktop 上開 worker、傳訊息、讀額度和上下文視窗用哪個工具 | 在 Desktop 上建置與操作時 |
 | `templates/` | CLAUDE.md 段落、工單、報告、RESUME_STATE、測試申請、決策登記、裁決、待決頁、規格審查提示、DIRECTOR/ 其他檔案骨架 | 建置與派工時 |
 | `tools/` | 設定寫入、免費探測、用量統計、記憶大小檢查；交件檢查（格式、驗收對照、範圍、證據紀錄）、追溯表 | 見 `tools/README.md` |

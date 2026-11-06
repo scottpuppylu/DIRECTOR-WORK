@@ -14,7 +14,7 @@
   NEXT_STEP: 接下來的精確動作，可以直接照做
   COMMS: 我在等誰（等什麼）／誰在等我（欠誰什麼）／做完要通知誰；沒有就寫 NONE
   ```
-- 下面再寫：工單路徑、session、worktree / branch / HEAD、最後驗證的 checkpoint、完成步驟（附證據）、`IN_FLIGHT`（背景程序 PID、啟動時間、輸出路徑、完成判定方式；也列出自己設的計時器和等待程序）、要丟棄的半成品、等待中的決定、`DO_NOT_REPEAT`（失敗過的方法）。
+- 下面的欄位照 `templates/RESUME_STATE.md` 逐欄寫齊，沒有就寫 NONE；IN_FLIGHT 要列出背景程序、自己設的計時器和等待程序。
 - **何時更新**：每個 checkpoint commit 之後、送 TEST REQUEST 之前、背景程序啟動和結束時、收到總監決定時、壓縮之前。寫完才做下一步。
 - `UPDATED` 時間一律讀系統時鐘（`date`），不估計。
 - 寫完用 `tools/gate_check.py --resume <檔案>` 檢查四行有沒有寫齊。它只看格式，內容對不對還是要靠 `LAST_VERIFIED_CHECKPOINT` 和 repo 核對。
@@ -38,6 +38,5 @@
 
 ## 為什麼
 
-- 任何 session 隨時可能被打斷。只要進度寫在檔案裡，打斷就只是暫停；只寫在對話裡，打斷就是損失。
 - 四行頂部是因為恢復時最需要的就是這四件事，而且它們要能在幾秒內讀完。
-- 半成品看起來完整，其實可能只跑了一半；重做比追查便宜。
+- 其他理由見 docs/10。

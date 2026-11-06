@@ -800,7 +800,7 @@ def test_vocabulary():
             failures.append(f"vocabulary: {path} no longer contains {text!r}; change tools/vocabulary.json and the docs together")
 
 
-MUST_READ_LIMIT = 13428  # bytes of the 每輪必讀 docs on 2026-11-04; every round re-reads them, so growth costs quota
+MUST_READ_LIMIT = 12359  # bytes of the 每輪必讀 docs on 2026-11-06 (v0.13 moved pure reasons to docs/10); every round re-reads them, so growth costs quota
 
 
 def test_must_read_size():
@@ -812,6 +812,27 @@ def test_must_read_size():
     size = sum(len((root / f).read_bytes().replace(b"\r\n", b"\n")) for f in files)
     if not files or size > MUST_READ_LIMIT:
         failures.append(f"must-read docs {files}: {size} bytes, limit {MUST_READ_LIMIT}; trim them or explain the new limit")
+
+
+def test_must_read_reasons():
+    """v0.13 moved the pure reasons of the must-read docs to docs/10; keep the pointer, the section and the template fields."""
+    global total
+    root = TOOLS.parent
+    ten = (root / "docs/10_lessons_learned.md").read_text(encoding="utf-8")
+    wanted = [("docs/10_lessons_learned.md", ten, "## 每輪必讀規則的理由")]
+    wanted += [("docs/10_lessons_learned.md", ten, f"### {title}") for title in ("01 角色與權限", "03 溝通", "06 無損續航", "08 安全規則")]
+    for doc in ("01_roles_authority", "03_communication", "06_resume_lossless", "08_safety_rules"):
+        text = (root / f"docs/{doc}.md").read_text(encoding="utf-8")
+        wanted.append((f"docs/{doc}.md", text.split("## 為什麼")[-1], "- 其他理由見 docs/10。"))
+    template = (root / "templates/RESUME_STATE.md").read_text(encoding="utf-8")
+    for field in ("ORDER:", "SESSION:", "WORKTREE / BRANCH / BASE / HEAD:", "LAST_VERIFIED_CHECKPOINT:", "COMPLETED_STEPS:", "（證據：",
+                  "背景程序 PID", "啟動時間", "輸出路徑", "完成判定方式", "自己設的計時器", "等待程序",
+                  "PARTIAL_OUTPUTS_TO_DISCARD:", "OPEN_DECISIONS:", "DO_NOT_REPEAT:"):
+        wanted.append(("templates/RESUME_STATE.md", template, field))
+    for path, text, needle in wanted:
+        total += 1
+        if needle not in text:
+            failures.append(f"must-read reasons: {path} lacks {needle!r}; the must-read docs point to docs/10 and the template for it")
 
 
 def test_scope(tmp):
@@ -1169,6 +1190,7 @@ def main():
         test_shared_code()
         test_vocabulary()
         test_must_read_size()
+        test_must_read_reasons()
         test_hook(tmp)
         test_evidence(tmp)
         test_order_checks(tmp)
