@@ -53,6 +53,7 @@
 - 文件、git、打包、輕量 CPU 工作不用申請。
 - 停機（QUIET、叫停）的對象是整條程序樹：由上往下，先停批次腳本（父 shell），再停子程序。停完依 CPU 用量列出所有程序，量一段時間內的 CPU 增量，確認沒有殘留，並回報已停的 PID；不能只比對程序名。下令的一方也獨立確認一次。
 - 長批次腳本每一步開跑前檢查暫停旗標（看板的 QUIET）；有暫停就自己停下。
+- 工具：`tools/pause_ctl.py on|off|status` 管暫停旗標，worker 的 `hook_guard.py --pause-flag` 在每個工具呼叫前檢查它；停完用 `pause_ctl.py procs` 依 CPU 增量確認沒有殘留（見 `tools/README.md`）。
 
 ### 測試預算
 

@@ -3,6 +3,17 @@
   "about": "Rules for hook_guard.py --rules. Each rule: id, category, decision per profile (deny / ask / none), reason (no angle brackets), match (one object or a list; any one matching is enough), example_block, example_allow (hook inputs; selftest runs every one under both profiles), optional permissions (Claude Code permission rules that setup_project_settings.py --guard-profile writes into permissions.deny or permissions.ask for that profile). The strictest decision wins; between equal decisions the lowest id wins, so the order of rules never changes a result. G00 is built in: Write / Edit of the rules file in use, of this file or of hook_guard.py.",
   "internal_report_tools": ["SendMessage", "mcp__ccd_session_mgmt__send_message"],
   "read_only_mcp_prefixes": ["get", "list", "read", "search", "query", "status"],
+  "pause": {
+    "about": "hook_guard.py --pause-flag: while the flag file exists only these calls run; the Director's list adds pause_ctl.py off",
+    "reason": "only reading, reporting and progress files run while paused; report where you stopped and wait for the Director to run pause_ctl.py off",
+    "allow_tools": ["Read", "Grep", "Glob", "NotebookRead", "TaskList", "TaskGet", "TaskOutput", "ToolSearch", "ReadNotifications", "mcp__ccd_turn__update_plan", "mcp__ccd_turn__wrap_up"],
+    "allow_mcp_read_only": true,
+    "allow_write": ["**/RESUME_STATE.md", "**/TASK_REPORT*.md"],
+    "allow_shell": {
+      "worker": ["git(?-i: -C \\S+| --no-pager)* (?:status|log|diff|show|rev-parse)(?!.*--output)(?: .*)?", "(?:tasklist|get-process|gps|ps)(?: .*)?", "(?:select-object|sort-object|format-table|format-list|measure-object|head|tail|wc|grep|findstr)(?: .*)?", "(?:py|python[0-9.]*)(?-i: -[IuBEsS]+| -X \\S+)* \\S*pause_ctl\\.py (?:status|procs)(?: .*)?"],
+      "director": ["git(?-i: -C \\S+| --no-pager)* (?:status|log|diff|show|rev-parse)(?!.*--output)(?: .*)?", "(?:tasklist|get-process|gps|ps)(?: .*)?", "(?:select-object|sort-object|format-table|format-list|measure-object|head|tail|wc|grep|findstr)(?: .*)?", "(?:py|python[0-9.]*)(?-i: -[IuBEsS]+| -X \\S+)* \\S*pause_ctl\\.py (?:status|procs)(?: .*)?", "(?:py|python[0-9.]*)(?-i: -[IuBEsS]+| -X \\S+)* \\S*pause_ctl\\.py off(?: .*)?"]
+    }
+  },
   "rules": [
     {
       "id": "G01",

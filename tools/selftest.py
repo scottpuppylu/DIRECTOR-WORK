@@ -10,6 +10,7 @@ import os
 import pathlib
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -2131,6 +2132,152 @@ def test_trusted_isolation(tmp):
         failures.append("isolation: the rerun wrote build.txt in REPO instead of the copy")
 
 
+def test_pause(tmp):
+    """1.1.0 item 2: pause_ctl on/off/status/procs and hook_guard --pause-flag. While paused only reading, reporting,
+    progress files and the pause status run; a call the pause lets through still meets the rules; setup gives workers
+    the flag and the Director's worktree none."""
+    global total
+    rules_path = TOOLS / "guard_rules.json"
+    director = tmp / "pause_DIRECTOR"
+    (director / "orders").mkdir(parents=True)
+    flag, log = director / "PAUSE", director / "DIRECTOR_LOG.md"
+    log.write_text("# DIRECTOR_LOG\n", encoding="utf-8")
+
+    def hook(call, profile="worker", rules_file=rules_path):
+        args = ["--rules", str(rules_file)] if rules_file else []
+        return subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), *args, "--profile", profile,
+                               "--pause-flag", str(flag)], capture_output=True, encoding="utf-8", input=json.dumps(call))
+
+    def check(name, call, want, profile="worker"):
+        global total
+        total += 1
+        done = hook(call, profile)
+        rule = re.match(r"BLOCKED by hook_guard \[(G\d+)\]", done.stderr)
+        if done.returncode == 0 and not done.stdout and not done.stderr:
+            got = "silent"
+        elif done.returncode == 2 and re.match(r"PAUSED by Director at \S+: CPU \(full\) for the batch; \S", done.stderr):
+            got = "paused"
+        elif done.returncode == 2 and rule:
+            got = "deny:" + rule.group(1)
+        else:
+            got = f"other({done.returncode} {done.stdout.strip()[:80]} {done.stderr.strip()[:120]})"
+        if got != want:
+            failures.append(f"pause {name} [{profile}]: expected {want}, got {got}")
+        elif re.search(r"<[^>]*>", done.stderr):
+            failures.append(f"pause {name} [{profile}]: the message has a <...> placeholder")
+
+    bash = lambda command, **kw: {"tool_name": "Bash", "tool_input": {"command": command, **kw}}
+    shell = lambda command: {"tool_name": "PowerShell", "tool_input": {"command": command}}
+    tool = lambda name, **kw: {"tool_name": name, "tool_input": kw}
+    script = (TOOLS / "pause_ctl.py").as_posix()
+    ctl = f"python -I -X utf8 {script}"
+    check("flag off: a build runs", bash("python -m build"), "silent")
+    expect("pause on", "pause_ctl.py", 0, "on", "--director", director, "--reason", "CPU <full> for the batch",
+           says="PAUSE: on by Director at ")
+    total += 1
+    if not re.fullmatch(r"# DIRECTOR_LOG\nPAUSE on by=Director at=\S+ reason=CPU \(full\) for the batch\n", log.read_text(encoding="utf-8")):
+        failures.append(f"pause on: DIRECTOR_LOG is {log.read_text(encoding='utf-8')!r}")
+    expect("pause status shows the reason", "pause_ctl.py", 0, "status", "--director", director,
+           says=["PAUSE: on by Director at ", ": CPU (full) for the batch"], lacks="<")
+    for name, call in [("a build", bash("python -m build")), ("git status in the background", bash("git status", run_in_background=True)),
+                       ("Agent", tool("Agent", prompt="x")), ("Monitor", tool("Monitor", command="x")),
+                       ("Write", tool("Write", file_path=str(tmp / "a.py"))), ("NotebookEdit", tool("NotebookEdit", notebook_path=str(tmp / "a.ipynb"))),
+                       ("worker pause_ctl off", bash(f"{ctl} off --director {director.as_posix()}")),
+                       ("python -c before pause_ctl", bash(f'python -c "import os" {script} status')),
+                       ("an allowed command and another", bash("git status && make")), ("git log --output", bash("git log --output=x.txt")),
+                       ("git -c", bash("git -c core.pager=x log")), ("Stop-Process after Get-Process", shell("Get-Process python | Stop-Process")),
+                       ("an MCP write", tool("mcp__shop__create_item")), ("start_session", tool("mcp__ccd_session__start_session")),
+                       ("cat of a credential file", bash("cat .env"))]:
+        check(f"{name} is paused", call, "paused")
+    for name, call in [("Read", tool("Read", file_path="README.md")), ("Grep", tool("Grep", pattern="x")), ("git status", bash("git status")),
+                       ("git -C dir log", bash("git -C D:/x log --oneline -3")),
+                       ("pause_ctl status", bash(f"{ctl} status --director {director.as_posix()}")),
+                       ("pause_ctl procs", bash(f"{ctl} procs --root 4242")),
+                       ("Get-Process sorted", shell("Get-Process | Sort-Object CPU -Descending | Select-Object -First 5")),
+                       ("tasklist", bash('tasklist /FI "IMAGENAME eq python.exe"')), ("SendMessage", tool("SendMessage", to="x", message="stopped")),
+                       ("an MCP read", tool("mcp__shop__list_items")), ("Write RESUME_STATE.md", tool("Write", file_path=str(tmp / "RESUME_STATE.md"))),
+                       ("Edit a TASK REPORT", tool("Edit", file_path=str(tmp / "TASK_REPORT_item2.md")))]:
+        check(f"{name} runs while paused", call, "silent")
+    check("the Director's pause_ctl off runs", bash(f"{ctl} off --director {director.as_posix()}"), "silent", "director")
+    check("a read the pause lets through still meets G50", tool("Read", file_path=".env"), "deny:G50")
+    expect("pause off", "pause_ctl.py", 0, "off", "--director", director, says="PAUSE: off by Director at ")
+    total += 1
+    if flag.exists() or not re.search(r"\nPAUSE off by=Director at=\S+\n$", log.read_text(encoding="utf-8")):
+        failures.append(f"pause off: flag {flag.exists()}, DIRECTOR_LOG {log.read_text(encoding='utf-8')!r}")
+    check("flag off again: the build runs", bash("python -m build"), "silent")
+    expect("pause status off", "pause_ctl.py", 0, "status", "--director", director, says="PAUSE: off")
+    expect("pause off when it was not on", "pause_ctl.py", 0, "off", "--director", director, says="PAUSE: off (it was not on)")
+    expect("pause on needs a reason", "pause_ctl.py", 2, "on", "--director", director)
+    # --pause-flag with no rules file, rules with no pause section, or a bad pause section stop the hook (exit 1)
+    data = json.loads(rules_path.read_text(encoding="utf-8"))
+    no_pause = tmp / "rules_no_pause.json"
+    no_pause.write_text(json.dumps({k: v for k, v in data.items() if k != "pause"}), encoding="utf-8")
+    bad_pause = tmp / "rules_bad_pause.json"
+    bad_pause.write_text(json.dumps({**data, "pause": {**data["pause"], "allow_shell": {"worker": ["("], "director": []}}}), encoding="utf-8")
+    for name, rules_file in (("no rules file", None), ("no pause section", no_pause), ("bad pause regex", bad_pause)):
+        total += 1
+        done = hook(bash("git status"), rules_file=rules_file)
+        if done.returncode != 1 or not done.stderr.startswith("hook_guard: "):
+            failures.append(f"pause {name}: expected exit 1, got {done.returncode} {done.stderr.strip()[:120]}")
+    # procs: a busy root with an idle child, and an idle root that has already ended; only test-owned PIDs are ended
+    busy = subprocess.Popen([sys.executable, "-I", "-c", "import subprocess, sys\n"
+                             "c = subprocess.Popen([sys.executable, '-I', '-c', 'import time; time.sleep(300)'])\n"
+                             "print(c.pid, flush=True)\nwhile True: pass"], stdout=subprocess.PIPE, encoding="utf-8")
+    idle = subprocess.Popen([sys.executable, "-I", "-c", "import time; time.sleep(300)"])
+    child = None
+    try:
+        child = int(busy.stdout.readline())
+        idle.kill()
+        idle.wait()
+        roots = ("--root", busy.pid, "--root", idle.pid)
+        total += 1
+        code, out = run("pause_ctl.py", "procs", *roots, "--sample", "1")
+        rows = re.findall(r"^ +(\d+) +\d+ +[\d.]+  ", out, re.M)
+        if (code != 1 or not re.search(rf"^STOPPED\n  {idle.pid}\nREMAINING", out, re.M) or rows != [str(busy.pid), str(child)]
+                or "PROCS: stopped=1 remaining=2 busy=1" not in out):
+            failures.append(f"pause_ctl procs with a live tree: exit {code}: {out.strip()[-400:]}")
+        busy.kill()
+        busy.wait()
+        os.kill(child, signal.SIGTERM)
+        expect("pause_ctl procs after the stop", "pause_ctl.py", 0, "procs", *roots, "--sample", "0.2",
+               says="PROCS: stopped=2 remaining=0 busy=0")
+    finally:
+        for proc in (busy, idle):
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+        if child:
+            try:
+                os.kill(child, signal.SIGTERM)
+            except OSError:
+                pass
+    pids = tmp / "pids.txt"
+    pids.write_text("# none of these\nabc\n", encoding="utf-8")
+    expect("pause_ctl procs refuses a bad PID file", "pause_ctl.py", 1, "procs", "--pids-file", pids)
+    # setup: the worker hook gets --pause-flag DIR/PAUSE; the Director's worktree gets none
+    repo = tmp / "paused_repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    (repo / ".git" / "info" / "exclude").write_text(".claude/settings.local.json\n", encoding="utf-8")
+    settings = repo / ".claude" / "settings.local.json"
+    setup = ("--repo", repo, "--only-this", "--protect-director", director)
+    expect("setup: the worker hook gets the pause flag", "setup_project_settings.py", 0, *setup, "--guard-profile", "worker", "--apply",
+           says=["SET", "block-rule=2"])
+    command = json.loads(settings.read_text(encoding="utf-8"))["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    total += 1
+    if f'--pause-flag "{(director / "PAUSE").as_posix()}"' not in command:
+        failures.append(f"setup worker: no --pause-flag DIR/PAUSE in {command!r}")
+    expect("setup: the same rerun is OK", "setup_project_settings.py", 0, *setup, "--guard-profile", "worker", says="OK")
+    expect("setup: another pause flag is not OK", "setup_project_settings.py", 1, *setup, "--guard-profile", "worker",
+           "--pause-flag", tmp / "OTHER_PAUSE", says="MISSING")
+    expect("setup: the Director's worktree has no pause flag", "setup_project_settings.py", 0, *setup, "--guard-profile", "worker",
+           "--director-worktree", repo, "--apply", says="SET")
+    command = json.loads(settings.read_text(encoding="utf-8"))["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    total += 1
+    if "--pause-flag" in command or "--profile director" not in command:
+        failures.append(f"setup director worktree: command is {command!r}")
+
+
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="director_work_selftest_")).resolve()
@@ -2157,6 +2304,7 @@ def main():
         test_hook(tmp)
         test_hook_protect(tmp)
         test_hook_rules(tmp)
+        test_pause(tmp)
         test_evidence(tmp)
         test_order_checks(tmp)
         test_preflight(tmp)

@@ -40,6 +40,13 @@ exits 0 with no output: it never answers allow, so Claude Code's own permission 
 cannot be read or is malformed gives exit 1 (install with "onFailure": "block" so that blocks). Rule G00 is built in:
 Write / Edit of the rules file in use, of guard_rules.json beside this script or of this script is denied for a
 worker and asked for a Director.
+With --pause-flag FILE (needs --rules; tools/pause_ctl.py on|off) every tool call is first checked against the
+flag: while FILE exists, a call is denied (exit 2, "PAUSED by WHO at TIME: REASON; ..." on stderr) unless the rules
+file's "pause" section lets it through: its allow_tools, read-only MCP actions, the internal report channel, Write /
+Edit of an allow_write path (progress files) and a shell line whose every simple command fully matches one of the
+profile's allow_shell regexes (tested on the command name and its words joined by single spaces). A Bash call with
+run_in_background is always denied while paused. A call the pause lets through is then checked by the rules as usual.
+The flag stops new tool calls only; a program already running keeps running.
 Without --rules the output is the same as before, byte for byte.
 """
 import argparse
@@ -360,6 +367,70 @@ def rule_problems(rule, seen):
     return out
 
 
+PAUSE_LINE = re.compile(r"^PAUSE by (?P<by>.+?) at (?P<at>\S+): (?P<reason>.*)$")  # written by pause_ctl.py on
+
+
+def pause_problems(pause):
+    """What is wrong with the rules file's "pause" section."""
+    if not isinstance(pause, dict):
+        return ["pause must be an object"]
+    out = []
+    if not (isinstance(pause.get("reason"), str) and pause["reason"].strip()) or re.search(r"[<>]", str(pause.get("reason"))):
+        out.append("pause: reason must be text without angle brackets")
+    for key in ("allow_tools", "allow_write"):
+        if not string_list(pause.get(key, []), empty=True):
+            out.append(f"pause: {key} must be a list of strings")
+    if not isinstance(pause.get("allow_mcp_read_only", False), bool):
+        out.append("pause: allow_mcp_read_only must be true or false")
+    shell = pause.get("allow_shell")
+    if not (isinstance(shell, dict) and set(shell) == set(PROFILES) and all(string_list(v, empty=True) for v in shell.values())):
+        return out + ["pause: allow_shell must give worker and director each a list of regexes"]
+    for pattern in [x for v in shell.values() for x in v]:
+        try:
+            re.compile(pattern)
+        except re.error as error:
+            out.append(f"pause: allow_shell {pattern!r} is not a regex: {error}")
+    return out
+
+
+def pause_state(flag):
+    """None when the flag file is absent, else (by, at, reason) with no angle brackets; unreadable parts are unknown."""
+    path = pathlib.Path(flag)
+    if not path.exists():
+        return None
+    try:
+        first = (path.read_text(encoding="utf-8", errors="replace").splitlines() or [""])[0]
+    except OSError:
+        first = ""
+    found = PAUSE_LINE.match(first)
+    parts = (found["by"], found["at"], found["reason"]) if found else ("unknown", "unknown", first.strip() or "unknown")
+    return tuple(re.sub(r"\s+", " ", x).replace("<", "(").replace(">", ")") for x in parts)
+
+
+def pause_allows(data, profile, call):
+    """True when the pause section lets this call through while the flag is on."""
+    pause = data["pause"]
+    tool = call.get("tool_name") if isinstance(call.get("tool_name"), str) else ""
+    tool_input = call.get("tool_input") if isinstance(call.get("tool_input"), dict) else {}
+    cwd = call.get("cwd") if isinstance(call.get("cwd"), str) else None
+    if tool in pause.get("allow_tools", []) or tool in data.get("internal_report_tools", []):
+        return True
+    if tool.startswith("mcp__") and pause.get("allow_mcp_read_only"):
+        read_only = data.get("read_only_mcp_prefixes", ["get", "list", "read", "search", "query", "status"])
+        return mcp_action(tool).split("_")[0] in read_only
+    if tool in WRITE_TOOLS:
+        value = next((tool_input[f] for f in PATH_FIELDS if isinstance(tool_input.get(f), str) and tool_input[f]), None)
+        home = rule_path(str(pathlib.Path.home()), None)
+        return bool(value) and globs_match(pause.get("allow_write", []), [], rule_path(value, cwd), home)
+    command = tool_input.get("command")
+    if tool not in ("Bash", "PowerShell") or not isinstance(command, str) or tool_input.get("run_in_background"):
+        return False
+    commands = list(simple_commands(command, "powershell" if tool == "PowerShell" else "bash"))
+    allowed = pause["allow_shell"][profile]
+    return bool(commands) and all(any(re.fullmatch(r, " ".join([n] + list(rest)), re.I | re.S) for r in allowed)
+                                  for n, rest in commands)
+
+
 def load_rules(path):
     try:
         data = json.loads(pathlib.Path(path).read_text(encoding="utf-8-sig"))
@@ -373,6 +444,8 @@ def load_rules(path):
     for key in ("internal_report_tools", "read_only_mcp_prefixes"):
         if key in data and not string_list(data[key], empty=True):
             problems.append(f"{key} must be a list of strings")
+    if "pause" in data:
+        problems += pause_problems(data["pause"])
     if problems:
         raise RulesError(f"{path}: " + "; ".join(problems))
     return data
@@ -537,20 +610,30 @@ def main():
     ap.add_argument("--protect", action="append", default=[], help="DIRECTOR folder whose orders/ and DIRECTOR_LOG.md Write / Edit may not touch")
     ap.add_argument("--rules", help="rules file (tools/guard_rules.json): check every tool call against it")
     ap.add_argument("--profile", choices=PROFILES, default="worker", help="which decision of each rule applies (default worker)")
+    ap.add_argument("--pause-flag", help="flag file (pause_ctl.py on): while it exists, deny what the rules' pause section does not allow")
     a = ap.parse_args()
     data = None
     if a.rules:
         try:
             data = load_rules(a.rules)
+            if a.pause_flag and "pause" not in data:
+                raise RulesError(f"{a.rules}: --pause-flag needs a pause section")
         except RulesError as error:
             print(f"hook_guard: bad rules file: {error}", file=sys.stderr)
             return 1
+    elif a.pause_flag:
+        print("hook_guard: --pause-flag needs --rules", file=sys.stderr)
+        return 1
     try:
         call = json.load(sys.stdin)
     except ValueError:
         return 0
     if not isinstance(call, dict):
         return 0
+    paused = pause_state(a.pause_flag) if a.pause_flag else None
+    if paused and not pause_allows(data, a.profile, call):
+        print(f"PAUSED by {paused[0]} at {paused[1]}: {paused[2]}; {data['pause']['reason']}", file=sys.stderr)
+        return 2
     tool_input = call.get("tool_input") or {}
     file_path = tool_input.get("file_path") if isinstance(tool_input, dict) else None
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
