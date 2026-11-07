@@ -3,6 +3,7 @@ in a temporary folder, and check that the fixed words, the size of the must-read
 not drifted.
 Prints one line per failed case and a summary; exit 1 when anything fails. Writes only to the temporary folder.
 """
+import datetime
 import hashlib
 import importlib.util
 import json
@@ -1710,6 +1711,126 @@ def test_hook_rules(tmp):
     expect("an unknown profile is refused", "setup_project_settings.py", 2, *setup, "--guard-profile", "admin")
 
 
+def test_session_profiles(tmp):
+    """1.3.0 item 8: hook_guard --sessions picks director / worker / cleaner per session_id from one sessions file;
+    cleaner may delete, nobody may delete or move the protected list; setup_project_settings --session-map."""
+    global total
+    rules_path = TOOLS / "guard_rules.json"
+    keep = (tmp / "sess_keep").resolve()
+    (keep / "sub").mkdir(parents=True)
+    pause = tmp / "sess_PAUSE"
+    smap = tmp / "sessions.json"
+    smap.write_text(json.dumps({"schema_version": 1, "default": "worker",
+                                "sessions": {"S-DIR": "director", "S-CLEAN": {"profile": "cleaner", "name": "cleaner"},
+                                             "S-WORK": "worker"},
+                                "protected": [keep.as_posix() + "/**", "**/RESUME_STATE*.md"]}), encoding="utf-8")
+
+    def hook(sid, tool, command, sessions=smap, extra=()):
+        call = {"tool_name": tool, "tool_input": {"command": command}, "cwd": str(tmp)}
+        if sid:
+            call["session_id"] = sid
+        argv = [sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), "--rules", str(rules_path), "--profile",
+                "worker", *extra] + (["--sessions", str(sessions)] if sessions else [])
+        return subprocess.run(argv, capture_output=True, encoding="utf-8", input=json.dumps(call))
+
+    def case(name, sid, command, code, says="", tool="Bash", **kw):
+        global total
+        total += 1
+        done = hook(sid, tool, command, **kw)
+        out = done.stdout + done.stderr
+        if done.returncode != code or (says and says not in out):
+            failures.append(f"sessions {name}: expected exit {code} with {says!r}, got {done.returncode}: {out.strip()[:200]!r}")
+
+    k = keep.as_posix()
+    up = keep.parent.as_posix()
+    case("cleaner deletes a build folder", "S-CLEAN", "rm -rf build", 0)
+    case("a listed worker may not", "S-WORK", "rm -rf build", 2, "[G10]")
+    case("an unlisted session gets the default", "S-OTHER", "rm -rf build", 2, "[G10]")
+    case("no session_id gets the default", "", "rm -rf build", 2, "[G10]")
+    case("the director is asked", "S-DIR", "rm -rf build", 0, '"ask"')
+    case("cleaner: a protected file", "S-CLEAN", f"rm -f {k}/sub/a.txt", 2, "protected list")
+    case("cleaner: the protected folder", "S-CLEAN", f"rm -rf {k}", 2, "holds protected paths")
+    case("cleaner: a folder above it", "S-CLEAN", f"rm -rf {up}", 2, "holds protected paths")
+    case("cleaner: a wildcard over it", "S-CLEAN", f"rm -rf {up}/*", 2, "holds protected paths")
+    case("cleaner: the drive root", "S-CLEAN", "rm -rf " + keep.anchor.replace("\\", "/"), 2, "holds protected paths")
+    case("cleaner: a **/ file", "S-CLEAN", "rm RESUME_STATE.md", 2, "protected list")
+    case("cleaner: moving it away", "S-CLEAN", f"mv {k}/sub ../elsewhere", 2, "protected")
+    case("cleaner: PowerShell Remove-Item", "S-CLEAN", f"Remove-Item -Recurse -Force {k}", 2, "holds protected paths",
+         tool="PowerShell")
+    case("cleaner: a file next to it", "S-CLEAN", f"rm -f {up}/other.txt", 0)
+    case("the director: protected too", "S-DIR", f"rm -f {k}/sub/a.txt", 2, "protected list")
+    case("cleaner: push is still blocked", "S-CLEAN", "git push origin main", 2)
+    case("cleaner: worktree remove is still blocked", "S-CLEAN", "git worktree remove ../wt", 2)
+    case("cleaner: a read is silent", "S-CLEAN", "ls -la", 0)
+    case("without --sessions the cleaner rule is not there", "S-CLEAN", "rm -rf build", 2, "[G10]", sessions=None)
+    pause.write_text("PAUSED by director at 2026-11-07 10:00 +08:00: test\n", encoding="utf-8")
+    case("pause holds a worker", "S-WORK", "touch a.txt", 2, "PAUSED", extra=("--pause-flag", str(pause)))
+    case("pause holds the cleaner", "S-CLEAN", "touch a.txt", 2, "PAUSED", extra=("--pause-flag", str(pause)))
+    case("pause never holds the director", "S-DIR", "touch a.txt", 0, extra=("--pause-flag", str(pause)))
+    pause.unlink()
+    log = tmp / "sess_audit.jsonl"
+    case("audit says protected", "S-CLEAN", f"rm -rf {k}", 2, extra=("--audit", str(log)))
+    total += 1
+    logged = log.read_text(encoding="utf-8") if log.exists() else ""
+    if "protected" not in logged:
+        failures.append(f"sessions audit: no protected label in {logged!r}")
+    bad = tmp / "sessions_bad.json"
+    for name, text in [("not json", "{"), ("wrong version", '{"schema_version": 2}'),
+                       ("unknown key", '{"schema_version": 1, "extra": 1}'),
+                       ("unknown profile", '{"schema_version": 1, "sessions": {"S": "admin"}}'),
+                       ("bad default", '{"schema_version": 1, "default": "root"}'),
+                       ("relative protected", '{"schema_version": 1, "protected": ["DIRECTOR/**"]}')]:
+        bad.write_text(text, encoding="utf-8")
+        case(f"bad sessions file: {name}", "S-CLEAN", "ls", 1, "bad sessions file", sessions=bad)
+    total += 1
+    done = subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), "--sessions", str(smap)],
+                          capture_output=True, encoding="utf-8",
+                          input=json.dumps({"tool_name": "Bash", "tool_input": {"command": "ls"}}))
+    if done.returncode != 1 or "--sessions needs --rules" not in done.stderr:
+        failures.append(f"sessions without --rules: {done.returncode} {done.stderr!r}")
+    total += 1
+    done = subprocess.run([sys.executable, "-I", "-X", "utf8", "-c", "import importlib.util, sys; "
+                           "s = importlib.util.spec_from_file_location('g', sys.argv[1]); g = importlib.util.module_from_spec(s); "
+                           "s.loader.exec_module(g); g.load_sessions(sys.argv[2])",
+                           str(TOOLS / "hook_guard.py"), str(TOOLS.parent / "templates" / "guard_sessions.json")],
+                          capture_output=True, encoding="utf-8")
+    if done.returncode != 0:
+        failures.append(f"templates/guard_sessions.json does not load: {done.stderr.strip()[-200:]!r}")
+
+    # setup --session-map: one settings file for every session of a folder
+    repo = tmp / "sess_repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    (repo / ".git" / "info" / "exclude").write_text(".claude/settings.local.json\n", encoding="utf-8")
+    settings = repo / ".claude" / "settings.local.json"
+    setup = ("--repo", repo, "--only-this")
+    expect("session map missing", "setup_project_settings.py", 1, *setup, "--session-map", smap,
+           says=["MISSING", "hooks.PreToolUse", "session_map="])
+    expect("session map written and tested", "setup_project_settings.py", 0, *setup, "--session-map", smap, "--apply",
+           says=["SET", "(cleaner,director,worker)", "block-rule=2"])
+    expect("session map kept on rerun", "setup_project_settings.py", 0, *setup, "--session-map", smap, says="OK")
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    command = data["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    total += 1
+    if f'--sessions "{smap.resolve().as_posix()}"' not in command or "--profile worker" not in command:
+        failures.append(f"setup --session-map: command is {command!r}")
+    total += 1
+    perms = data.get("permissions", {})
+    if ("Bash(rm *)" in perms.get("deny", []) + perms.get("ask", []) or "Bash(git push *)" not in perms.get("deny", [])
+            or "Bash(gh pr create *)" not in perms.get("ask", []) or "Bash(gh pr create *)" in perms.get("deny", [])):
+        failures.append(f"setup --session-map: permissions are not the mildest of the mapped profiles: {perms}")
+    expect("without the map the entry is not OK", "setup_project_settings.py", 1, *setup, "--guard-profile", "worker",
+           says="hooks.PreToolUse matcher")
+    other = tmp / "sessions_other.json"
+    other.write_text(smap.read_text(encoding="utf-8"), encoding="utf-8")
+    expect("another map file is not OK", "setup_project_settings.py", 1, *setup, "--session-map", other,
+           says="hooks.PreToolUse matcher")
+    bad.write_text('{"schema_version": 1, "sessions": {"S": "admin"}}', encoding="utf-8")
+    expect("a bad map is refused", "setup_project_settings.py", 1, *setup, "--session-map", bad, lacks="MISSING")
+    expect("cleaner is a guard profile", "setup_project_settings.py", 1, *setup, "--guard-profile", "cleaner",
+           says="MISSING")
+
+
 def test_evidence(tmp):
     out = tmp / "evidence"
     work = tmp / "work"
@@ -2632,6 +2753,108 @@ def test_audit(tmp):
     expect("setup plain --hooks keeps --audit", "setup_project_settings.py", 0, "--repo", wt, "--only-this", "--hooks", says="OK")
 
 
+def test_report_vs_audit(tmp):
+    """1.3.0 item 10: report_vs_audit.py checks the runs a TASK REPORT claims (selftest, Unity, Blender, hash) against
+    the action log of the same session: run or not, exit (ok / error), time; a broken chain is a FAIL. Synthetic logs."""
+    global total
+    folder = tmp / "rva"
+    folder.mkdir()
+    spec = importlib.util.spec_from_file_location("audit_log_for_rva", TOOLS / "audit_log.py")
+    audit = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(audit)
+
+    def chain(path, rows):
+        prev, out = audit.GENESIS, []
+        for seq, (ts, session, tool, tool_input, kind, status) in enumerate(rows, 1):
+            entry = {"seq": seq, "ts": ts, "session_id": session, "agent_id": None, "tool": tool, "tool_use_id": f"t{seq}",
+                     "input": audit.summary(tool_input), "kind": kind, "result": {"status": status},
+                     "duration_ms": None, "prev": prev}
+            if kind == "decision":
+                entry["rule"] = "push"
+            entry["hash"] = audit.digest(entry)
+            prev = entry["hash"]
+            out.append(entry)
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write("".join(audit.canonical(e) + "\n" for e in out))
+        return out
+
+    log = folder / "a.jsonl"
+    long_cmd = "python -I -X utf8 tools/build_all.py " + "--flag " * 90 + "--end"
+    chain(log, [
+        ("2026-11-07T11:40:00.000+00:00", "S1", "Bash", {"command": "python -I -X utf8 tools/selftest.py",
+                                                         "description": "selftest"}, "result", "ok"),
+        ("2026-11-07T11:45:00.000+00:00", "S1", "PowerShell", {"command": "Get-FileHash D:\\w\\out\\pack.zip"},
+         "result", "ok"),
+        ("2026-11-07T11:50:00.000+00:00", "S1", "Bash", {"command": "\"C:/Unity/Unity.exe\" -batchmode -runTests"},
+         "failure", "error"),
+        ("2026-11-07T11:52:00.000+00:00", "S1", "mcp__blender__execute_blender_code", {"code": "x"}, "result", "ok"),
+        ("2026-11-07T11:55:00.000+00:00", "S1", "Bash", {"command": "git push"}, "decision", "deny"),
+        ("2026-11-07T11:56:00.000+00:00", "S2", "Bash", {"command": "sha256sum other.bin"}, "result", "ok"),
+        ("2026-11-07T11:57:00.000+00:00", "S1", "Bash", {"command": long_cmd}, "result", "ok"),
+    ])
+
+    def run(name, report, code, says=(), lacks=(), extra=(), logs=(log,)):
+        global total
+        total += 1
+        path = folder / f"{re.sub(r'[^A-Za-z0-9]+', '_', name)}.md"
+        path.write_text(report, encoding="utf-8")
+        args = [sys.executable, "-I", "-X", "utf8", str(TOOLS / "report_vs_audit.py"), "--report", str(path),
+                "--utc-offset", "+08:00"]
+        for item in logs:
+            args += ["--log", str(item)]
+        done = subprocess.run(args + [str(x) for x in extra], capture_output=True, encoding="utf-8")
+        out = done.stdout + done.stderr
+        wrong = [s for s in ([says] if isinstance(says, str) else says) if s not in out]
+        wrong += [f"not {s}" for s in ([lacks] if isinstance(lacks, str) else lacks) if s in out]
+        if done.returncode != code or wrong:
+            failures.append(f"report_vs_audit {name}: expected exit {code}, got {done.returncode}; {wrong}: {out[-700:]}")
+
+    good = ("SESSION_ID: S1\n"
+            "TESTS: `python -I -X utf8 tools/selftest.py` 300/300 passed\n"
+            "EVIDENCE: `Get-FileHash D:/w/out/pack.zip` OK\n"
+            "RAN:\n"
+            "- `\"C:/Unity/Unity.exe\" -batchmode -runTests` exit=1 at=19:50\n"
+            "- `mcp__blender__execute_blender_code` exit=0 at=2026-11-07T19:53+08:00\n")
+    run("all claims check out", good, 0, ("REPORT_VS_AUDIT: PASS claims=4 ok=4 failed=0 session=S1 logs=1",
+                                          "OK   selftest:", "OK   hash:", "OK   unity:", "OK   blender:"))
+    run("claimed exit 0 but the run failed", good.replace("-runTests` exit=1", "-runTests` exit=0"), 1,
+        ("FAIL unity:", "but the log says error", "REPORT_VS_AUDIT: FAIL"))
+    run("claimed failure but the run was ok", "SESSION_ID: S1\nRAN: `tools/selftest.py` exit=2\n", 1,
+        "but the log says ok")
+    run("not run at all", "SESSION_ID: S1\nTESTS: `blender -b scene.blend -P render.py` PASS\n", 1,
+        ("FAIL blender:", "not run in session S1"))
+    run("run by another session only", "SESSION_ID: S1\nEVIDENCE: `sha256sum other.bin` OK\n", 1, "not run in session S1")
+    run("same claim is fine for that session", "EVIDENCE: `sha256sum other.bin` OK\n", 0, "session=S2",
+        extra=("--session", "S2"))
+    run("time too far off", "SESSION_ID: S1\nRAN: `tools/selftest.py` exit=0 at=21:00\n", 1, "at=21:00, but the runs")
+    run("time within tolerance", "SESSION_ID: S1\nRAN: `tools/selftest.py` exit=0 at=19:50\n", 0, "PASS",
+        extra=("--tolerance-min", "10"))
+    run("full ISO time off", "SESSION_ID: S1\nRAN: `tools/selftest.py` at=2026-11-06T19:40+08:00\n", 1, "but the runs")
+    run("denied by the hook", "SESSION_ID: S1\nRAN: `git push` exit=0\n", 1, "the hook denied it")
+    run("a cut log line matches on its first part", f"SESSION_ID: S1\nRAN: `{long_cmd}` exit=0\n", 0, "PASS")
+    run("slashes, quotes and case aside", "SESSION_ID: S1\nEVIDENCE: `get-filehash D:\\w\\out\\pack.zip` 通過\n", 0,
+        "PASS")
+    run("plain code in TESTS is not a claim", "SESSION_ID: S1\nTESTS: `git status` clean\nDONE: `docs/x.md`\n", 0,
+        "REPORT_VS_AUDIT: NONE claims=0")
+    run("session from the only one in the logs", "TESTS: `tools/selftest.py` PASS\n", 2, "2 sessions")
+    run("a session with no lines", "SESSION_ID: S9\nTESTS: `tools/selftest.py` PASS\n", 1, "no line of session S9")
+    broken = folder / "broken.jsonl"
+    text = log.read_text(encoding="utf-8").replace('"status":"error"', '"status":"ok"')
+    broken.write_text(text, encoding="utf-8")
+    run("an edited log is a FAIL", good, 1, ("FAIL log: hash chain", "REPORT_VS_AUDIT: FAIL"), logs=(broken,))
+    run("a missing log cannot run", good, 2, "no such log", logs=(folder / "none.jsonl",))
+    run("a bad at= is a FAIL", "SESSION_ID: S1\nRAN: `tools/selftest.py` at=yesterday\n", 1, "not an ISO time")
+    second = folder / "b.jsonl"
+    chain(second, [("2026-11-07T12:10:00.000+00:00", "S1", "mcp__UnityMCP__run_tests", {"mode": "EditMode"}, "result",
+                    "ok")])
+    run("two logs are read together", "SESSION_ID: S1\nTESTS: `mcp__UnityMCP__run_tests` PASS\n"
+        "RAN: `tools/selftest.py` exit=0\n", 0, "PASS claims=2 ok=2 failed=0 session=S1 logs=2", logs=(log, second))
+    template = (TOOLS.parent / "templates" / "TASK_REPORT.md").read_text(encoding="utf-8")
+    total += 1
+    if "SESSION_ID:" not in template or "RAN:" not in template or "report_vs_audit.py" not in template:
+        failures.append("report_vs_audit: templates/TASK_REPORT.md has no SESSION_ID: / RAN: lines")
+
+
 def test_audit_names(tmp):
     """K6: {worktree} and {container} in the log path, filled in when the command runs; one chain per file."""
     global total
@@ -3135,6 +3358,87 @@ def test_doctor(tmp):
     done = doc(repo=folder)
     check("outside a git repo exit 2", done.returncode == 2 and "not inside a git repo" in done.stderr, done.stderr)
     check("no doctor run printed the fake credential value", all(fake_token not in out for out in outputs), "value leaked")
+
+
+def test_doctor_launch(tmp):
+    """1.3.0 item 9: doctor lists each worktree's hook_guard settings against the sessions that started there (from the
+    transcripts' cwd) and WARNs on settings no session reads; with a --sessions file the permission check is the mildest."""
+    global total
+    folder = tmp / "launch"
+    main_repo, wt, home = folder / "main", folder / "wt", folder / "home"
+    for path in (main_repo, home / ".claude" / "projects"):
+        path.mkdir(parents=True)
+
+    def git_in(repo, *args):
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args], cwd=repo, check=True,
+                       capture_output=True)
+
+    git_in(main_repo, "init", "-q")
+    git_in(main_repo, "commit", "-q", "--allow-empty", "-m", "init")
+    git_in(main_repo, "worktree", "add", "-q", "--detach", str(wt))
+    (main_repo / ".git" / "info" / "exclude").write_text(".claude/settings.local.json\n", encoding="utf-8")
+    main_repo, wt = main_repo.resolve(), wt.resolve()
+    (main_repo / "sub").mkdir()
+
+    def transcript(cwd, name, age_days=0):
+        project = home / ".claude" / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(cwd))
+        project.mkdir(parents=True, exist_ok=True)
+        path = project / f"{name}.jsonl"
+        path.write_text(json.dumps({"type": "queue-operation"}) + "\n" + json.dumps(
+            {"type": "user", "cwd": str(cwd), "timestamp": "2026-11-07T01:00:00.000Z", "sessionId": name}) + "\n",
+            encoding="utf-8")
+        if age_days:
+            old = time.time() - age_days * 86400
+            os.utime(path, (old, old))
+
+    def doc(*args):
+        done = subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "doctor.py"), "--repo", str(main_repo),
+                               "--home", str(home), "--managed", str(folder / "managed.json"), "--path-claude",
+                               str(folder / "none.py"), *[str(x) for x in args]], capture_output=True, encoding="utf-8")
+        return done.stdout + done.stderr
+
+    def check(name, ok, detail):
+        global total
+        total += 1
+        if not ok:
+            failures.append(f"doctor launch {name}: {detail[-700:]}")
+
+    expect("guard the worktree only", "setup_project_settings.py", 0, "--repo", wt, "--only-this", "--guard-profile", "worker",
+           "--apply", says="SET")
+    transcript(main_repo, "s-main")
+    transcript(main_repo / "sub", "s-sub")
+    transcript(wt, "s-old", age_days=90)
+    out = doc()
+    check("counts the main checkout's sessions, a subfolder too", f"launch: {main_repo.as_posix()} sessions=2 last=2026-11-07 "
+          "hook_guard=no" in out, out)
+    check("an old transcript does not count", f"launch: {wt.as_posix()} sessions=0 hook_guard=yes" in out, out)
+    check("settings no session reads are a WARN", re.search(r"WARN +settings unread: " + re.escape(wt.as_posix()), out)
+          is not None and "sessions start in: " + main_repo.as_posix() in out, out)
+    check("the unguarded launch folder is a WARN", re.search(r"WARN +launch folder unguarded: 2 session\(s\) started in "
+          + re.escape(main_repo.as_posix()), out) is not None, out)
+    out = doc("--launch-days", 120)
+    check("--launch-days takes the old one in", f"launch: {wt.as_posix()} sessions=1" in out and "settings unread" not in out, out)
+    transcript(wt, "s-wt")
+    out = doc()
+    check("a session in the guarded worktree clears that WARN", "settings unread" not in out
+          and f"launch: {wt.as_posix()} sessions=1" in out, out)
+    shutil.rmtree(home / ".claude" / "projects")
+    out = doc()
+    check("no transcripts folder: not checked, no WARN", "launch folders: no " in out and "settings unread" not in out
+          and "launch folder unguarded" not in out, out)
+
+    # a sessions file: the permission check takes the mildest decision, as setup wrote it
+    smap = folder / "sessions.json"
+    smap.write_text(json.dumps({"schema_version": 1, "default": "worker", "sessions": {"S-C": "cleaner", "S-D": "director"}}),
+                    encoding="utf-8")
+    expect("setup the map in the main checkout", "setup_project_settings.py", 0, "--repo", main_repo, "--only-this",
+           "--session-map", smap, "--apply", says="SET")
+    out = doc()
+    check("doctor reads the sessions file", "sessions: " in out and "cleaner, director, worker" in out
+          and not re.search(r"MISSING +permissions", out), out)
+    smap.write_text("{", encoding="utf-8")
+    out = doc()
+    check("a broken sessions file is MISSING", re.search(r"MISSING +sessions file: bad sessions file", out) is not None, out)
 
 
 def test_container(tmp):
@@ -3713,6 +4017,418 @@ def test_dns_allow(tmp):
           docker_file)
 
 
+def check(name, ok, detail=""):
+    global total
+    total += 1
+    if not ok:
+        failures.append(f"{name}: {detail}"[:400])
+
+
+def um_call(mid, ts, tools=(), **usage):
+    """One assistant transcript line: tools are (name, input) pairs; usage keys are the token counts."""
+    content = [{"type": "tool_use", "name": n, "input": i} for n, i in tools]
+    return json.dumps({"type": "assistant", "timestamp": ts, "message": {"id": mid, "content": content, "usage": usage}})
+
+
+def test_usage_mix(tmp):
+    """usage_mix.py: fragments of one message.id are merged (L-035), a repeated id counts once, the five shares and the
+    DD-049 targets, --since / --until / --session / --patterns / --json / --check, NO_DATA, and the RESTART numbers."""
+    root = tmp / "usage_mix"
+    p = root / "proj"
+    p.mkdir(parents=True)
+    (root / "empty").mkdir()
+    md, py = ("Read", {"file_path": "D:/x/notes.md"}), ("Edit", {"file_path": "D:/x/app.py"})
+    (p / "aaaa1111.jsonl").write_text("\n".join([
+        json.dumps({"type": "custom-title", "customTitle": "line-alpha"}),
+        um_call("m1", "2026-01-02T10:00:00Z", (), input_tokens=1000),          # the usage fragment of m1
+        um_call("m1", "2026-01-02T10:00:00Z", [md], input_tokens=1000),        # the tool fragment of m1: merged, not summed
+        um_call("m2", "2026-01-02T10:01:00Z", [py], input_tokens=1000),
+        um_call("m3", "2026-01-02T10:02:00Z", [("Bash", {"command": "git status"})], input_tokens=2000)]) + "\n",
+        encoding="utf-8")
+    (p / "bbbb2222.jsonl").write_text("\n".join([
+        um_call("m2", "2026-01-02T10:01:00Z", [py], input_tokens=1000),        # a resumed copy: counted once
+        um_call("m4", "2026-01-05T10:00:00Z", [("Bash", {"command": "sleep 5"})], input_tokens=4000),
+        um_call("m5", "2026-01-05T10:01:00Z", [("Bash", {"command": "run mygame.exe --level 1"})], input_tokens=2000),
+        "not json"]) + "\n", encoding="utf-8")
+    pats = root / "patterns.json"
+    pats.write_text(json.dumps({"schema_version": 1, "patterns": {"engine_run": r"mygame\.exe"}}), encoding="utf-8")
+    bad = root / "bad.json"
+    bad.write_text(json.dumps({"schema_version": 2}), encoding="utf-8")
+    bad_key = root / "bad_key.json"
+    bad_key.write_text(json.dumps({"schema_version": 1, "patterns": {"nope": "x"}}), encoding="utf-8")
+    base = ("--root", root, "--project-dir", "proj")
+    expect("usage_mix shares, merge and dedupe", "usage_mix.py", 0, *base,
+           says=["calls=5 eq=0.0M", "讀和查\t 50.0%", "實際動手\t 10.0%", "等待\t 40.0%", "協調\t  0.0%",
+                 "target <=30% MISSED", "RESULT OFF_TARGET: 讀和查 50.0% (target <=30%); 實際動手 10.0% (target >=30%)"],
+           lacks="text_reply")
+    expect("usage_mix --check misses", "usage_mix.py", 1, *base, "--check", says="RESULT OFF_TARGET")
+    expect("usage_mix --patterns moves a project exe to 實際動手", "usage_mix.py", 0, *base, "--patterns", pats, "--check",
+           says=["讀和查\t 30.0%", "實際動手\t 30.0%  tool_calls 2  target >=30% OK", "RESULT ON_TARGET"])
+    expect("usage_mix --until a date keeps that whole day", "usage_mix.py", 0, *base, "--until", "2026-01-02",
+           says=["calls=3", "讀和查\t 75.0%", "實際動手\t 25.0%"])
+    expect("usage_mix --since", "usage_mix.py", 0, *base, "--since", "2026-01-03",
+           says=["calls=2", "等待\t 66.7%", "讀和查\t 33.3%"])
+    expect("usage_mix --session by title", "usage_mix.py", 0, *base, "--session", "ALPHA", says=["calls=3", "session=ALPHA"])
+    expect("usage_mix --session by id prefix", "usage_mix.py", 0, *base, "--session", "bbbb", says="calls=2")
+    expect("usage_mix --top names the session", "usage_mix.py", 0, *base, "--top", "2", says="session aaaa1111 line-alpha")
+    expect("usage_mix --json", "usage_mix.py", 0, *base, "--json",
+           says=['"eq_total": 10000', '"result": "OFF_TARGET"', '"cache_read_input_tokens": 0.1'])
+    expect("usage_mix no transcripts is NO_DATA", "usage_mix.py", 1, "--root", root, "--project-dir", "empty", says="NO_DATA")
+    expect("usage_mix a range with no calls is NO_DATA", "usage_mix.py", 1, *base, "--since", "2027-01-01", says="NO_DATA")
+    expect("usage_mix patterns schema", "usage_mix.py", 2, *base, "--patterns", bad, says="FAIL patterns")
+    expect("usage_mix patterns key", "usage_mix.py", 2, *base, "--patterns", bad_key, says="FAIL patterns")
+    expect("usage_mix patterns missing file", "usage_mix.py", 2, *base, "--patterns", root / "none.json", says="FAIL patterns")
+    # RESTART: cost per call by context, orientation after a new session and after a compaction, break-even
+    r = root / "restart"
+    r.mkdir()
+    (r / "cccc3333.jsonl").write_text("\n".join([
+        um_call("r1", "2026-01-02T10:00:00Z", [md], cache_read_input_tokens=100000),
+        um_call("r2", "2026-01-02T10:01:00Z", [py], cache_read_input_tokens=110000),
+        um_call("r3", "2026-01-02T10:02:00Z", [md], cache_read_input_tokens=180000),
+        um_call("r4", "2026-01-02T10:03:00Z", [md], cache_read_input_tokens=190000),
+        um_call("r5", "2026-01-02T10:04:00Z", [md], cache_read_input_tokens=50000),   # < 0.6 x 190K: a compaction
+        um_call("r6", "2026-01-02T10:05:00Z", [py], cache_read_input_tokens=60000)]) + "\n", encoding="utf-8")
+    expect("usage_mix restart numbers", "usage_mix.py", 0, "--root", root, "--project-dir", "restart",
+           says=["RESTART new main sessions 1, first-call context median 100.0K; compactions 1, after it 50.0K",
+                 "RESTART after a new session: 1 reached 實際動手, median 1 calls and 10.0K eq before the first one",
+                 "RESTART after a compaction: 1 reached 實際動手, median 1 calls and 5.0K eq",
+                 "60-120K 9.0K (3 calls)", ">=170K 18.5K (2 calls)",
+                 "RESTART break-even after 1 more calls: rebuilding costs 10.0K, each call saves 9.5K"])
+    n = root / "never"
+    n.mkdir()
+    (n / "dddd4444.jsonl").write_text("\n".join([
+        um_call("n1", "2026-01-02T10:00:00Z", [md], cache_creation_input_tokens=100000),  # a new session writes its cache
+        um_call("n2", "2026-01-02T10:01:00Z", [py], cache_read_input_tokens=110000),
+        um_call("n3", "2026-01-02T10:02:00Z", [md], cache_read_input_tokens=180000)]) + "\n", encoding="utf-8")
+    expect("usage_mix break-even NEVER", "usage_mix.py", 0, "--root", root, "--project-dir", "never",
+           says="RESTART break-even NEVER: a call at >=170K costs 18.0K, no more than 68.0K at 60-120K")
+    expect("usage_mix break-even UNKNOWN", "usage_mix.py", 0, *base, says="RESTART break-even UNKNOWN")
+
+
+def test_status_gen(tmp):
+    """status_gen.py writes a status.py that only reads, prints at most max_lines lines of at most width characters,
+    and exits 1 on a missing path or a disk below the threshold (L-042)."""
+    d = tmp / "status_gen"
+    (d / "out" / "sub").mkdir(parents=True)
+    (d / "run.log").write_text("".join(f"line {i} of the run log\n" for i in range(1, 101)) + "x" * 500 + "\n", encoding="utf-8")
+    (d / "hashes.txt").write_text("abc123  build.zip\n", encoding="utf-8")
+    (d / "out" / "a.png").write_bytes(b"x")
+    (d / "out" / "sub" / "b.png").write_bytes(b"yy")
+
+    def status(name, script, code, says=(), lacks=(), max_lines=60, width=160):
+        done = subprocess.run([sys.executable, "-I", str(script)], capture_output=True, encoding="utf-8")
+        lines = done.stdout.splitlines()
+        bad = [s for s in says if s not in done.stdout] + [f"has {s}" for s in lacks if s in done.stdout]
+        check(name, done.returncode == code and not bad and len(lines) <= max_lines and all(len(x) <= width for x in lines),
+              f"exit {done.returncode} (want {code}), {len(lines)} lines, missing {bad}: {done.stdout.strip()[-300:]}")
+
+    full = d / "status_full.py"
+    expect("status_gen writes", "status_gen.py", 0, "--out", full, "--name", "line-a", "--log", d / "run.log",
+           "--hash-file", d / "hashes.txt", "--checksum", d / "hashes.txt", "--outputs", d / "out", "--disk", tmp,
+           "--disk-min-gib", "0.001", "--git", TOOLS.parent, says="WROTE")
+    status("status.py full", full, 0, says=["STATUS line-a", "  line 99 of the run log", "HASH sha256 ", "  abc123  build.zip",
+                                            " OK", "GIT ", "OUT ", "2 files, newest 2", "b.png"])
+    small = d / "status_small.py"
+    expect("status_gen small cap", "status_gen.py", 0, "--out", small, "--log", d / "run.log", "--log-lines", "100",
+           "--max-lines", "10", "--width", "40")
+    status("status.py line cap and width", small, 0, says=["TRUNCATED 93 more lines (max_lines 10)"], max_lines=10, width=40)
+    bad = d / "status_bad.py"
+    expect("status_gen missing paths are written", "status_gen.py", 0, "--out", bad, "--log", d / "none.log",
+           "--outputs", d / "none", "--disk", tmp, "--disk-min-gib", "999999")
+    status("status.py missing and low", bad, 1, says=["LOG MISSING", "OUT MISSING", " LOW"])
+    nogit = d / "status_nogit.py"
+    expect("status_gen git outside a worktree", "status_gen.py", 0, "--out", nogit, "--git", d)
+    status("status.py not a git worktree", nogit, 1, says=["GIT MISSING"])
+    expect("status_gen keeps an existing file", "status_gen.py", 2, "--out", full, "--log", d / "run.log", says="--force")
+    expect("status_gen --force replaces it", "status_gen.py", 0, "--out", full, "--log", d / "run.log", "--force")
+    expect("status_gen nothing to report", "status_gen.py", 2, "--out", d / "s_none.py", says="nothing to report")
+    expect("status_gen threshold needs a disk", "status_gen.py", 2, "--out", d / "s_none.py", "--log", d / "run.log",
+           "--disk-min-gib", "5", says="disk_min_gib needs disk")
+    conf = d / "conf" / "status.json"
+    conf.parent.mkdir()
+    conf.write_text(json.dumps({"schema_version": 1, "name": "from-config", "logs": ["../run.log"], "log_lines": 2}),
+                    encoding="utf-8")
+    cfg = d / "status_cfg.py"
+    expect("status_gen config", "status_gen.py", 0, "--out", cfg, "--config", conf)
+    status("status.py config paths are the config folder's", cfg, 0, says=["STATUS from-config", "  line 100 of the run log"],
+           lacks=["line 98 of"])
+    conf.write_text(json.dumps({"schema_version": 1, "logs": ["a"], "extra": 1}), encoding="utf-8")
+    expect("status_gen unknown config key", "status_gen.py", 2, "--out", d / "s_none.py", "--config", conf, says="unknown key")
+    conf.write_text(json.dumps({"schema_version": 1, "logs": "a"}), encoding="utf-8")
+    expect("status_gen wrong config type", "status_gen.py", 2, "--out", d / "s_none.py", "--config", conf, says="wrong type")
+    source = full.read_text(encoding="utf-8")
+    check("status.py uses only the standard library and does not write", "open(path, \"rb\")" in source
+          and not re.search(r"^import (?!datetime|glob|hashlib|json|os|re|shlex|shutil|subprocess|sys)", source, re.M)
+          and not re.search(r"open\([^)]*[\"'][wa]", source), "status.py imports or writes something")
+
+
+def test_status_director(tmp):
+    """1.3.0 §6: the Director status.py: PO page counts (regex or JSON list), open orders, unsent items, the last hour of
+    each action log (lines, blocked, log reads, sessions), whether a process runs, the disk; still at most max_lines."""
+    d = tmp / "status_director"
+    (d / "orders").mkdir(parents=True)
+    (d / "audit").mkdir()
+    (d / "PO_PENDING.md").write_text("ID: OD-1\nSTATUS: answered\n\nID: OD-2\nSTATUS: open\n\nID: OD-3\nSTATUS: answered\n"
+                                     "\nID: N-1\nSTATUS: new\n", encoding="utf-8")
+    (d / "po.html").write_text("<html><script>window.DATA = " + json.dumps(
+        {"page": {"decisions": [{"status": "answered"}, {"status": "open"}], "notes": [{"status": "new"}] * 3}})
+        + ";</script></html>", encoding="utf-8")
+    (d / "orders" / "WO-1.md").write_text("# WO-1\nSTATUS: CLOSED\n", encoding="utf-8")
+    (d / "orders" / "WO-2.md").write_text("# WO-2\nREVISION = 1\n", encoding="utf-8")
+    (d / "orders" / "WO-3.md").write_text("# WO-3\n狀態：進行中\n", encoding="utf-8")
+    (d / "orders" / "notes.md").write_text("not an order\n", encoding="utf-8")
+    (d / "PENDING_SENDS.md").write_text("- [x] sent one\n- [ ] to 總監: report A\n- [ ] to line-b: retry\n",
+                                        encoding="utf-8")
+    now = datetime.datetime.now(datetime.timezone.utc)
+
+    def line(minutes_ago, session, tool, command, kind="result", status="ok"):
+        ts = (now - datetime.timedelta(minutes=minutes_ago)).isoformat(timespec="milliseconds")
+        return json.dumps({"seq": 0, "ts": ts, "session_id": session, "tool": tool, "kind": kind,
+                           "input": json.dumps({"command": command}), "result": {"status": status}}) + "\n"
+
+    old = line(180, "S0", "Bash", "tail run.log")
+    with open(d / "audit" / "a.jsonl", "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(old * (1300000 // len(old) + 1))  # more than one 1 MiB block of old lines
+        fh.write(line(30, "S1", "Bash", "tail -n 20 D:/w/run.log"))
+        fh.write(line(20, "S1", "PowerShell", "Get-Content D:\\w\\run.log -Tail 5"))
+        fh.write(line(10, "S2", "Bash", "python tools/selftest.py"))
+        fh.write(line(5, "S2", "Bash", "git push", kind="decision", status="deny"))
+        fh.write(line(4, "S2", "Bash", "rm -rf x", kind="decision", status="pause"))
+        fh.write(line(3, "S2", "Bash", "gh pr create", kind="decision", status="ask"))
+    (d / "audit" / "b.jsonl").write_text(old, encoding="utf-8")
+    marker = "dwstatusprobe" + str(os.getpid())
+    sleeper = subprocess.Popen([sys.executable, "-c", "import time, sys; time.sleep(120)", marker])
+    try:
+        conf = d / "director.json"
+        conf.write_text(json.dumps({
+            "schema_version": 1, "name": "director",
+            "po_page": {"path": "PO_PENDING.md", "counts": [{"label": "answered", "regex": r"^STATUS:\s*answered\b"},
+                                                            {"label": "new", "regex": r"^STATUS:\s*new\b"}]},
+            "orders": {"dir": "orders", "show": 1}, "pending_sends": {"path": "PENDING_SENDS.md"},
+            "audit": {"globs": ["audit/*.jsonl"]},
+            "processes": [{"label": "probe", "match": marker}, {"label": "idle_watch", "match": "no_such_process_" + marker[::-1]}],
+            "disk": str(tmp), "max_lines": 20}), encoding="utf-8")
+        script = d / "status.py"
+        expect("status_gen director config", "status_gen.py", 0, "--out", script, "--config", conf, says="WROTE")
+        done = subprocess.run([sys.executable, "-I", str(script)], capture_output=True, encoding="utf-8")
+        out = done.stdout
+        want = [f"PO {d / 'PO_PENDING.md'}: answered=2, new=1", "ORDERS ", ": 2 open of 3", "  ... 1 more",
+                ": 2 not sent", "  - [ ] to 總監: report A",
+                "AUDIT a.jsonl last 1h: lines=6 blocked=2 log_reads=2 sessions=2",
+                "AUDIT b.jsonl last 1h: lines=0 blocked=0 log_reads=0 sessions=0",
+                "PROC probe: running (1)", "PROC idle_watch: NOT RUNNING", "DISK "]
+        bad = [w for w in want if w not in out]
+        check("status.py director sections", done.returncode == 1 and not bad and len(out.splitlines()) <= 20,
+              f"exit {done.returncode}, missing {bad}: {out[-900:]}")
+        check("status.py director: WO-1 is closed, notes.md is no order", "WO-1.md" not in out and "notes.md" not in out
+              and ("WO-2.md" in out or "WO-3.md" in out), out[-600:])
+    finally:
+        sleeper.kill()
+        sleeper.wait()
+    conf.write_text(json.dumps({"schema_version": 1, "po_page": {"path": "po.html", "extract": r"window\.DATA = (\{.*\});",
+                    "counts": [{"label": "decisions answered", "list": "page.decisions", "field": "status", "value": "answered"},
+                               {"label": "notes new", "list": "page.notes", "value": "new"},
+                               {"label": "notes", "list": "page.notes"},
+                               {"label": "bad", "list": "page.none"}]},
+                    "pending_sends": {"path": "orders"}}), encoding="utf-8")
+    expect("status_gen director JSON page", "status_gen.py", 0, "--out", script, "--config", conf, "--force")
+    done = subprocess.run([sys.executable, "-I", str(script)], capture_output=True, encoding="utf-8")
+    check("status.py JSON page counts; a bad key is ? and exit 1", done.returncode == 1
+          and "decisions answered=1, notes new=3, notes=3, bad=? (" in done.stdout
+          and "SENDS " in done.stdout and ": 4 not sent" in done.stdout, done.stdout[-600:])
+    for name, body, says in (
+            ("regex and list together", {"po_page": {"path": "x", "counts": [{"label": "a", "regex": "x", "list": "y"}]}},
+             "one of them"),
+            ("a bad regex", {"orders": {"dir": "orders", "closed": "("}}, "not a regex"),
+            ("an unknown section key", {"audit": {"globs": ["a"], "days": 1}}, "unknown key"),
+            ("hours 0", {"audit": {"globs": ["a"], "hours": 0}}, "more than 0"),
+            ("a process without match", {"processes": [{"label": "x"}]}, "processes.match")):
+        conf.write_text(json.dumps(dict({"schema_version": 1}, **body)), encoding="utf-8")
+        expect(f"status_gen director {name}", "status_gen.py", 2, "--out", d / "s_none.py", "--config", conf, says=says)
+    conf.write_text((TOOLS.parent / "templates" / "status_director.json").read_text(encoding="utf-8"), encoding="utf-8")
+    expect("status_gen the director template loads", "status_gen.py", 0, "--out", d / "s_tpl.py", "--config", conf,
+           says="WROTE")
+    source = (d / "s_tpl.py").read_text(encoding="utf-8")
+    poll = (TOOLS / "poll_hint.py").read_text(encoding="utf-8")
+    check("status.py carries poll_hint's read_targets as it is",
+          re.search(r"^def read_targets.*?(?=^\S)", poll, re.M | re.S).group().rstrip() in source, "copy differs")
+
+
+def test_round_check(tmp):
+    """round_check.py: fix rounds go in sets of 3; from round 4 the study must hold WHERE / ALTERNATIVES / DECISION
+    for every finished set (L-032)."""
+    d = tmp / "round_check"
+    d.mkdir()
+
+    def resume(name, rows):
+        f = d / f"RESUME_STATE_{name}.md"
+        f.write_text("PROGRESS: x\n\nFIX_ROUNDS:\n" + "".join(f"- {r}\n" for r in rows) + "OPEN_DECISIONS: NONE\n",
+                     encoding="utf-8")
+        return f
+
+    study = ("# ROOT CAUSE STUDY\n\n## SET 1\nWHERE: the shader, not the mesh\nALTERNATIVES: a ready asset; bake it\n"
+             "DECISION: bake it\n\n## material SET 2\nWHERE: import settings\nALTERNATIVES: preset\nDECISION: preset\n")
+    (d / "ROOT_CAUSE_STUDY.md").write_text(study, encoding="utf-8")
+    (d / "STUDY_EMPTY.md").write_text("## SET 1\nWHERE: <where>\nALTERNATIVES:\nDECISION: ...\n", encoding="utf-8")
+    ok = resume("ok", ["hair: round=4 set=2 study=ROOT_CAUSE_STUDY.md", "eyes: round=3 set=1 study=NONE"])
+    expect("round_check set 1 and a studied set 2 pass", "round_check.py", 0, "--resume", ok,
+           says="ROUNDS: PASS files=1 defects=2 failed=0")
+    expect("round_check round 4 without a study", "round_check.py", 1, "--resume",
+           resume("nostudy", ["hair: round=4 set=2 study=NONE"]), says=["needs a root-cause study after set 1", "ROUNDS: FAIL"])
+    expect("round_check study file missing", "round_check.py", 1, "--resume",
+           resume("gone", ["hair: round=5 set=2 study=NOPE.md"]), says="study file not found: NOPE.md")
+    expect("round_check study lines empty", "round_check.py", 1, "--resume",
+           resume("empty", ["hair: round=4 set=2 study=STUDY_EMPTY.md"]),
+           says="STUDY_EMPTY.md SET 1: WHERE, ALTERNATIVES, DECISION empty or missing")
+    expect("round_check set 3 needs a SET 2 section for this defect", "round_check.py", 1, "--resume",
+           resume("set3", ["hair: round=7 set=3 study=ROOT_CAUSE_STUDY.md"]), says="no `## SET 2` section")
+    expect("round_check a section named for the defect counts", "round_check.py", 0, "--resume",
+           resume("named", ["material: round=7 set=3 study=ROOT_CAUSE_STUDY.md"]), says="ROUNDS: PASS")
+    expect("round_check set must match the round", "round_check.py", 1, "--resume",
+           resume("wrongset", ["hair: round=4 set=1 study=ROOT_CAUSE_STUDY.md"]), says="round 4 belongs to set 2")
+    expect("round_check numbers", "round_check.py", 1, "--resume", resume("nan", ["hair: round=x set=1 study=NONE"]),
+           says="must be numbers")
+    none = d / "none"
+    none.mkdir()
+    (none / "RESUME_STATE.md").write_text("PROGRESS: x\nFIX_ROUNDS: NONE\n", encoding="utf-8")
+    expect("round_check FIX_ROUNDS NONE", "round_check.py", 0, "--dir", none, says="ROUNDS: PASS files=1 defects=0")
+    (none / "RESUME_STATE.md").write_text("PROGRESS: x\n", encoding="utf-8")
+    expect("round_check without the field", "round_check.py", 0, "--dir", none, says="no FIX_ROUNDS field")
+    expect("round_check --dir default glob", "round_check.py", 1, "--dir", d, says="ROUNDS: FAIL files=")
+    expect("round_check no RESUME_STATE", "round_check.py", 1, "--dir", d / "round_none_here",
+           says="no RESUME_STATE*.md")
+
+
+TR_GOOD = """TEST REQUEST: BENCH hair pass 40
+FROM: line-a worker
+PURPOSE: AC-3 hair look
+MIN_SCOPE: one scene, 3 sets
+TIER: 1
+CHANGES: hair shader (switch HAIR_V2)
+SWITCHES: HAIR_V2 on / off
+EXCLUSIVE_MIN: 10
+NORMAL_MIN: 20
+BUILD_GB: 6.5
+CAPTURE: 3 x 200 x 4 MiB = 2.34
+CACHE_GB: 3
+WRITE_GB: 12
+DURATION: 3 x 12 min = 36
+TIER0_DONE: unit tests, offline render check
+"""
+
+
+def test_test_request(tmp):
+    """gate_check --test-request: every field filled; space in GiB covering build + capture + cache (L-030, L-031);
+    duration = sets x measured minutes with timeouts, within the limit (L-033)."""
+    expect("blank template TEST_REQUEST is refused", "gate_check.py", 1, "--test-request", TEMPLATES / "TEST_REQUEST.md")
+    gate(tmp, "tr_ok", "test-request", TR_GOOD, 0)
+    gate(tmp, "tr_capture_none", "test-request", TR_GOOD.replace("3 x 200 x 4 MiB = 2.34", "NONE"), 0)
+    gate(tmp, "tr_missing", "test-request", TR_GOOD.replace("DURATION: 3 x 12 min = 36\n", ""), 1, "DURATION: missing")
+    gate(tmp, "tr_empty", "test-request", TR_GOOD.replace("CACHE_GB: 3", "CACHE_GB:"), 1, "CACHE_GB")
+    gate(tmp, "tr_decimal_gb", "test-request", TR_GOOD.replace("BUILD_GB: 6.5", "BUILD_GB: 6.5 GB"), 1, "not decimal GB")
+    gate(tmp, "tr_capture_math", "test-request", TR_GOOD.replace("= 2.34", "= 0.5"), 1, "CAPTURE: 3 x 200 x 4 MiB is 2.34")
+    gate(tmp, "tr_capture_form", "test-request", TR_GOOD.replace("3 x 200 x 4 MiB = 2.34", "about 2 GiB"), 1,
+         "CAPTURE: `<sets>")
+    gate(tmp, "tr_write_short", "test-request", TR_GOOD.replace("WRITE_GB: 12", "WRITE_GB: 8"), 1,
+         "less than BUILD_GB + CAPTURE + CACHE_GB")
+    gate(tmp, "tr_duration_math", "test-request", TR_GOOD.replace("= 36", "= 20"), 1, "DURATION: 3 x 12 is 36")
+    gate(tmp, "tr_duration_form", "test-request", TR_GOOD.replace("3 x 12 min = 36", "about half an hour"), 1,
+         "DURATION: `<sets>")
+    gate(tmp, "tr_over_limit", "test-request", TR_GOOD.replace("hair pass 40", "hair pass 30"), 1,
+         "the limit 30 minutes is below DURATION 36")
+
+
+def test_poll_hint(tmp):
+    """poll_hint.py (PostToolUse): the third read of one log by one session within the window adds 等完成通知;
+    it never blocks (L-041)."""
+    state = tmp / "poll_state"
+
+    def hook(name, command, session="s1", tool="Bash", hint=False, extra=()):
+        global total
+        total += 1
+        event = json.dumps({"session_id": session, "tool_name": tool, "tool_input": {"command": command}})
+        done = subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "poll_hint.py"), "--state-dir", str(state),
+                               *extra], input=event, capture_output=True, encoding="utf-8")
+        got = "等完成通知" in done.stdout
+        if done.returncode != 0 or got != hint or (hint and '"hookEventName": "PostToolUse"' not in done.stdout):
+            failures.append(f"{name}: expected exit 0 hint={hint}, got {done.returncode} hint={got}: {done.stdout[-200:]}")
+
+    hook("poll_hint first read", "tail -n 20 D:/w/run.log")
+    hook("poll_hint other session", "tail -n 20 D:/w/run.log", session="s2")
+    hook("poll_hint second read, other verb", "Get-Content D:\\w\\run.log -Tail 20", tool="PowerShell")
+    hook("poll_hint third read hints", "cat d:/w/RUN.log | grep ERROR", hint=True)
+    hook("poll_hint count starts again", "tail D:/w/run.log")
+    hook("poll_hint cat of source is not a log read", "cat tools/a.py && cat tools/a.py && cat tools/a.py")
+    hook("poll_hint other tools are ignored", "tail D:/w/run.log", tool="Read")
+    hook("poll_hint other session still at 1", "tail -f D:/w/run.log", session="s2")
+    hook("poll_hint one command reading twice counts once", "tail x.log; tail x.log", session="s3")
+    hook("poll_hint window", "tail y.log", session="s4", extra=("--window", "0"))
+    hook("poll_hint window 0 never adds up", "tail y.log", session="s4", extra=("--window", "0"))
+    hook("poll_hint --times", "tail z.log", session="s5", extra=("--times", "1"), hint=True)
+    global total
+    total += 1
+    done = subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "poll_hint.py"), "--state-dir", str(state)],
+                          input="not json", capture_output=True, encoding="utf-8")
+    if done.returncode != 0 or done.stdout.strip():
+        failures.append(f"poll_hint bad input: expected exit 0 and no output, got {done.returncode}: {done.stdout[-200:]}")
+
+
+def test_poll_report(tmp):
+    """1.3.0 §6: poll_hint.py report counts log reads per session from action logs, for the Director's weekly report."""
+    d = tmp / "poll_report"
+    d.mkdir()
+
+    def line(ts, session, command, tool="Bash", kind="result"):
+        return json.dumps({"seq": 0, "ts": ts, "session_id": session, "tool": tool, "kind": kind,
+                           "input": json.dumps({"command": command}), "result": {"status": "ok"}}) + "\n"
+
+    (d / "a.jsonl").write_text(
+        line("2026-11-01T01:00:00.000+00:00", "S1", "tail run.log")
+        + line("2026-11-07T01:00:00.000+00:00", "S1", "tail -n 5 D:/w/run.log")
+        + line("2026-11-07T01:02:00.000+00:00", "S1", "Get-Content D:\\w\\run.log -Tail 5", tool="PowerShell")
+        + line("2026-11-07T01:04:00.000+00:00", "S1", "cat d:/w/RUN.log")
+        + line("2026-11-07T01:05:00.000+00:00", "S1", "tail other.log")
+        + line("2026-11-07T01:06:00.000+00:00", "S1", "tail run.log", kind="decision")
+        + line("2026-11-07T01:07:00.000+00:00", "S1", "x", tool="Read")
+        + "not json\n", encoding="utf-8")
+    (d / "b.jsonl").write_text(line("2026-11-07T02:00:00.000+00:00", "S2", "tail b.log")
+                               + line("2026-11-07T02:00:30.000+00:00", "S2", "git status"), encoding="utf-8")
+    smap = d / "sessions.json"
+    smap.write_text(json.dumps({"schema_version": 1, "sessions": {"S1": {"profile": "worker", "name": "line-a"}}}),
+                    encoding="utf-8")
+
+    def rep(name, code, *args, says=(), lacks=()):
+        global total
+        total += 1
+        done = subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "poll_hint.py"), "report",
+                               *[str(x) for x in args]], capture_output=True, encoding="utf-8")
+        out = done.stdout + done.stderr
+        bad = [s for s in says if s not in out] + [f"not {s}" for s in lacks if s in out]
+        if done.returncode != code or bad:
+            failures.append(f"poll_hint report {name}: expected exit {code}, got {done.returncode}; {bad}: {out[-600:]}")
+        return done.stdout
+
+    rep("per session, glob", 0, "--log", d / "*.jsonl", "--sessions", smap,
+        says=["line-a", "POLL_REPORT: sessions=2 log_reads=6 hints=1 lines=9 logs=2 since=all", "d:/w/run.log x3"])
+    rep("--since drops the old line", 0, "--log", d / "a.jsonl", "--since", "2026-11-06",
+        says=["POLL_REPORT: sessions=1 log_reads=4 hints=1 lines=6 logs=1"])
+    out = rep("--json", 0, "--log", d / "a.jsonl", "--log", d / "b.jsonl", "--json")
+    global total
+    total += 1
+    try:
+        data = json.loads(out)
+        rows = {r["session"]: r for r in data["sessions"]}
+        ok = rows["S1"]["log_reads"] == 5 and rows["S1"]["files"] == 3 and rows["S2"]["hints"] == 0 \
+            and data["total"]["log_reads"] == 6
+    except (ValueError, KeyError):
+        ok = False
+    if not ok:
+        failures.append(f"poll_hint report --json: {out[-500:]}")
+    rep("--window 0 gives no hint", 0, "--log", d / "a.jsonl", "--window", "0", says=["hints=0"])
+    rep("a missing log", 2, "--log", d / "none.jsonl", says=["no log at"])
+    rep("a bad --since", 2, "--log", d / "a.jsonl", "--since", "last week", says=["not an ISO"])
+
+
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="director_work_selftest_")).resolve()
@@ -3740,12 +4456,15 @@ def main():
         test_hook(tmp)
         test_hook_protect(tmp)
         test_hook_rules(tmp)
+        test_session_profiles(tmp)
         test_pause(tmp)
         test_auto_pause(tmp)
         test_audit(tmp)
         test_audit_names(tmp)
+        test_report_vs_audit(tmp)
         test_review(tmp)
         test_doctor(tmp)
+        test_doctor_launch(tmp)
         test_container(tmp)
         test_worker_clone(tmp)
         test_dns_allow(tmp)
@@ -3756,6 +4475,13 @@ def main():
         test_trusted_rerun(tmp)
         test_rerun_binding(tmp)
         test_trusted_isolation(tmp)
+        test_usage_mix(tmp)
+        test_status_gen(tmp)
+        test_status_director(tmp)
+        test_round_check(tmp)
+        test_test_request(tmp)
+        test_poll_hint(tmp)
+        test_poll_report(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     for failure in failures:

@@ -70,6 +70,20 @@ hook_guard [ID]: second-model review: REASON"); no_objection keeps the ask (a pe
 (review.timeout_s), a non-zero exit or anything else keeps the ask as review=unavailable. So the review can only
 tighten: a deny or a silent pass is never sent to it. --audit lines say "ID review=VERDICT via=SOURCE". Each review
 is one claude -p call on the logged-in account: no money, but it uses the subscription's quota.
+With --sessions FILE (needs --rules; setup_project_settings.py --session-map) the profile is chosen per call from the
+hook input's session_id, because Claude Code reads settings only from the folder a session was started in: several
+sessions (Director, workers, cleaner) that start in one folder share one settings file, whatever worktree each later
+works in. FILE (templates/guard_sessions.json):
+  {"schema_version": 1, "default": "worker",
+   "sessions": {"SESSION_ID": "director", "SESSION_ID2": {"profile": "cleaner", "name": "cleaner"}},
+   "protected": ["D:/work/DIRECTOR/**", "~/keep/**", "**/RESUME_STATE.md"]}
+A session_id the file does not name gets "default" (else --profile). cleaner is the worker profile with the rules of
+category "delete" off (it may delete files); for every profile a delete or move command (the delete rules' commands,
+mv, Move-Item, ren, Rename-Item) on a path that a protected glob matches, or on a folder above a protected glob's
+fixed part (also a wildcard word such as D:/work/* that matches such a folder), is denied (exit 2, rule "protected"
+in the action log). A **/ glob only matches the named file, so deleting a folder that happens to hold one is not
+seen. The worktree, branch and tag checks above hold for the cleaner too. With --sessions the Director's session is
+never held by --pause-flag and never auto-pauses. A sessions file that cannot be read or is malformed gives exit 1.
 Without --rules the output is the same as before, byte for byte.
 """
 import argparse
@@ -311,6 +325,9 @@ def protected_reason(file_path, cwd, protect):
 
 
 PROFILES = ("worker", "director")
+# cleaner: a worker whose "delete" rules do not apply; the sessions file's protected list still holds (--sessions)
+SESSION_PROFILES = PROFILES + ("cleaner",)
+CLEANER_OPEN = ("delete",)
 DECISIONS = ("deny", "ask", "none")
 KINDS = {"shell": ("cmd",), "path": ("tools", "globs"), "mcp": ("words",)}
 WRITE_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
@@ -325,6 +342,86 @@ SELF_RULE = {"id": "G00", "decision": {"worker": "deny", "director": "ask"},
 
 class RulesError(Exception):
     pass
+
+
+def base_profile(profile):
+    """The profile of the rules file whose pause and auto-pause settings a session profile uses."""
+    return "worker" if profile == "cleaner" else profile
+
+
+def rule_decision(rule, profile):
+    if profile == "cleaner":
+        return "none" if rule.get("category") in CLEANER_OPEN else rule["decision"]["worker"]
+    return rule["decision"][profile]
+
+
+SESSION_KEYS = {"schema_version", "about", "default", "sessions", "protected"}
+
+
+def load_sessions(path):
+    """The sessions file (--sessions): {"schema_version": 1, "default": PROFILE, "sessions": {SESSION_ID: PROFILE or
+    {"profile": PROFILE, "name": TEXT}}, "protected": [GLOB, ...]}; raises RulesError when it is bad."""
+    try:
+        data = json.loads(pathlib.Path(path).read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as error:
+        raise RulesError(f"cannot read {path}: {error}")
+    if not isinstance(data, dict) or data.get("schema_version") != 1:
+        raise RulesError(f"{path}: needs schema_version 1")
+    problems = [f"unknown key {k}" for k in sorted(set(data) - SESSION_KEYS)]
+    if data.get("default", "worker") not in SESSION_PROFILES:
+        problems.append(f"default must be one of {', '.join(SESSION_PROFILES)}")
+    sessions = data.get("sessions", {})
+    if not isinstance(sessions, dict):
+        problems.append("sessions must be an object of session_id: profile")
+        sessions = {}
+    for sid, entry in sessions.items():
+        profile = entry.get("profile") if isinstance(entry, dict) else entry
+        if not sid.strip() or profile not in SESSION_PROFILES or (isinstance(entry, dict) and set(entry) - {"profile", "name", "about"}):
+            problems.append(f"sessions.{sid}: a profile ({', '.join(SESSION_PROFILES)}) or {{profile, name}}")
+    protected = data.get("protected", [])
+    if not string_list(protected, empty=True) or not all(
+            g.startswith(("~/", "**/", "/")) or re.match(r"[A-Za-z]:[\\/]", g) for g in protected):
+        problems.append("protected must be a list of absolute, ~/ or **/ globs")
+    if problems:
+        raise RulesError(f"{path}: " + "; ".join(problems))
+    return data
+
+
+def session_profile(sessions, call, fallback):
+    entry = sessions.get("sessions", {}).get(str(call.get("session_id") or ""))
+    if entry is not None:
+        return entry["profile"] if isinstance(entry, dict) else entry
+    return sessions.get("default", fallback)
+
+
+MOVERS = ("mv", "move", "move-item", "mi", "ren", "rename-item", "rni")
+
+
+def protected_delete(data, commands, cwd, globs):
+    """The reason a shell line deletes or moves a protected path (or a folder above one), else None."""
+    if not globs:
+        return None
+    home = rule_path(str(pathlib.Path.home()), None)
+    norm = (lambda s: s.lower()) if os.name == "nt" else (lambda s: s)
+    deleters = [m for r in data["rules"] if r.get("category") in CLEANER_OPEN for m in as_list(r["match"]) if m["kind"] == "shell"]
+    for name, rest in commands:
+        if name not in MOVERS and not any(shell_match(m, name, rest, cwd, home) for m in deleters):
+            continue
+        for word in rest:
+            if word.startswith("-") or not word.strip():
+                continue
+            target = arg_path(word, cwd)
+            wild = glob_regex(target, home) if re.search(r"[*?]", target) else None
+            for g in globs:
+                if glob_regex(g, home).fullmatch(target):
+                    return f"{word} is on the protected list ({g}); report it to the Director instead of deleting it"
+                literal = re.split(r"[*?]", (home.rstrip("/") + g[1:]) if g.startswith("~/") else g.replace("\\", "/"))[0]
+                folder = norm(literal.rstrip("/"))
+                parts = folder.split("/")
+                above = ["/".join(parts[:k]) for k in range(len(parts), 0, -1)]  # down to the drive or /
+                if folder and (any(norm(target).rstrip("/") == p for p in above) or wild and any(wild.fullmatch(p) for p in above)):
+                    return f"{word} holds protected paths ({g}); report it to the Director instead of deleting it"
+    return None
 
 
 def string_list(value, empty=False):
@@ -739,7 +836,7 @@ def pause_allows(data, profile, call):
     if has_redirect(command, "powershell" if tool == "PowerShell" else "bash"):
         return False  # git log > a.py writes a file; 2>&1 is not a redirect to a file
     commands = list(simple_commands(FD_DUP.sub(" ", command), "powershell" if tool == "PowerShell" else "bash"))
-    allowed = pause["allow_shell"][profile]
+    allowed = pause["allow_shell"][base_profile(profile)]
     return bool(commands) and all(any(re.fullmatch(r, " ".join([n] + list(rest)), re.I | re.S) for r in allowed)
                                   for n, rest in commands)
 
@@ -907,9 +1004,9 @@ def decide(data, profile, call, rules_path):
     guarded = {rule_path(str(rules_path), None), rule_path(str(own), None), rule_path(str(own.with_name("guard_rules.json")), None)}
     names = {pathlib.Path(str(rules_path)).name.lower(), "guard_rules.json", own.name.lower()}
     if tool in WRITE_TOOLS and target in guarded or self_write(commands, names, line_targets):
-        hits.append((SELF_RULE["decision"][profile], "G00", SELF_RULE["reason"]))
+        hits.append((SELF_RULE["decision"][base_profile(profile)], "G00", SELF_RULE["reason"]))
     for rule in data["rules"]:
-        decision = rule["decision"][profile]
+        decision = rule_decision(rule, profile)
         if decision == "none":
             continue
         for m in as_list(rule["match"]):
@@ -945,20 +1042,26 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--protect", action="append", default=[], help="DIRECTOR folder whose orders/ and DIRECTOR_LOG.md Write / Edit may not touch")
     ap.add_argument("--rules", help="rules file (tools/guard_rules.json): check every tool call against it")
-    ap.add_argument("--profile", choices=PROFILES, default="worker", help="which decision of each rule applies (default worker)")
+    ap.add_argument("--profile", choices=SESSION_PROFILES, default="worker", help="which decision of each rule applies (default worker)")
     ap.add_argument("--pause-flag", help="flag file (pause_ctl.py on): while it exists, deny what the rules' pause section does not allow")
     ap.add_argument("--review", action="store_true", help="show asks of the rules' review categories to a second model "
                     "first; it can only turn an ask into a deny (uses claude -p quota)")
     ap.add_argument("--audit", help="action log (audit_log.py): add a decision line for every deny, ask and pause")
+    ap.add_argument("--sessions", help="sessions file: the profile per session_id (director / worker / cleaner) and "
+                    "the protected list; --profile is the fallback for a session it does not name (needs --rules)")
     a = ap.parse_args()
-    data = None
+    data = sessions = None
+    if a.sessions and not a.rules:
+        print("hook_guard: --sessions needs --rules", file=sys.stderr)
+        return 1
     if a.rules:
         try:
             data = load_rules(a.rules)
             if a.pause_flag and "pause" not in data:
                 raise RulesError(f"{a.rules}: --pause-flag needs a pause section")
+            sessions = load_sessions(a.sessions) if a.sessions else None
         except RulesError as error:
-            print(f"hook_guard: bad rules file: {error}", file=sys.stderr)
+            print(f"hook_guard: bad {'sessions' if a.sessions and data else 'rules'} file: {error}", file=sys.stderr)
             return 1
     elif a.pause_flag:
         print("hook_guard: --pause-flag needs --rules", file=sys.stderr)
@@ -972,7 +1075,10 @@ def main():
         return 0
     if not isinstance(call, dict):
         return 0
-    paused = pause_state(a.pause_flag) if a.pause_flag else None
+    if sessions is not None:
+        a.profile = session_profile(sessions, call, a.profile)
+    # one settings file serves every session of a launch folder: the Director is never held by the workers' pause
+    paused = pause_state(a.pause_flag) if a.pause_flag and not (sessions is not None and a.profile == "director") else None
     if paused and not pause_allows(data, a.profile, call):
         print(f"PAUSED by {paused[0]} at {paused[1]}: {paused[2]}; {data['pause']['reason']}", file=sys.stderr)
         audit(a.audit, call, "pause", "PAUSE")
@@ -987,6 +1093,12 @@ def main():
         why = reason(command, "powershell" if call.get("tool_name") == "PowerShell" else "bash")
     else:
         why = None
+    label = "builtin"
+    if not why and sessions is not None and isinstance(command, str) and call.get("tool_name") in SHELL_TOOLS:
+        shell = "powershell" if call.get("tool_name") == "PowerShell" else "bash"
+        cwd = call.get("cwd") if isinstance(call.get("cwd"), str) else None
+        why = protected_delete(data, list(simple_commands(FD_DUP.sub(" ", command), shell)), cwd, sessions.get("protected", []))
+        label = "protected" if why else label
     hits = decide(data, a.profile, call, a.rules) if data is not None else []
     deny, ask = first(hits, "deny"), first(hits, "ask")
     reviewed = None
@@ -997,10 +1109,11 @@ def main():
             if reviewed[0] == "block":
                 deny = ("deny", ask[1], f"second-model review: {reviewed[1]}")
     if deny or why:
-        rule = deny[1] if deny else "builtin"
+        rule = deny[1] if deny else label
         print(f"BLOCKED by hook_guard [{deny[1]}]: {deny[2]}" if deny else f"BLOCKED by hook_guard: {why}", file=sys.stderr)
         audit(a.audit, call, "deny", rule + (f" review={reviewed[0]} via={reviewed[2]}" if reviewed else ""))
-        conf = (data.get("auto_pause") or {}).get(a.profile) if a.pause_flag and data is not None and not paused else None
+        conf = ((data.get("auto_pause") or {}).get(base_profile(a.profile)) if a.pause_flag and data is not None and not paused
+                and not (sessions is not None and a.profile == "director") else None)
         paused_now = auto_pause(a.pause_flag, conf, rule)
         if paused_now:
             print(f"AUTO-PAUSED by hook_guard: {paused_now}; stop here, report where you stopped and wait for the Director"

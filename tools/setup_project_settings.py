@@ -24,7 +24,7 @@ this copy would write (another Python, a hook_guard.py that moved) shows MISSING
 replaces it in place. Without --protect-director the installed entry's --protect is kept. A hook that is in place is
 then run twice, on a command it must allow and on one it must block (also a Write into DIR/orders/ when protected);
 a hook that does not answer 0 and 2 is HOOK_FAIL.
---guard-profile worker|director (implies --hooks) makes the hook check every tool call (matcher *) against
+--guard-profile worker|director|cleaner (implies --hooks) makes the hook check every tool call (matcher *) against
 guard_rules.json (next to this file) with that profile, and sets "onFailure": "block" so a hook that breaks blocks
 instead of letting the call through. The --director-worktree always gets the director profile. Each rule's
 "permissions" go into permissions.deny or permissions.ask, by the profile's decision for that rule (second layer:
@@ -32,6 +32,12 @@ deny and ask rules hold in every permission mode); a rule permission sitting in 
 ones show MISSING (permissions.deny / permissions.ask). Without --guard-profile an installed entry keeps its
 --profile, like --protect. The hook test then also asks for an empty stdout on the allowed call and runs one MCP
 call every profile denies (G30), which shows the rules file loaded.
+--session-map FILE (config session_map; implies --guard-profile worker as the fallback) is for one settings file that
+several sessions share, because a session reads settings only from the folder it was started in: the hook gets
+--sessions FILE and picks each call's profile (director / worker / cleaner) by session_id; FILE is checked with
+hook_guard's loader (templates/guard_sessions.json). The permission lists then take, per rule, the mildest decision
+of every profile FILE can give, so no session is denied by a permission rule that its own profile only asks or allows.
+Another FILE than the installed one shows MISSING (hooks.PreToolUse matcher).
 With the worker profile the hook also gets --pause-flag FILE (pause_ctl.py on|off): --pause-flag or config pause_flag,
 else DIR/PAUSE when --protect-director DIR is known. The Director's worktree never gets it: the Director stops the
 process trees while the workers are paused. Without --guard-profile an installed entry keeps its --pause-flag.
@@ -74,10 +80,11 @@ AUDIT = GUARD.parent / "audit_log.py"
 POST_EVENTS = ("PostToolUse", "PostToolUseFailure")
 HOOK = {"matcher": "Bash|PowerShell", "hooks": [{"type": "command", "command":
         f'"{pathlib.Path(sys.executable).as_posix()}" -I -X utf8 "{GUARD.as_posix()}"'}]}
-PROFILES = ("worker", "director")
+PROFILES = ("worker", "director", "cleaner")
+STRICTNESS = {"none": 0, "ask": 1, "deny": 2}
 
 
-def hook_entry(protect, profile=None, pause=None, audit=None, review=False):
+def hook_entry(protect, profile=None, pause=None, audit=None, review=False, sessions=None):
     """The PreToolUse entry wanted: the plain HOOK, one that also covers Write / Edit for a protected DIRECTOR,
     or, with a guard profile, one that checks every tool call against the rules file and blocks when it fails.
     With audit, hook_guard also logs its decisions there."""
@@ -88,6 +95,7 @@ def hook_entry(protect, profile=None, pause=None, audit=None, review=False):
     if not profile:
         return {"matcher": "Bash|PowerShell|Write|Edit", "hooks": [{"type": "command", "command": command + log}]}
     command += f' --rules "{RULES.as_posix()}" --profile {profile}' + (f' --pause-flag "{pause.as_posix()}"' if pause else "")
+    command += f' --sessions "{sessions.as_posix()}"' if sessions else ""
     command += " --review" if review else ""
     return {"matcher": "*", "hooks": [{"type": "command", "command": command + log, "onFailure": "block"}]}
 
@@ -127,22 +135,43 @@ def load_audit_log():
     return module
 
 
-def load_guard_rules():
-    """The rules file, checked by hook_guard's own loader; exits with the reason when it is bad."""
+def load_guard():
     spec = importlib.util.spec_from_file_location("hook_guard", GUARD)
     guard = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(guard)
+    return guard
+
+
+def load_guard_rules():
+    """The rules file, checked by hook_guard's own loader; exits with the reason when it is bad."""
+    guard = load_guard()
     try:
         return guard.load_rules(RULES)
     except guard.RulesError as error:
         sys.exit(f"bad rules file: {error}")
 
 
+def session_profiles(path, fallback):
+    """Every profile the sessions file can give (its sessions and its default), checked by hook_guard's loader."""
+    guard = load_guard()
+    try:
+        data = guard.load_sessions(path)
+    except guard.RulesError as error:
+        sys.exit(f"bad sessions file: {error}")
+    named = [e["profile"] if isinstance(e, dict) else e for e in data.get("sessions", {}).values()]
+    return sorted(set(named) | {data.get("default", fallback)})
+
+
 def wanted_permissions(rules, profile):
-    """{"deny": [...], "ask": [...]}: each rule's permissions under the list its decision for this profile names."""
+    """{"deny": [...], "ask": [...]}: each rule's permissions under the list its decision for this profile names.
+    For a list of profiles (one settings file for several sessions, --session-map) the mildest decision of them
+    counts: a permission rule holds for every session of the folder, so it may not be stricter than the hook is for
+    any of them."""
     lists = {"deny": [], "ask": []}
+    guard = load_guard()
+    profiles = [profile] if isinstance(profile, str) else list(profile)
     for rule in rules["rules"]:
-        decision = rule["decision"][profile]
+        decision = min((guard.rule_decision(rule, p) for p in profiles), key=STRICTNESS.get)
         for item in rule.get("permissions", []):
             if decision in lists and item not in lists[decision]:
                 lists[decision].append(item)
@@ -231,6 +260,11 @@ def profile_arg(command):
     return found.group(1) if found else None
 
 
+def sessions_arg(command):
+    found = re.search(r'--sessions "([^"]*)"', command)
+    return found.group(1) if found else None
+
+
 def guard_hook(entry):
     """The one hook_guard hook object of an entry; None when it has none or several."""
     guard = [h for h in entry.get("hooks") or [] if isinstance(h, dict) and "hook_guard.py" in str(h.get("command", ""))]
@@ -253,7 +287,7 @@ def hook_entry_matches(entry, want, exact=True):
     return (entry.get("matcher") == want["matcher"] and command is not None and hook is not None
             and protect_arg(command) == protect_arg(wanted) and profile_arg(command) == profile_arg(wanted)
             and pause_arg(command) == pause_arg(wanted) and audit_arg(command) == audit_arg(wanted)
-            and review_arg(command) == review_arg(wanted)
+            and review_arg(command) == review_arg(wanted) and sessions_arg(command) == sessions_arg(wanted)
             and hook.get("onFailure") == want["hooks"][0].get("onFailure") and (not exact or command == wanted))
 
 
@@ -351,6 +385,9 @@ def main():
                     "director profile with --guard-profile (config: director_worktree)")
     ap.add_argument("--guard-profile", choices=PROFILES, help="check every tool call against guard_rules.json with this "
                     "profile and write its permission rules (implies --hooks; config: guard_profile)")
+    ap.add_argument("--session-map", help="sessions file for hook_guard --sessions (templates/guard_sessions.json): one "
+                    "settings file serves several sessions, each with its own profile (implies --guard-profile worker "
+                    "as the fallback; config: session_map)")
     ap.add_argument("--pause-flag", help="pause flag file for the worker hook (default DIR/PAUSE of --protect-director; "
                     "config: pause_flag)")
     ap.add_argument("--guard-review", action="store_true", help="give guarded hooks --review: asks of the rules' review "
@@ -395,6 +432,11 @@ def main():
     profile = a.guard_profile or cfg.get("guard_profile") or ("worker" if runtime else None)
     if profile is not None and profile not in PROFILES:
         sys.exit(f"guard_profile {profile!r} is not one of {', '.join(PROFILES)}")
+    smap = a.session_map or cfg.get("session_map")
+    smap = pathlib.Path(smap).resolve() if smap else None
+    if smap and not profile:
+        profile = "worker"
+    map_profiles = session_profiles(smap, profile) if smap else []
     rules = load_guard_rules() if profile else None
     pause = a.pause_flag or cfg.get("pause_flag")
     pause = pathlib.Path(pause).resolve() if pause else None
@@ -414,7 +456,8 @@ def main():
 
     print(f"repo={repo} window={window} plugins_off={plugins_off or 'none'} config={cfg_path or 'none'} "
           f"hooks={'on' if hooks else 'off'}{f' protect={protect.as_posix()}' if protect else ''}"
-          f"{f' guard_profile={profile}' if profile else ''}{f' pause_flag={pause.as_posix()}' if pause else ''}"
+          f"{f' guard_profile={profile}' if profile else ''}"
+          f"{f' session_map={smap.as_posix()} ({chr(44).join(map_profiles)})' if smap else ''}{f' pause_flag={pause.as_posix()}' if pause else ''}"
           f"{f' audit_log={audit}' if audit else ''}{' guard_review=on' if review else ''}{' runtime_guard=on' if runtime else ''} "
           f"mode={'APPLY' if a.apply else 'REPORT'}")
     home = pathlib.Path.home().resolve()
@@ -459,7 +502,8 @@ def main():
             if protect is None and not is_director and installed and protect_arg(installed):  # keep an installed --protect
                 wt_protect = pathlib.Path(protect_arg(installed))
             wt_pause = pause or (wt_protect / "PAUSE" if wt_protect else None) if wt_profile == "worker" else None
-            want = hook_entry(wt_protect, wt_profile, wt_pause, wt_audit_arg, review or bool(installed and review_arg(installed)))
+            want = hook_entry(wt_protect, wt_profile, wt_pause, wt_audit_arg, review or bool(installed and review_arg(installed)),
+                              smap)
         if hooks and want is None:  # without --protect-director / --guard-profile the installed entry keeps both
             kept = protect_arg(installed) if installed else None
             kept_profile = profile_arg(installed) if installed else None
@@ -467,7 +511,7 @@ def main():
             want = hook_entry(pathlib.Path(kept) if kept else None, kept_profile if kept_profile in PROFILES else None,
                               pathlib.Path(kept_pause) if kept_pause else None, wt_audit_arg,
                               review or bool(installed and review_arg(installed)))
-        perms = wanted_permissions(rules, wt_profile) if wt_profile else None
+        perms = wanted_permissions(rules, sorted(set(map_profiles) | {wt_profile}) if smap else wt_profile) if wt_profile else None
         miss = wanted_missing(data, window, plugins_off, hooks, want, perms, wt_audit, runtime)
         if not miss:
             problems += tested(wt, "OK", want if hooks else None)

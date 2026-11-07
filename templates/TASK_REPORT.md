@@ -16,6 +16,9 @@ TESTS: 實際執行的測試與結果；沒跑的寫 NOT_RUN
 SCOPE_CHECK: PASS | VIOLATION | NOT_RUN，貼 scope_check.py 的最後一行
 EVIDENCE: 重跑指令與產物雜湊的紀錄路徑（evidence_record.py）；沒有就寫 NONE: 原因
 AUDIT_RANGE: （選用）audit_log.py cite 印出的那一行；有裝動作紀錄才寫
+SESSION_ID: （選用）本 session 的 session_id；有裝動作紀錄才寫
+RAN: （選用）一行一個實際跑過的指令：- `指令` exit=N at=HH:MM
+  總監用 report_vs_audit.py 拿 RAN 和 TESTS / EVIDENCE / DONE 裡的 selftest、Unity、Blender、雜湊指令對動作紀錄
 ACCEPTANCE: 工單 E 節每條一列，不增不減。狀態：AUTO 填 PASS / FAIL / BLOCKED / UNVERIFIED；
   REVIEW 最多填 READY_FOR_REVIEW；PO 只填 PENDING_PO。AUTO 填 PASS 時證據欄寫 evidence_record 的 .json 檔名。
   交件前跑 gate_check.py --match 本報告 工單 --evidence-dir 證據資料夾

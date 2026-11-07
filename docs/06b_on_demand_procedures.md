@@ -23,6 +23,14 @@ PO 手動停止後再讓它繼續，也要先完整跑一次這個程序：停�
 - 新增任何機制時，同一步就要加進 GUARDS 表和檢查腳本，否則不算完成。
 - 閒置監看把「GO 後逾寬限仍沒有 ACK」列成獨立狀態 `NO_ACK` 並觸發，不套用執行時限的豁免。監看的測試至少三案：GO 逾寬限沒有 ACK 會觸發；GO 還在寬限內不觸發；GO 後有 ACK 不觸發。監看程序有沒有在跑，列進 GUARDS 表，每輪自查和恢復時都檢查。
 
+### 狀態腳本和防護的對象（1.3.0）
+
+- 每條工作線一支 `status.py`：`tools/status_gen.py --config <設定> --out <線的資料夾>/status.py` 產生，一次印出 log 尾段、雜湊、磁碟（GiB）、git 摘要、最新輸出，總長有上限。壓縮或重開後先跑它，不逐項重查（L-042）。
+- 總監版從 `templates/status_director.json` 改起：多印待決頁的計數（PO 已回覆 / 新的）、未結案工單、還沒送出的訊息、每份動作紀錄最近 1 小時的筆數 / 被擋次數 / 讀 log 次數 / session 數，以及該常駐的程序（例如閒置監看）有沒有在跑。讀不到待決頁或程序沒在跑就 exit 1；路徑換成專案自己的。
+- 同一個資料夾啟動的 session（總監、worker、清理員）共用同一份 settings。要依 session 給不同的防護，用 `setup_project_settings.py --session-map <sessions 檔>`（`templates/guard_sessions.json`），`hook_guard.py --sessions` 依 `session_id` 選 director / worker / cleaner；受保護清單對每個角色都有效。
+- settings 只從 session 啟動的資料夾讀。`tools/doctor.py` 列出各 worktree 最近啟動過幾個 session：`settings unread`（有防護、卻沒有 session 從那裡啟動）或 `launch folder unguarded`（session 從沒有防護的資料夾啟動）都要處理。
+- 每週用 `tools/poll_hint.py report --log <動作紀錄> --days 7` 看各線手動讀 log 的次數，次數高的線提醒它等完成通知（L-041）。
+
 ### 額度重置後的喚醒
 
 - 主要機制：總監 session 的背景計時器，睡到「下一次重置 + 3 分鐘」。醒來時：確認重置生效 → 找出被額度打斷、之後沒有完成回報的 session → 送 `RESUME` → **立刻設下一個計時器** → 在 DIRECTOR_LOG 記一行。
@@ -36,6 +44,8 @@ PO 手動停止後再讓它繼續，也要先完整跑一次這個程序：停�
 - 刪除前逐條比對三份清單：擁有者的保留段、總監的保留清單、受保護清單，各寫「無衝突」或「衝突 → 不刪」。有疑問就不刪。
 - 不在版控內的工作資料（例如 worktree 裡的本機資料夾），刪除前先產生盤點清單（路徑、大小、SHA-256）存檔。
 - 同一路徑不能同時出現在「保留」和「可回收」，改標記要附系統時間並刪掉舊標記。
+- 擁有者同意還不夠：刪 build 或審查匯出前，先 grep 所有工單、PLAN、RESUME_STATE 有沒有提到這個名稱；有提到的等總監確認。可以重建的，也先寫明重建用的 commit（L-026）。
+- 工作線自己剛產出的中間檔也不刪：不用的 `mv` 到 `_trash_pending/` 交給清理員；要換掉試做的輸出就寫到新資料夾（b1 → b2），試做最好直接寫進暫存資料夾（L-023）。
 
 ## 為什麼
 

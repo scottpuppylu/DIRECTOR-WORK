@@ -6,6 +6,45 @@
 - **MINOR**：新增規則、文件、工具或選項，舊檔案照樣通過。
 - **PATCH**：修正文字、修 bug，規則不變。
 
+## 1.3.0 — 2026-11-07
+
+用量結構：量出額度花在哪一類動作，對照門檻（讀和查 ≤ 30%、實際動手 ≥ 30%），並用實測回答「開新 session 划不划算」。另外把一週現場回報的 21 條教訓（L-022 到 L-042）做成工具和規則。全部是新工具、新選項和選用欄位，不加參數時舊行為不變，舊檔案照樣通過，照本檔政策是 MINOR。
+
+- `usage_mix.py`：讀 `~/.claude/projects` 的對話紀錄（含 subagent），每次呼叫算額度等價量（輸入 1、快取寫入 1.25、快取讀取 0.1、輸出 5），平分給它選的工具呼叫，歸成五大類：讀和查、協調、看圖與審查、實際動手、等待。同一個 `message.id` 拆成幾行的先合併（L-035），分叉或續接的 session 重複的只算一次。`--check` 沒達到門檻 exit 1。RESTART 行列出新 session 的起步成本、依上下文大小的單價和損益兩平點。專案自己的字放 `--patterns` 檔，工具裡只有通用的字。
+- `status_gen.py`：替每條工作線產生一支只讀、只用標準庫、最多 60 行的 `status.py`（log 尾段、雜湊、磁碟 GiB、git、最新輸出；L-042）。總監版（`templates/status_director.json`）再加待決頁計數、未結案工單、未送出訊息、最近 1 小時的動作紀錄和常駐程序。
+- `round_check.py`：RESUME_STATE 的 `FIX_ROUNDS:`。從第 4 輪起，每做完一組 3 輪都要有根因研究，寫 `WHERE` / `ALTERNATIVES` / `DECISION`（L-032）。
+- `gate_check.py --test-request`：TEST REQUEST 每個欄位都要填；單位要寫 GiB，不能寫 GB；擷取量和時長要對得上；寫入量要涵蓋 build、擷取和快取；時長不能超過上限（L-030、L-031、L-033）。`templates/TEST_REQUEST.md` 加 `BUILD_GB`、`CAPTURE`、`CACHE_GB`、`DURATION`。
+- `poll_hint.py`：PostToolUse hook。同一個 session 10 分鐘內第 3 次讀同一份 log 時，提示「等完成通知」，只提示、不擋（L-041）。`report` 從動作紀錄算各 session 讀 log 的次數，給總監寫週報用。
+- `hook_guard.py --sessions <檔>`：從同一個資料夾啟動的 session 共用一份 settings，所以改依 hook 輸入的 `session_id` 選 director / worker / cleaner。`protected` 列的路徑任何角色都不能刪或搬（L-023、L-026）。`setup_project_settings.py --session-map` 負責安裝。
+- `doctor.py`：settings 只從啟動資料夾讀。doctor 依對話紀錄數出最近 30 天各 worktree 啟動過幾個 session，有防護卻沒人從那裡啟動，報 `settings unread`；從沒防護的 worktree 啟動，報 `WARN launch folder unguarded`。也檢查 sessions 檔的權限。
+- `report_vs_audit.py`：用動作紀錄核對 TASK REPORT 說跑過的指令，包括 `RAN:` 行，以及 TESTS / EVIDENCE / DONE 裡的 selftest、Unity、Blender、雜湊檢查：有沒有跑、exit 對不對、時間對不對。紀錄的雜湊鏈斷了算 FAIL。`templates/TASK_REPORT.md` 加選用的 `SESSION_ID:` 和 `RAN:`。
+- 文件：
+  - `docs/04` 加「用量結構」一節，含門檻、量法和這一週的比例，以及「開新 session 划不划算」實測表。實測結論：重開的起步成本從來回收不了，所以撤回「過 gate 就換新 session」，改成「不為了縮上下文換新 session，交給壓縮」（L-036）。`docs/01`、`docs/11`、README、`templates/CLAUDE_PROJECT_SECTION.md` 一起改。
+  - `docs/02`、`docs/07`、`docs/06b` 補上：同一輪等 GO（L-029）、用事件條件代替固定時間（L-024）、run script 不設預設設定（L-025）、修正輪數成組計算、狀態腳本、session 對照表和啟動資料夾。
+  - `docs/10` 加第 24–44 條。第 3、18 條註明「換新 session」已撤回。
+  - `tools/README.md` 補上新工具。
+- `selftest.py` 加上面各項的正反案例（1,480 → 1,648 項）。
+
+對齊初衷：
+1. 幫到誰：總監和 PO。總監要知道額度是不是花在實際動手上，也要知道 worker 報告說跑過的指令是不是真的跑過；PO 不用自己看 log 就能知道每條線的狀態。21 條教訓都來自一週的現場回報。
+2. Desktop：在 Desktop Code 分頁的 worker session 做，只用 DW 自己的小工單和 selftest 實測。`usage_mix` 對這台電腦一週的紀錄跑過；`status_gen` 產生的 DW 版 `status.py` 跑出 16 行。總監版用的是範本裡的佔位路徑，真實路徑要總監填。`report_vs_audit` 和 `poll_hint report` 只用合成的動作紀錄測過。selftest 1,648/1,648，在 Python 3.9、3.11、3.12 各跑一次。
+3. 服務：省額度（2）：先量出花在哪，再談怎麼省；撤回一條實測後證明更貴的規則。PO 不用盯細節（3）：`status.py` 一頁看完一條線；`report_vs_audit` 替總監核對報告。成品要真的對（5）：報告說跑過，就要在動作紀錄裡找得到。零成本（7）：只用標準庫，沒有下載。
+4. 核心：每輪必讀從 12,392 降到 12,333 bytes。`docs/01` 的規則改了一句：「上下文長了交給壓縮」取代「過 gate 換新 session」。核心 3「上下文要短」仍然靠壓縮門檻做到；實測顯示，換新 session 起步就要讀回大約 100K，比留著原 session 繼續做更貴。Direct 不多步驟，新工具都是選用的。
+5. 舊檔案和舊指令：都照樣通過。新欄位（`FIX_ROUNDS`、TEST REQUEST 的四個欄位、`SESSION_ID`、`RAN`）只有用到對應的新工具或新選項時才檢查。
+
+遷移：
+1. 把 `tools/` 整個重新複製到 `DIRECTOR/tools/`。
+2. 要用 session 對照表時，從 `templates/guard_sessions.json` 複製一份，填入 `session_id`，再重跑 `setup_project_settings.py --hooks --rules --session-map <檔> --apply`。hook 輸入只有 `session_id`，沒有 session 名稱。
+3. 要用 `poll_hint` 時，在專案的 `.claude/settings.local.json` 加 PostToolUse hook（`tools/README.md`）。
+4. 總監版 `status.py`：從 `templates/status_director.json` 複製一份，把路徑改成專案自己的，再跑 `status_gen.py --config`。
+5. 原本照「過 gate 換新 session」做的工作線，改成留在原 session，交給自動壓縮。
+
+沒做：
+- `report_vs_audit` 和 `poll_hint report` 沒有拿現場的動作紀錄跑過，只用合成紀錄測過。
+- hook 輸入沒有 session 名稱，`--sessions` 只能依 `session_id` 判斷。
+- L-023（刪除前的檢查）寫在 `docs/06b`，沒有寫進每輪必讀的 `docs/08`，以免必讀檔變大。
+- `usage_mix` 讀的對話紀錄格式不是官方介面，改版後可能讀不到；讀不到時印 UNKNOWN。
+
 ## 1.2.0 — 2026-11-07
 
 容器 worker 的三個已知缺口補上：每個 worker 有自己的 clone，碰不到原 repo 的 ref（K1）；容器裡只解析白名單名稱（DNS）；同一個 repo 開幾個容器 worker，動作紀錄都各寫各的（K6）。舊的 `--git-common` 保留一版，只印 WARN、doctor 報 NOT_ENFORCED，舊指令照樣能跑，照本檔政策是 MINOR。

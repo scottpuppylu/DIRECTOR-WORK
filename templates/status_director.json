@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "name": "director",
+  "po_page": {
+    "path": "D:/PROJECT/DIRECTOR/PO_PENDING.md",
+    "counts": [
+      {"label": "decisions answered", "regex": "^STATUS:\\s*answered\\b"},
+      {"label": "notes new", "regex": "^STATUS:\\s*new\\b"}
+    ]
+  },
+  "orders": {"dir": "D:/PROJECT/DIRECTOR/orders", "glob": "WO-*.md", "show": 8},
+  "pending_sends": {"path": "D:/PROJECT/DIRECTOR/PENDING_SENDS.md"},
+  "audit": {"globs": ["D:/PROJECT/DIRECTOR/audit/*.jsonl"], "hours": 1},
+  "processes": [{"label": "idle_watch", "match": "idle_watch"}],
+  "disk": "D:/",
+  "disk_min_gib": 20,
+  "max_lines": 60
+}
