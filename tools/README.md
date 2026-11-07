@@ -11,6 +11,7 @@ Python 3.9 以上，只用標準函式庫。一律用 `python -I -X utf8 <tool> 
 | `usage_mix.py`（1.3.0） | 額度花在哪：每次呼叫依它選的動作歸成五大類（讀和查、協調、看圖與審查、實際動手、等待），對照門檻，各 session 的比例，以及開新 session 划不划算（RESTART 行） | 不寫 | 不花；只印比例，不印訊息內容 |
 | `memory_size_check.py` | 檢查記憶索引大小，超過門檻 exit 1 | 不寫 | 不花 |
 | `gate_check.py` | 檢查 RESUME_STATE、工單、TASK REPORT、裁決的欄位和用詞；`--match` 逐條對照報告和工單的驗收條件，加 `--evidence-dir` 再核對證據紀錄；`--hash` 印工單雜湊 | 不寫 | 不花 |
+| `setup_check.py`（2.2.0） | 建置完成的檢查：`DIRECTOR_STATE.md` 的 `PO_PAGE_URL` 和 `PO_PAGE_PINNED` 兩行是不是三種合法寫法之一 | 不寫 | 不花 |
 | `round_check.py`（1.3.0） | 修正輪數：RESUME_STATE 的 `FIX_ROUNDS:` 到第 4 輪（之後每組）沒有根因研究就 FAIL | 不寫 | 不花 |
 | `report_vs_audit.py`（1.3.0） | 用動作紀錄核對 TASK REPORT：報告說跑過的指令（`RAN:` 和 TESTS / EVIDENCE / DONE 裡的 selftest、Unity、Blender、雜湊檢查）紀錄裡有沒有、exit 和時間對不對 | 不寫 | 不花 |
 | `trace_report.py` | 從工單、報告、裁決產生追溯表：需求 → 工單 → AC → 證據 → 裁決 | 不寫 | 不花 |
@@ -24,7 +25,7 @@ Python 3.9 以上，只用標準函式庫。一律用 `python -I -X utf8 <tool> 
 | `poll_hint.py`（1.3.0） | PostToolUse hook：同一個 session 10 分鐘內讀同一份 log 第 3 次時，提示「等完成通知」，不擋；`report` 從動作紀錄算各 session 讀 log 的次數 | hook 只寫暫存資料夾的小狀態檔；`report` 不寫 | 不花 |
 | `secret_mask.py` | 把文字裡的私鑰、token、API key、JWT、`password=` 這類值換成 `[MASKED:種類]`；`--check` 只列出找到的種類 | 不寫 | 不花 |
 | `pause_ctl.py` | 暫停開關：`on` / `off` 寫入或移除 `<DIRECTOR>/PAUSE` 並記進 `DIRECTOR_LOG.md`，`status` 印目前狀態；`procs` 依 CPU 增量列出停機後程序樹還剩哪些 | `on` / `off` 只寫旗標檔和 LOG 一行；`procs` 不寫、不結束任何程序 | 不花 |
-| `audit_log.py` | 動作紀錄：PostToolUse / PostToolUseFailure hook 把每個工具呼叫寫成一行有雜湊鏈的 JSONL；`verify` 檢查鏈和總監的錨點，`head` 印錨點，`cite` 印 TASK REPORT 引用的區段 | `append` 只寫紀錄檔和它的 `.lock`；其他不寫 | 不花 |
+| `audit_log.py` | 動作紀錄：PostToolUse / PostToolUseFailure hook 把每個工具呼叫寫成一行有雜湊鏈的 JSONL；`verify` 檢查鏈和總監的錨點，`head` 印錨點，`cite` 印 TASK REPORT 引用的區段；`recover`（2.2.0）留複本後接著寫 | `append` 只寫紀錄檔和它的 `.lock`；其他不寫 | 不花 |
 | `guard_rules.json` | `hook_guard.py --rules` 的規則檔：每條規則的類別、worker / director 的結論、比對方式、正反例子和要寫進 settings 的權限規則 | — | — |
 | `selftest.py` | 用正反案例測 gate_check、trace_report、metrics_report、scope_check、evidence_record、hook_guard（含 `--review`，用假的 claude）、pause_ctl、audit_log、doctor（假的 claude 版本、暫存的設定層）和 `--hooks`、`--runtime-guard` 安裝；查用詞、必讀文件大小、`PURPOSE.md` 結構和 CHANGELOG 的「對齊初衷」 | 只寫暫存資料夾，結束刪除 | 不花 |
 
@@ -206,6 +207,7 @@ python -I -X utf8 secret_mask.py --check [FILE]  # 每種找到的機密印一�
 - 保留前段、只遮值：`Authorization: Bearer` / `Basic` / `token` 後面的值、URL 裡的密碼（`https://user:密碼@host`）、名稱含 password、passphrase、token、secret、api_key、access_key、private_key、client_secret、auth 的 `名稱=值` 或 `名稱: 值`。
 - 不遮：40 碼 git SHA、sha256、`max_tokens=4096`、`author=...`、`PWD=...`、已經遮過的值。已知會多遮：`"token_type": "Bearer"`。
 - 只認得常見格式，沒見過的 token 格式會原樣通過。也可當模組用：`mask(text)` 回傳 `(遮罩後文字, 種類清單)`。
+- `mask_tree(value)`（2.2.0）：遮罩 JSON 結構，序列化之前用。每個字串（含鍵名）都過 `mask()`；鍵名像機密（password、api_key、github_token、auth…）的整個值換成 `[MASKED:field]`，值是 null、true / false 或空字串時保留。先序列化再遮會漏掉 `password="a b"`：JSON 把引號跳脫成 `\"`，遮罩只遮到第一個空白。
 
 ### audit_log.py（1.1.0）
 
@@ -216,16 +218,19 @@ python -I -X utf8 audit_log.py verify --log <檔案> [--from N] [--to M] [--anch
 python -I -X utf8 audit_log.py verify --cite "AUDIT_RANGE file=... seq=a..b first=... last=..."
 python -I -X utf8 audit_log.py head --log <檔案>                       # 印 AUDIT_HEAD file=... seq=n sha=...
 python -I -X utf8 audit_log.py cite --log <檔案> --from A --to B        # 印 AUDIT_RANGE ...，貼進 TASK REPORT
+python -I -X utf8 audit_log.py recover --log <檔案>                    # 2.2.0：紀錄壞了，留複本、加一行 recovery 後接著寫
 ```
 
-- 一行一個 JSON：`seq`、`ts`（UTC）、`session_id`、`agent_id`、`tool`、`tool_use_id`、`kind`（`result` / `failure` / `decision`）、`input`（工具輸入先經 `secret_mask.py` 遮罩，最多 500 字）、`result`（`ok` / `error` / `interrupted`，或 `deny` / `ask` / `pause`；有輸出時只存遮罩後輸出的 sha256 和長度，**不存輸出本身**）、`duration_ms`、`rule`、`prev`（前一行的 hash，第一行是 64 個 0）、`hash`（其他欄位排序後的精簡 JSON 的 sha256）。
-- 多個 hook 同時寫：用 `<檔案>.lock`（`O_CREAT|O_EXCL`）排隊，等 5 秒還被占就 exit 1；超過 30 秒的鎖視為殘留，直接接手。最後一行沒寫完、不是 JSON 或 hash 不對時不再往後接，exit 1。
-- Bash 輸出遮罩：`append` 發現 stdout 或 stderr 有機密時，印出 `updatedToolOutput`（欄位和原本相同，只把值遮掉），Claude 看到的就是遮過的輸出。紀錄寫不進去時仍回傳遮罩結果（exit 0，錯誤印到 stderr）。PowerShell 工具的輸出格式 NOT_VERIFIED，不遮。
+- 一行一個 JSON：`seq`、`ts`（UTC）、`session_id`、`agent_id`、`tool`、`tool_use_id`、`kind`（`result` / `failure` / `decision` / `recovery`）、`input`（工具輸入先經 `secret_mask.py` 遮罩，最多 500 字；2.2.0 起先用 `mask_tree` 遮每個字串、名稱像機密的欄位整欄換掉，再序列化，所以沒超過 500 字時是合法 JSON；超過時截斷，結尾 `…`）、`result`（`ok` / `error` / `interrupted`，或 `deny` / `ask` / `pause`；有輸出時只存遮罩後輸出的 sha256 和長度，**不存輸出本身**）、`duration_ms`、`rule`、`prev`（前一行的 hash，第一行是 64 個 0）、`hash`（其他欄位排序後的精簡 JSON 的 sha256）。
+- 多個 hook 同時寫：用 `<檔案>.lock`（`O_CREAT|O_EXCL`）排隊，等 5 秒還被占就 exit 1；超過 30 秒的鎖視為殘留，直接接手。最後一行沒寫完、不是 JSON 或 hash 不對時不再往後接，exit 1，訊息要你先 `verify` 再 `recover`。
+- Bash 輸出遮罩：`append` 發現 stdout 或 stderr 有機密時，印出 `updatedToolOutput`（欄位和原本相同，只把值遮掉），Claude 看到的就是遮過的輸出。紀錄寫不進去時仍回傳遮罩結果（exit 0）。2.2.0 起「遮罩」和「寫入」是兩個結果：寫不進去時 `hookSpecificOutput` 另加 `additionalContext`（output masked, but the audit line was NOT written），stderr 印 `audit_log: masked=yes|no written=no: <原因>`。PowerShell 工具的輸出格式 NOT_VERIFIED，不遮。
 - PostToolUseFailure 的輸入欄位（`error`、`is_interrupt`）照文件假設，NOT_VERIFIED（沒有用 `claude -p` 實際取樣）。
 - `verify`：重算整條鏈，印第一個斷點（`BROKEN seq=n: ...` 或 `BROKEN line=n: not JSON`），exit 1；檔案、錨點 commit 或錨點檔不存在 exit 2（`NOT_RUN`）。最後一行是 `AUDIT_VERIFY file=... entries=n head_seq=n [anchors=k] [cite=checked] OK|BROKEN`。
 - 錨點：總監過 gate 時跑 `head`，把 `AUDIT_HEAD` 那行寫進 `DIRECTOR_LOG.md` 並 commit。`--anchor-rev` 從 commit 裡的 LOG 讀（`git show <commit>:<路徑>`），所以改工作樹裡的 LOG 騙不過；`--anchor-log` 讀目前的檔案。同一份紀錄（絕對路徑相同）的每個錨點都要還在鏈上、hash 相同；一個錨點都沒有也算失敗。
 - **沒有錨點就抓不到整條重寫**：把整條鏈連同每個 hash 重算一次，`verify` 單獨跑會過，只有錨點抓得到。最後一個錨點之後的行被截掉，也要等下一個錨點才抓得到。
 - `--cite`：TASK REPORT 的 `AUDIT_RANGE` 那一段的第一行和最後一行 hash 要和現在的紀錄相同，整條鏈也要完整。
+- **`recover`（2.2.0）**：`verify` 說 BROKEN（當機截斷最後一行、某行不是 JSON、某行不在鏈上）後用。在鎖內把整份原檔原封不動複製成 `<檔案>.damaged-<UTC 時間>`，保留第一個壞行之前的每一行（最後一個好 hash 和之前的 `AUDIT_HEAD` 錨點都還有效），再接一行 `kind=recovery`：`damage` 記拿掉部分的起始行、行數、位元組、sha256，以及複本的檔名和 sha256。印 `AUDIT_RECOVER ...` 和新的 `AUDIT_HEAD`，之後 `append` 照常接著寫。壞行之後的行只留在複本裡。沒壞的紀錄不動（`nothing broken`，exit 0）；檔案不存在 exit 2。
+- `verify` 對每個 recovery 行印 `GAP seq=n: from line a (k lines, b bytes, sha256=...) kept in <複本>, copy checked`，結尾加 `gaps=n`。GAP 本身不算壞；複本找不到只標 `copy not found`，複本內容被改過（sha256 對不上）才 BROKEN。整條鏈壞掉時多印一行 `~ to go on writing: audit_log.py recover --log ...`。
 
 ## doctor.py（1.1.0）
 
@@ -329,6 +334,17 @@ python -I -X utf8 gate_check.py --preflight <報告.md> <WO.md> --evidence-dir <
   - `--po-acceptance PO_ACCEPTANCE.json [--candidate <40 位>]`：檢查 PO 驗收紀錄（schema `po-acceptance-v1`），必填 candidate_id、commit（40 位）、entry、manifest_sha256、offered_message_ref；outcome 是 seen / changes / accepted 時還要 reply_ref，還沒回覆寫 null。少綁一項、雜湊不是 64 位、commit 不是 `--candidate`，印 `~ UNBOUND_PO_REPLY`；綁好的印 `~ PO_ACCEPTANCE <候選 ID>: <commit 前 12 位> <入口>: 已驗收 (<訊息>)`。
   - 裁決可加 `ORDER_SHA256:`、`REPORT_SHA256:`（`--hash` 的值）。`--verdict ... --match` 時值不是現在的雜湊，印 `~ VERDICT_RECORD`。
 - 已有舊檔案的專案導入時：`--warn` 只警告、exit 0；`--since YYYY-MM-DD` 跳過較早的檔案（工單看 ISSUED_BY、RESUME_STATE 看 UPDATED、報告和裁決看第一個日期）；找不到日期的檔案無從比較，也跳過，印 `UNDATED` 並在最後一行另計，要查它就不加 `--since`。先用 `--warn` 看全貌，新工單再用 `--since` 嚴格檢查。舊檔案不追溯修改。
+
+## setup_check.py（2.2.0）
+
+```text
+python -I -X utf8 setup_check.py <WS>/DIRECTOR [更多資料夾或檔案]   # 建置完成：待決頁網址和置頂兩行
+```
+
+- 讀資料夾裡的 `DIRECTOR_STATE.md`（也可直接給檔案）。每個對象印 `OK   setup <檔案>` 或 `FAIL setup <檔案>`，問題一行一個 `  - ...`，提示 `  ~ ...`。
+- 合法的只有三種：`PO_PAGE_URL: https://claude.ai/artifact/<id>`（或 `https://claude.ai/code/artifact/<id>`）加 `PO_PAGE_PINNED: yes`；同樣的網址加 `PO_PAGE_PINNED: no reason=<原因>`（另印提示：請 PO 自己置頂）；`PO_PAGE_URL: NONE reason=<原因>`（沒有頁面，`PO_PAGE_PINNED` 可省略或寫 `no reason=...`，不能寫 yes）。
+- 缺行、同一行寫兩次、不是 claude.ai 的 Artifact 網址、`<...>` 佔位、`NONE` / `no` 沒寫原因、檔案不存在，都 exit 1。全部合法 exit 0。
+- `BOOTSTRAP` 第 6、11、13 步要它 exit 0 才送第一份回報。只用在建置流程；舊專案不跑它，`status.py` 只印 shadow 提示 `PO_PAGE_MISSING`（`status_gen.py`）。
 
 ## trace_report.py
 
@@ -569,6 +585,7 @@ python -I -X utf8 status_gen.py --out <DIRECTOR>/status.py --config templates/st
 - 總監段（設定檔，都選用）：`po_page`（待決頁的計數：每項一個 regex，或 JSON 頁的 `list` 加 `field` / `value`）、`orders`（沒有結案字樣的工單）、`pending_sends`（還沒勾的 `- [ ]`）、`audit`（每份動作紀錄最近 `hours` 小時的筆數、被擋次數、讀 log 次數、session 數；讀 log 的判斷照抄 `poll_hint.py`）、`processes`（命令列含某字串的程序有沒有在跑）。
 - 讀不到的路徑印 MISSING；磁碟低於門檻、讀不到待決頁或程序沒在跑時 exit 1。
 - 2.1.0（shadow）：待決頁是文字頁（沒有 `extract`）時，若有項目 `STATUS: open` 但 `ANSWER:` 已填（不算空白或 `<…>` 佔位），多印一行 `PO hint: N item(s) still STATUS open with an ANSWER filled in (ID…)`：PO 可能已回覆但沒改狀態，計數會漏掉，要到頁上讀。exit code 不變。
+- 2.2.0（shadow）：總監版設了 `po_page` 時，待決頁旁邊的 `DIRECTOR_STATE.md`（或 `po_page.state` 指定的路徑，相對於設定檔）沒有 `PO_PAGE_URL:` 開頭的行，多印一行 `~ PO_PAGE_MISSING: <路徑> has no PO_PAGE_URL line; publish and pin the PO page (BOOTSTRAP step 6)`，exit code 不變。2.2.0 以前建置的專案會看到它：照 `docs/11`「待決頁網頁的授權與備援」取得同意後補建，或寫 `PO_PAGE_URL: NONE reason=<原因>`。舊的 `status.py` 要用新 `status_gen.py` 重新產生（`--force`）才會印。
 - 已存在的 `--out` 要加 `--force` 才覆蓋。
 
 ## round_check.py（1.3.0）
