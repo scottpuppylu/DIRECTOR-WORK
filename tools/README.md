@@ -603,6 +603,16 @@ python -I -X utf8 report_vs_audit.py --report <報告.md> --log <動作紀錄.js
 - 最後一行 `REPORT_VS_AUDIT: PASS|FAIL|NONE claims= ok= failed= session= logs=`；FAIL exit 1，不能跑 exit 2。
 - 只證明「有跑、結果和報告一致」，不證明跑的內容對；動作紀錄沒有 exit code，用 ok / error 判斷。
 
+## browser_check.py（2.2.0）
+
+用無頭 Chrome 和假的 Artifact SDK 檢查選擇頁的行為（F04 F05 F07 頁面端）：錯指紋或舊格式回覆不會藏起題目、回條只配給總監採用的回覆、指紋不符禁止送出、重送沿用同一個 submissionId。
+
+```
+python -I -X utf8 browser_check.py [--chrome <Chrome 路徑>] [--page <choice_page.html>]
+```
+
+找瀏覽器的順序：`--chrome`、環境變數 `DW_CHROME`、PATH 上的 google-chrome／chromium／chrome、Windows 的 Chrome 與 Edge。找不到：印 `SKIP browser_check: …` 並結束碼 0；`DW_REQUIRE_BROWSER=1`（CI 用）時結束碼 1。每項印一行 `名稱=True/False`，任一項 False 結束碼 1。selftest 不依賴它。
+
 ## choice_reconcile.py（2.1.0，shadow）
 
 ```text
