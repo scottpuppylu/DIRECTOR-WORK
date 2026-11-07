@@ -64,6 +64,7 @@ CHECKS:
 
 - `REVIEW`：要有人看成品。開工前寫明誰看、從哪個角度看、看多大範圍、看哪些常識閘門項目（docs/07）。worker 最多填 `READY_FOR_REVIEW`。
 - `PO`：PO 保留的判定，例如最終驗收。worker 和總監都只填 `PENDING_PO`。
+- 選用的 `追溯` 欄（加在表的最後一欄）：這條 AC 驗證 TRACES_TO 的哪些編號，例如 `DD-03`；沒有寫 `—`。不加這欄也照樣通過；加了之後 `trace_report.py` 每個編號一列，不必猜哪條 AC 服務哪個需求。
 
 結果不寫在這裡，寫在 TASK REPORT 的 ACCEPTANCE 表。成品類交件另附常識閘門表（docs/07）。
 

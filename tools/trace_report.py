@@ -20,6 +20,14 @@ without it every ID is accepted. `--decisions FILE` (repeatable) reads the IDs (
 Markdown table rows of the project's requirement or decision files: a TRACES_TO ID found in none of them is listed under
 TRACES_TO 找不到的編號, and an ID there that no order traces under 沒有工單的需求. Without the flag the output is the
 same as before. Exit 0, or 1 when a folder or a --decisions file is missing.
+
+1.3.3 (shadow mode: hints only, nothing blocks; gate_check --match is unchanged). A chosen report whose `ORDER:`
+REVISION is not the order's REVISION now, or whose ORDER_SHA256 is not the order's hash, no longer shows its status as
+if current: the cell says 過期 / 版次不符 and what the old report wrote, and the order is listed under 報告過期或版次不符.
+Rows are one per AC, never TRACES_TO x AC: an order may give each AC its own IDs in an optional 追溯 (traces) column of
+its AC table (one row per ID and AC; an AC left empty shows （未指定）); without that column, two or more TRACES_TO IDs
+share one row per AC marked （工單層）. With the column, IDs an AC traces that TRACES_TO lacks, and TRACES_TO IDs no AC
+traces, are listed at the end.
 """
 import argparse
 import importlib.util
@@ -117,12 +125,14 @@ def pick_verdict(order, problems):
 
 
 def report_info(path, text):
-    """What tells one report for an order from another: order revision, attempt, first date, HEAD."""
+    """What tells one report for an order from another: order revision, attempt, first date, HEAD; and the order hash
+    it claims (ORDER_SHA256), to tell whether the order changed after it."""
     named = gate.order_line(text)
     attempt = re.search(r"^\s*ATTEMPT\s*[:=]\s*(\d+)", text, re.M | re.I)
+    sha = re.search(r"^\s*ORDER_SHA256\s*[:=]\s*([0-9a-fA-F]{64})\b", text, re.M)
     info = {"path": path, "table": gate.ac_table(text), "head": gate.report_head_value(text),
             "rev": named[1] if named else None, "attempt": int(attempt.group(1)) if attempt else None,
-            "when": first_date(text)}
+            "when": first_date(text), "sha": sha.group(1).lower() if sha else None}
     info["key"] = (-1 if info["rev"] is None else info["rev"], -1 if info["attempt"] is None else info["attempt"],
                    info["when"] or "")
     return info
@@ -132,6 +142,23 @@ def describe(info):
     return (f"{info['path']}：REVISION {info['rev'] if info['rev'] is not None else '—'}、"
             f"ATTEMPT {info['attempt'] if info['attempt'] is not None else '—'}、日期 {info['when'] or '—'}、"
             f"HEAD {info['head'] or '—'}")
+
+
+def stale_reason(order, info):
+    """Why the chosen report no longer speaks for the order as it is now, or None (1.3.3). A report without an ORDER
+    line or ORDER_SHA256 is not judged (older reports)."""
+    if info["rev"] is not None and info["rev"] != order["rev"]:
+        if info["rev"] < order["rev"]:
+            return f"過期：報告是 REVISION {info['rev']}，工單現在是 REVISION {order['rev']}"
+        return f"版次不符：報告寫 REVISION {info['rev']}，工單只到 REVISION {order['rev']}"
+    if info["sha"] and info["sha"] != order["hash"]:
+        return "過期：工單在報告之後改過（ORDER_SHA256 不符）"
+    return None
+
+
+def id_list(value):
+    """IDs in a TRACES_TO value or a 追溯 cell; NONE, — and - mean none."""
+    return [i for i in re.split(r"[\s,，、]+", value or "") if i and i.upper() != "NONE" and i not in ("—", "-")]
 
 
 def cell(value):
@@ -180,9 +207,13 @@ def main():
     slots = list(skipped.values())
     for path, text in files(a.orders, r"^\s*ISSUED_BY\s*=", slots[0]):
         m = re.search(r"^\s*TRACES_TO\s*=\s*([^#\n]*)", text, re.M)
-        ids = [i for i in re.split(r"[\s,，、]+", m.group(1)) if i and i.upper() != "NONE"] if m else None
-        orders.append({"path": path, "id": first_id(text, path.stem), "traces": ids, "acs": gate.ac_table(text),
-                       "reports": [], "report": None, "tie": False, "verdicts": [], "verdict": None})
+        ids = id_list(m.group(1)) if m else None
+        acs = gate.ac_table(text)
+        orders.append({"path": path, "id": first_id(text, path.stem), "traces": ids, "acs": acs,
+                       "per_ac": {ac: id_list(row.get("traces")) for ac, row in acs.items()}
+                       if any(id_list(row.get("traces")) for row in acs.values()) else None,
+                       "rev": int(gate.order_revision(text)), "hash": gate.order_hash(path.read_bytes()),
+                       "reports": [], "report": None, "tie": False, "stale": None, "verdicts": [], "verdict": None})
     stray = []
     for path, text in files(a.reports, r"^\s*TASK_ID\b", slots[1]):
         order = owner(orders, text, by_name=True)
@@ -196,6 +227,7 @@ def main():
             order["tie"] = True
         elif order["reports"]:
             order["report"] = order["reports"][0]["table"]
+            order["stale"] = stale_reason(order, order["reports"][0])
     for path, text in files(a.verdicts, r"^##\s*A\b", slots[2]) if a.verdicts else []:
         order = owner(orders, text, by_name=False)
         if order:
@@ -204,27 +236,47 @@ def main():
     for order in orders:
         order["verdict"] = pick_verdict(order, unpaired)
 
-    rows = []
+    rows, last = [], ("（無）", "（未指定）")
     for order in orders:
-        for req in order["traces"] or ["（無）"]:
-            for ac, spec_row in order["acs"].items():
-                got = order["report"].get(ac) if order["report"] is not None else None
-                status = (got.get("status") if got else "多份報告分不出先後" if order["tie"]
-                          else "沒有報告" if order["report"] is None else "報告缺這條")
-                rows.append((req, order["id"], ac, spec_row.get("type"), status, got and got.get("evidence"), order["verdict"]))
+        traces = order["traces"] or []
+        for ac, spec_row in order["acs"].items():
+            if order["per_ac"] is not None:  # the order says which requirement each AC verifies
+                reqs = order["per_ac"][ac] or ["（未指定）"]
+            elif len(traces) > 1:  # only the order as a whole names them: never pair each ID with each AC
+                reqs = ["、".join(traces) + "（工單層）"]
+            else:
+                reqs = traces or ["（無）"]
+            got = order["report"].get(ac) if order["report"] is not None else None
+            status = (got.get("status") if got else "多份報告分不出先後" if order["tie"]
+                      else "沒有報告" if order["report"] is None else "報告缺這條")
+            if order["stale"]:
+                status = f"{order['stale']}（報告寫 {status}）"
+            for req in reqs:
+                rows.append((req, order["id"], ac, spec_row.get("type"), status, got and got.get("evidence"),
+                             order["verdict"]))
     left = sum(len(paths) for paths in skipped.values())
     print(f"# 追溯表\n\n工單 {len(orders)} 份，報告 {sum(len(o['reports']) for o in orders)} 份對到工單。"
           + (f"沒計入的檔案 {left} 份，列在文末。" if left else "") + "\n")
     print("| 需求 | 工單 | AC | 類型 | 狀態 | 證據 | 裁決 |\n|---|---|---|---|---|---|---|")
-    for row in sorted(rows, key=lambda r: (r[0] == "（無）", r[0], r[1], r[2])):
+    for row in sorted(rows, key=lambda r: (r[0] in last, r[0], r[1], r[2])):
         print("| " + " | ".join(cell(v) for v in row) + " |")
     untraced = [o["id"] for o in orders if o["traces"] is None]
-    odd = [f"{o['id']}: {i}" for o in orders for i in o["traces"] or [] if pattern and not pattern.fullmatch(i)]
+    every = lambda o: list(dict.fromkeys((o["traces"] or []) + [i for ids in (o["per_ac"] or {}).values() for i in ids]))
+    odd = [f"{o['id']}: {i}" for o in orders for i in every(o) if pattern and not pattern.fullmatch(i)]
     sections = [("沒有 TRACES_TO 的工單", untraced), ("編號格式不符 trace_id_pattern", odd),
-                ("對不到工單的報告", [str(p) for p in stray]), ("裁決對不到報告版次", unpaired)]
+                ("對不到工單的報告", [str(p) for p in stray]), ("裁決對不到報告版次", unpaired),
+                ("報告過期或版次不符（表內狀態是舊報告寫的，不是現在的工單）",
+                 [f"{o['id']}：{o['stale']}，{o['reports'][0]['path']}" for o in orders if o["stale"]])]
+    mapped = [o for o in orders if o["per_ac"] is not None]
+    if mapped:
+        sections += [("AC 的追溯不在工單 TRACES_TO 裡", [f"{o['id']} {ac}: {i}" for o in mapped
+                                                    for ac, ids in o["per_ac"].items() for i in ids
+                                                    if i not in (o["traces"] or [])]),
+                     ("TRACES_TO 裡沒有 AC 驗證的編號", [f"{o['id']}: {i}" for o in mapped for i in o["traces"] or []
+                                                  if not any(i in ids for ids in o["per_ac"].values())])]
     if a.decisions:
-        traced = {i for o in orders for i in o["traces"] or []}
-        sections += [("TRACES_TO 找不到的編號", [f"{o['id']}: {i}" for o in orders for i in o["traces"] or []
+        traced = {i for o in orders for i in every(o)}
+        sections += [("TRACES_TO 找不到的編號", [f"{o['id']}: {i}" for o in orders for i in every(o)
                                                  if i not in known]),
                      ("沒有工單的需求", [i for i in known if i not in traced])]
     for title, items in sections:

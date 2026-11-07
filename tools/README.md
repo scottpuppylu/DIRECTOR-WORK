@@ -331,7 +331,9 @@ python -I -X utf8 trace_report.py --orders <DIRECTOR>/orders --reports <報告�
 
 - 只讀，印 Markdown 表：需求 | 工單 | AC | 類型 | 狀態 | 證據 | 裁決。需要存檔就自己導到檔案。
 - 需求取自工單的 `TRACES_TO`；報告靠 `ORDER:` 行裡的工單檔名對應，沒有就用 TASK_ID 開頭的工單編號；裁決靠標題裡的工單編號。同一工單有多份報告時不看檔名，依序比 `ORDER:` 行的 REVISION、`ATTEMPT: n` 行、報告裡第一個日期（可帶 HH:MM），取最新的；全部相同就兩份都不取，表內寫「多份報告分不出先後」。這些工單會在「同一工單有多份報告」一節列出每份報告和選了哪份。HEAD 只列出，沒有 git 排不出先後。裁決只配選中報告的版次（看裁決的 `ORDER:` 行）：同版多份取日期較晚的，分不出先後就都不取；沒標版次的舊裁決只有一份時照列，加註「未標版次」。`CANDIDATE_HEAD:` 不是報告 HEAD 的裁決一律不放進表，剩不下就寫「未配對」。
-- 表後列出：沒有 TRACES_TO 的工單、不符 `trace_id_pattern` 的編號、對不到工單的報告、裁決對不到報告版次（含 `CANDIDATE_HEAD:` 不是報告 HEAD 的）。沒設 `trace_id_pattern` 就不檢查格式。
+- 表後列出：沒有 TRACES_TO 的工單、不符 `trace_id_pattern` 的編號、對不到工單的報告、裁決對不到報告版次（含 `CANDIDATE_HEAD:` 不是報告 HEAD 的）、報告過期或版次不符。沒設 `trace_id_pattern` 就不檢查格式。
+- 過期報告（1.3.3）：選中的報告 `ORDER:` 行的 REVISION 不是工單現在的 REVISION，或 `ORDER_SHA256` 不是工單現在的雜湊，狀態欄不再照抄它的 PASS，改寫「過期：…（報告寫 PASS）」或「版次不符：…」。只是提示，不擋；正式判定仍是 `gate_check --match`。沒寫 `ORDER:` 或 `ORDER_SHA256` 的舊報告不判斷。
+- 一列一條 AC（1.3.3），不再把 TRACES_TO 的每個編號和每條 AC 交叉配對。工單的 AC 表可加選用的 `追溯`（或 `traces`）欄，寫這條 AC 驗證哪些編號：每個編號一列，空的（或 `—`）寫「（未指定）」；表後另列「AC 的追溯不在工單 TRACES_TO 裡」和「TRACES_TO 裡沒有 AC 驗證的編號」。沒有這欄、TRACES_TO 有兩個以上編號時，每條 AC 一列，需求欄寫「DD-1、DD-2（工單層）」。`--decisions` 也查 AC 追溯的編號。
 - `--decisions 檔案`（可重複）：讀專案需求或決定檔裡表格列第一欄的 `XX-數字` 編號。TRACES_TO 寫了、卻不在這些檔裡的，列在「TRACES_TO 找不到的編號」；檔裡有、卻沒有任何工單追溯的，列在「沒有工單的需求」。不給這個旗標，輸出和以前相同。
 - 不悄悄略過檔案：三個資料夾裡不是該類檔案的 `.md`（工單沒有 `ISSUED_BY =`、報告沒有 `TASK_ID`、裁決沒有 `## A`）列在「沒計入的檔案」，寫數量和檔名。舊格式工單要算進來，補一行 `ISSUED_BY = <誰> <日期>`。
 - 只看檔案寫了什麼，不判斷做得對不對。資料夾或 `--decisions` 檔不存在 exit 1，其他情況 exit 0。
