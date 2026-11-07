@@ -4726,6 +4726,150 @@ def test_poll_report(tmp):
     rep("a bad --since", 2, "--log", d / "a.jsonl", "--since", "last week", says=["not an ISO"])
 
 
+def page_script(text):
+    """The inline <script> of a page, read with html.parser (no script src)."""
+    from html.parser import HTMLParser
+
+    class Scripts(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.inside, self.parts = False, []
+
+        def handle_starttag(self, tag, attrs):
+            self.inside = tag == "script" and not dict(attrs).get("src")
+
+        def handle_endtag(self, tag):
+            if tag == "script":
+                self.inside = False
+
+        def handle_data(self, data):
+            if self.inside:
+                self.parts.append(data)
+
+    parser = Scripts()
+    parser.feed(text)
+    return "\n".join(parser.parts).replace("\r\n", "\n")
+
+
+def js_functions(script):
+    """Top-level function name -> its source, up to the next top-level function."""
+    marks = list(re.finditer(r"^(?:async )?function (\w+)\(", script, re.M))
+    return {m.group(1): script[m.start():marks[i + 1].start() if i + 1 < len(marks) else len(script)] for i, m in enumerate(marks)}
+
+
+def snapshot_line(script, target):
+    return next((line for line in script.split("\n") if target + ").onSnapshot(" in line), "")
+
+
+def choice_page_problems(text):
+    """2.1 choice page rules (docs/12 第四、六節): split redraws, no lost text, one write per question, three states."""
+    script, problems = page_script(text), []
+    fn = js_functions(script)
+    for name in ("renderOpenList", "renderAnsweredList", "renderClosedList", "renderNotesList", "captureDrafts", "restoreDrafts"):
+        if name not in fn:
+            problems.append(f"missing function {name}")
+    if "render" in fn:
+        problems.append("one render() redraws everything")
+    for target, allowed in (('doc("brief/current"', "renderBrief"), ('collection("notes"', "renderNotesList")):
+        line = snapshot_line(script, target)
+        if not line:
+            problems.append(f"no {target} subscription")
+        for call in re.findall(r"\b(render\w*)\(", line):
+            if call != allowed:
+                problems.append(f"{target} snapshot calls {call}")
+    body = fn.get("renderOpenList", "")
+    if not re.search(r"if\(S\.composing\)\{S\.deferOpen=true;return\}", body):
+        problems.append("open list redraws during IME composition")
+    if not ("captureDrafts()" in body and "restoreDrafts(" in body and body.index("captureDrafts()") < body.index("replaceChildren") < body.index("restoreDrafts(")):
+        problems.append("open list redraw does not keep value, selection and focus")
+    if "compositionend" not in script:
+        problems.append("no compositionend listener")
+    submit = fn.get("submitChoice", "")
+    if not submit.split("\n")[1].strip().startswith("if(S.inFlight[id])return"):
+        problems.append("submitChoice has no in-flight lock first")
+    if "S.decisions.find" not in submit or not re.search(r"if\(opts\.length&&!opt\)", submit):
+        problems.append("submitChoice does not check the option is still there")
+    first_await = submit.find("await ")
+    clear = submit.find("if(S.drafts[key]===raw)delete S.drafts[key]")
+    if clear < 0 or first_await < 0 or clear < first_await:
+        problems.append("draft cleared before the save, or cleared although it changed")
+    for field in ("submissionId", "revision:v.revision", "snapshotHash:v.snapshotHash", "selectedOptionSnapshot"):
+        if field not in submit:
+            problems.append(f"reply lacks {field}")
+    note = fn.get("sendNote", "")
+    if "if(S.noteBusy)return" not in note or "if(box.value===raw)" not in note:
+        problems.append("note box can send twice or clear new text")
+    for words in ("已儲存，等總監讀取", "總監已收件，處理中", "已交接／處理完成", "（沒收到）", "（收到但卡住）", "舊題，當時選項未留存"):
+        if words not in script:
+            problems.append(f"missing state text {words}")
+    if re.search(r"notify\([^)]*\b(?:note|raw|t)\b", script):
+        problems.append("notify carries the user's text")
+    return problems
+
+
+def test_choice_page():
+    text = (TEMPLATES / "choice_page.html").read_text(encoding="utf-8")
+    problems = choice_page_problems(text)
+    check("choice page passes the 2.1 structure rules", not problems, "; ".join(problems))
+    mutations = (
+        ("brief snapshot redraws open cards", 'S.brief=snap.exists?snap.data():null;renderBrief()', 'S.brief=snap.exists?snap.data():null;renderDecisions()', "brief/current"),
+        ("notes snapshot redraws open cards", "S.notes=docs(snap);renderNotesList()", "S.notes=docs(snap);renderNotesList();renderOpenList()", "notes"),
+        ("no restore after redraw", "  restoreDrafts(saved)}", "  }", "keep value"),
+        ("no in-flight lock", "  if(S.inFlight[id])return;\n", "", "in-flight"),
+        ("draft cleared before save", "  const raw=S.drafts[key]||\"\"", "  if(S.drafts[key]===raw)delete S.drafts[key];const raw=S.drafts[key]||\"\"", "draft cleared"),
+        ("no IME guard", "  if(S.composing){S.deferOpen=true;return}\n", "", "IME"),
+        ("no stuck state", "（收到但卡住）", "（慢）", "收到但卡住"),
+    )
+    for name, old, new, want in mutations:
+        changed = text.replace(old, new, 1)
+        problems = choice_page_problems(changed)
+        check(f"choice page check catches: {name}", old in text and any(want in p for p in problems), f"old found={old in text} problems={problems}")
+
+
+def test_choice_reconcile(tmp):
+    folder = tmp / "choice_reconcile"
+    folder.mkdir()
+    ledger = folder / "choice_inbox.sqlite3"
+    snap = {"questionId": "CH-05", "revision": 2, "title": "版面", "options": [{"key": "A", "label": "格狀"}, {"key": "B", "label": "清單"}]}
+    (folder / "snap.json").write_text(json.dumps(snap, ensure_ascii=False), encoding="utf-8")
+    expect("reconcile register", "choice_reconcile.py", 0, "register", "--db", ledger, "--snapshot", folder / "snap.json", says="REGISTERED CH-05 r2 snapshotHash=sha256:")
+    expect("reconcile register again is fine", "choice_reconcile.py", 0, "register", "--db", ledger, "--snapshot", folder / "snap.json")
+    changed = dict(snap, title="版面（改）")
+    (folder / "snap2.json").write_text(json.dumps(changed, ensure_ascii=False), encoding="utf-8")
+    expect("reconcile refuses a changed revision", "choice_reconcile.py", 1, "register", "--db", ledger, "--snapshot", folder / "snap2.json", says="REFUSED")
+    digest = run("choice_reconcile.py", "register", "--db", ledger, "--snapshot", folder / "snap.json")[1].strip().rsplit("=", 1)[-1]
+    reply = {"questionId": "CH-05", "revision": 2, "snapshotHash": digest, "choice": "B", "submissionId": "s1", "note": ""}
+    export = {"source": "art", "decisions": [
+        {"id": "CH-05", "status": "open", "revision": 2},
+        {"id": "CH-01", "status": "answered", "options": [{"key": "A"}], "answer": {"choice": "A", "at": "2026-11-08T00:00:00Z", "submissionId": "L1"}}],
+        "choiceReplies": [dict(reply, id="R1"), dict(reply, id="R2"), dict(reply, id="R3", submissionId="s2", choice="A"),
+                          dict(reply, id="R4", submissionId="s4", snapshotHash="sha256:0"), dict(reply, id="R5", submissionId="s5", choice="Z")],
+        "notes": [{"id": "N1", "text": "留言", "status": "new"}]}
+    (folder / "export.json").write_text(json.dumps(export, ensure_ascii=False), encoding="utf-8")
+    expect("reconcile ingest sorts every reply", "choice_reconcile.py", 0, "ingest", "--db", ledger, "--export", folder / "export.json",
+           says=["RECORDED art/choiceReplies/R1 CH-05 r2 ok", "R2 CH-05 r2 duplicate", "R3 CH-05 r2 conflict", "R4 CH-05 r2 bad-hash",
+                 "R5 CH-05 r2 bad-choice", "CH-01 r0 legacy", "notes/N1", "shadow"])
+    expect("reconcile ingest twice adds nothing", "choice_reconcile.py", 0, "ingest", "--db", ledger, "--export", folder / "export.json", says="already=7")
+    plan = ("plan", "--db", ledger, "--question", "CH-05", "--revision", "2")
+    expect("reconcile plan gives a WO-ID", "choice_reconcile.py", 0, *plan, "--wo", "WO-041", says="PLANNED CH-05:r2 WO-041 from art/choiceReplies/R1")
+    expect("reconcile plan again keeps the same WO-ID", "choice_reconcile.py", 0, *plan, "--wo", "WO-042", says=["WO-041", "already", "kept the first one"])
+    expect("reconcile plan with nothing recorded", "choice_reconcile.py", 1, "plan", "--db", ledger, "--question", "CH-09", "--revision", "1", says="NOTHING")
+    move = ("advance", "--db", ledger, "--question", "CH-05", "--revision", "2")
+    expect("reconcile refuses a skipped step", "choice_reconcile.py", 2, *move, "--from", "PLANNED", "--to", "CLOSED", says="REFUSED")
+    expect("reconcile queue", "choice_reconcile.py", 0, *move, "--from", "PLANNED", "--to", "QUEUED", says="MOVED")
+    racers = [subprocess.Popen([sys.executable, "-I", "-X", "utf8", str(TOOLS / "choice_reconcile.py"), *map(str, move), "--from", "QUEUED",
+                                "--to", "CLAIMED", "--session", name], stdout=subprocess.PIPE, encoding="utf-8") for name in ("director-a", "director-b")]
+    outcomes = sorted((p.wait(timeout=60), p.stdout.read().strip()) for p in racers)
+    check("reconcile: of two Directors only one claims", [code for code, _ in outcomes] == [0, 1] and "LOST" in outcomes[1][1], repr(outcomes))
+    expect("reconcile status is shadow and names the stuck one", "choice_reconcile.py", 0, "status", "--db", ledger, "--now", "2030-01-01T00:00:00Z",
+           says=["CH-05:r2 CLAIMED WO-041", "收到但卡住", "沒交出去", "stuck=1", "receipts_pending=4", "shadow"])
+    expect("reconcile status fresh shows no stuck", "choice_reconcile.py", 0, "status", "--db", ledger, says="stuck=0")
+    expect("reconcile status without ledger", "choice_reconcile.py", 0, "status", "--db", folder / "none.sqlite3", says="no ledger")
+    for step in (("CLAIMED", "RECEIPT_PENDING"), ("RECEIPT_PENDING", "CLOSED")):
+        expect(f"reconcile {step[0]} -> {step[1]}", "choice_reconcile.py", 0, *move, "--from", step[0], "--to", step[1], "--result", "done")
+    expect("reconcile closed is not open", "choice_reconcile.py", 0, "status", "--db", ledger, "--json", lacks="CH-05:r2")
+
+
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="director_work_selftest_")).resolve()
@@ -4781,6 +4925,8 @@ def main():
         test_test_request(tmp)
         test_poll_hint(tmp)
         test_poll_report(tmp)
+        test_choice_page()
+        test_choice_reconcile(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     for failure in failures:

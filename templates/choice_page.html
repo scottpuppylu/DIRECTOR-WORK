@@ -192,6 +192,7 @@ function refreshCard(v){
   const s=c.querySelector(".send");if(s)s.disabled=sendBlocked(v);
   const m=c.querySelector(".msg[data-role=msg]");if(m)m.textContent=S.msgs[v.key]||""}
 
+// drafts are kept by d.key (id + revision), not by S.drafts[d.id] alone, so a draft never moves to a changed question
 function renderOpen(st){
   const d=st.v;const c=el("article","card open");c.dataset.key=d.key;c.dataset.id=d.id;
   const h=el("div","head");h.append(el("span","code",d.code||d.id));traces(d,h);
