@@ -714,8 +714,13 @@ def rerun_records(text, held=None):
 
 
 def acceptance_identity(record):
-    """The product a PO_ACCEPTANCE record is about: (candidate_id, commit, entry, entry_sha256, manifest_sha256)."""
-    get = lambda key: (record.get(key) or "").lower() if key != "candidate_id" and key != "entry" else record.get(key)
+    """The product a PO_ACCEPTANCE record is about: (candidate_id, commit, entry, entry_sha256, manifest_sha256).
+    Any value that is not text is kept as its JSON text, so a malformed record never raises here."""
+    def get(key):
+        value = record.get(key)
+        if not isinstance(value, str):
+            return None if value is None else json.dumps(value, sort_keys=True, ensure_ascii=False)
+        return value if key in ("candidate_id", "entry") else value.lower()
     return tuple(get(key) for key in ("candidate_id", "commit", "entry", "entry_sha256", "manifest_sha256"))
 
 
@@ -745,10 +750,11 @@ def acceptance_product(record, root):
 
 
 def shared_replies(records):
-    """2.2 (F09): reply_ref -> the products that use it, for a reply used for two different products."""
+    """2.2 (F09): reply_ref -> the products that use it, for a reply used for two different products. Only records
+    that pass acceptance_problems() count: a malformed one is already UNBOUND_PO_REPLY on its own."""
     used = {}
     for record in records:
-        if isinstance(record, dict) and isinstance(record.get("reply_ref"), str) and record["reply_ref"].strip():
+        if isinstance(record, dict) and isinstance(record.get("reply_ref"), str) and record["reply_ref"].strip()                 and not acceptance_problems(record):
             used.setdefault(record["reply_ref"], set()).add(acceptance_identity(record))
     return {ref: ids for ref, ids in used.items() if len(ids) > 1}
 

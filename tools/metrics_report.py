@@ -155,6 +155,8 @@ def run_events(folder):
     for path in sorted((folder / "events").glob("*.json")):
         try:
             data = json.loads(path.read_text(encoding="utf-8-sig"))
+        except UnicodeDecodeError:  # 2.2 (總監 W4 review): NOT_RUN in main, never skipped as a bad event
+            raise
         except (OSError, ValueError) as e:
             notes["bad"].append(f"{path.name}（{type(e).__name__}）")
             continue
@@ -207,6 +209,8 @@ def run_numbers(folder):
             run = json.loads(run_file.read_text(encoding="utf-8-sig"))
             started = stamp(run.get("started_at"))
             sampling = run.get("sampling")
+        except UnicodeDecodeError:
+            raise
         except (OSError, ValueError, AttributeError):
             notes["bad"].append("run.json")
     sampling, sampling_note = read_sampling(sampling)
@@ -365,6 +369,8 @@ def director_report(a, ap):
         cfg = json.loads(config.read_text(encoding="utf-8-sig")) if a.config or config.is_file() else {}
         for key in ("po_item_pattern", "po_open_pattern"):
             re.compile(cfg.get(key, PO_DEFAULTS[key]))
+    except UnicodeDecodeError:
+        raise
     except (OSError, ValueError, re.error) as e:
         print(f"FAIL config {config}: {e}")
         return 1

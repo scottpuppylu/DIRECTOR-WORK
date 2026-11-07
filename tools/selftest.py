@@ -5865,6 +5865,9 @@ def test_rerun_brief_v220(tmp):
            says=[line + " brief=stale", "~ BRIEF_STALE WO-001 B-2 AC-1", "carried over by EVIDENCE_EQUIVALENT"])
     expect("rerun brief 2.2: carried record, old order not in history: brief=unconfirmed", *rerun, "--order", order2,
            "--dispatch-log", carried, "--brief", brief2, says=[line + " brief=unconfirmed", "~ BRIEF_UNCONFIRMED WO-001 AC-1"])
+    expect("rerun brief 2.2 (review): --order-history without --brief compares nothing: brief=unconfirmed, never ok",
+           *rerun, "--order", order1, "--dispatch-log", log("L5.md", dispatch1, lock1), "--order-history", hist,
+           says=line + " brief=unconfirmed", lacks="brief=ok")
     # trace_report: a stale rerun line is not a Director rerun; an ok one is
     proof = root / "trace"
     head0 = "0123456789abcdef0123456789abcdef01234567"
@@ -5906,6 +5909,34 @@ def test_not_utf8_v220(tmp):
     expect("not utf8 2.2: evidence_record verify --rerun with a non-UTF-8 log", "evidence_record.py", 2, "verify",
            next((root / "records").glob("*.json")), "--rerun", "--order", good, "--dispatch-log", badlog, "--repo", root,
            "--candidate", "0" * 40, says=["EVIDENCE: " + said, "DIRECTOR_LOG.md"])
+
+
+def test_review_fix_v220(tmp):
+    """總監 W4 review (MUST_FIX): a PO_ACCEPTANCE record of the wrong types is UNBOUND_PO_REPLY (exit 0) as in v2.1.0,
+    never a traceback; metrics_report with a non-UTF-8 run event or run.json is NOT_RUN (exit 2), never skipped."""
+    root = tmp / "reviewfix220"
+    root.mkdir(parents=True)
+    acc = root / "PO_ACCEPTANCE.json"
+    acc.write_text(json.dumps([{"schema": "po-acceptance-v1", "reply_ref": "m1", "commit": 5, "entry": ["a"]},
+                               {"schema": "po-acceptance-v1", "reply_ref": "m1", "commit": "x", "entry": {"b": 1}}]),
+                   encoding="utf-8")
+    expect("review fix 2.2: PO_ACCEPTANCE with wrong types is UNBOUND_PO_REPLY, not a traceback", "gate_check.py", 0,
+           "--po-acceptance", acc, says=["~ UNBOUND_PO_REPLY #1", "commit is not 40 hex digits", "~ UNBOUND_PO_REPLY #2"],
+           lacks="Traceback")
+    orders, reports = root / "orders", root / "reports"
+    orders.mkdir()
+    reports.mkdir()
+    expect("review fix 2.2: trace_report --acceptance with wrong types is not a traceback", "trace_report.py", 0,
+           "--orders", orders, "--reports", reports, "--acceptance", acc, lacks="Traceback")
+    big5 = "{\"v\": 1, \"note\": \"驗收\"}".encode("big5")
+    for name, where in (("events", "events/e.json"), ("runjson", "run.json")):
+        folder = root / name
+        (folder / "events").mkdir(parents=True)
+        (folder / "events" / "e.json").write_text("[]", encoding="utf-8")
+        (folder / where).write_bytes(big5)
+        expect(f"review fix 2.2: metrics_report --run with a non-UTF-8 {where} is NOT_RUN, not skipped",
+               "metrics_report.py", 2, "--run", folder, says=["METRICS_REPORT: NOT_RUN a file is not UTF-8 text (",
+                                                               where.split("/")[-1]])
 
 
 def test_po_review_whole_line_v220(tmp):
@@ -6075,6 +6106,7 @@ def main():
         guarded(test_rerun_brief_v220, tmp)
         guarded(test_not_utf8_v220, tmp)
         guarded(test_po_review_whole_line_v220, tmp)
+        guarded(test_review_fix_v220, tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     for failure in failures:

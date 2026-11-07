@@ -561,7 +561,8 @@ def finish_rerun(a, record, ac, approved, candidate, tree, root, count, program,
 def brief_state(gate, ac, binding, notes):
     """None without --brief / --order-history; else ok, stale or unconfirmed for this AC (F08 綁鎖定依據): the order's
     pins against the brief (gate_check.brief_notes) and, for a record carried by EVIDENCE_EQUIVALENT, the old order's
-    pins (gate_check.carried_notes, run by check_binding). Shadow: the exit code does not change."""
+    pins (gate_check.carried_notes, run by check_binding). Shadow: the exit code does not change. ok needs --brief:
+    with --order-history alone there is no brief to compare against, so it is unconfirmed (總監 W4 review)."""
     if "pinned" not in binding:
         return None
     mine = []
@@ -573,7 +574,7 @@ def brief_state(gate, ac, binding, notes):
                  or "AC-" not in n.split(":")[0])]
     if any(n.startswith("BRIEF_STALE") for n in hits):
         return "stale"
-    if hits or (binding.get("brief") and not binding["brief"].get("trusted")):
+    if hits or not binding.get("brief") or not binding["brief"].get("trusted"):
         return "unconfirmed"
     return "ok"
 
