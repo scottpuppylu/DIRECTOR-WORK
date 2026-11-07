@@ -3184,8 +3184,8 @@ def test_container(tmp):
     names = sorted(words[i + 1].split("=")[0] for i, w in enumerate(words) if w == "-e")
     check("only the listed environment variables, and no GIT_DIR / GIT_WORK_TREE (they would send every git to this repo)",
           names == ["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", "DW_ALLOW_DOMAINS",
-                    "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_VALUE_1",
-                    "XDG_CACHE_HOME"] and "--env-file" not in words, str(names))
+                    "DW_WORKER_NAME", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_0",
+                    "GIT_CONFIG_VALUE_1", "XDG_CACHE_HOME"] and "--env-file" not in words, str(names))
     check("default allowlist is api.anthropic.com; git never auto-gcs or prunes worktrees",
           "DW_ALLOW_DOMAINS=api.anthropic.com" in words and "GIT_CONFIG_KEY_0=gc.auto" in words and "GIT_CONFIG_VALUE_0=0" in words
           and "GIT_CONFIG_KEY_1=gc.worktreePruneExpire" in words and "GIT_CONFIG_VALUE_1=never" in words, done.stdout)
@@ -3225,6 +3225,235 @@ def test_container(tmp):
           done.returncode == 2 and "hooks/ and config" in done.stderr, done.stderr)
 
 
+def test_worker_clone(tmp):
+    """K1 (1.2.0): worker_clone.sh create gives a clone with nothing pointing back; import takes exactly one branch from
+    a bundle into refs/dw-workers/NAME/ and refuses every other bundle without touching the repository. collect (the
+    docker part) is tested by hand; run_worker.sh --clone is checked with --dry-run."""
+    global total
+    box = TOOLS / "container"
+    folder = tmp / "worker_clone"
+    folder.mkdir()
+
+    def check(name, ok, detail=""):
+        global total
+        total += 1
+        if not ok:
+            failures.append(f"worker_clone {name}: {detail[-600:]}")
+
+    spec = importlib.util.spec_from_file_location("doctor_for_clone_test", TOOLS / "doctor.py")
+    doctor = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(doctor)
+    bash = doctor.git_bash() if os.name == "nt" else shutil.which("bash")
+    if not bash:
+        print("SKIP worker_clone.sh cases: no bash (Git Bash on Windows)")
+        return
+
+    def git(where, *args, check_rc=True):
+        done = subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "core.autocrlf=false",
+                               "-C", str(where), *map(str, args)], capture_output=True, encoding="utf-8")
+        if check_rc and done.returncode:
+            raise RuntimeError(f"git {args}: {done.stderr}")
+        return done.stdout.strip()
+
+    def tool(*args):
+        return subprocess.run([bash, (box / "worker_clone.sh").as_posix(), *[str(a) for a in args]],
+                              capture_output=True, encoding="utf-8")
+
+    repo = folder / "repo"
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    (repo / "a.txt").write_text("one\n", encoding="utf-8")
+    git(repo, "add", "a.txt")
+    git(repo, "commit", "-qm", "one")
+    git(repo, "tag", "v1")
+    git(repo, "branch", "other")
+    (repo / "a.txt").write_text("two\n", encoding="utf-8")
+    git(repo, "commit", "-qam", "two")
+    repo_p = repo.as_posix()
+
+    def refs():
+        return git(repo, "for-each-ref", "--format=%(refname) %(objectname)")
+
+    before = refs()
+
+    # create
+    clone = folder / "clone"
+    done = tool("create", "--repo", repo_p, "--base", "main", "--branch", "wb")
+    check("create without --dir exits 2 (no default)", done.returncode == 2 and "--dir is required" in done.stderr, done.stderr)
+    done = tool("create", "--repo", repo_p, "--base", "main", "--branch", "wb", "--dir", clone.as_posix())
+    check("create makes the clone", done.returncode == 0 and done.stdout.startswith("CREATED ") and clone.is_dir(),
+          done.stdout + done.stderr)
+    if not clone.is_dir():
+        return
+    check("the clone has only refs/heads/wb, no remote, no tag",
+          git(clone, "for-each-ref", "--format=%(refname)") == "refs/heads/wb" and git(clone, "remote") == "", git(clone, "for-each-ref"))
+    config = (clone / ".git" / "config").read_text(encoding="utf-8")
+    check("the clone's config names no remote and no path", "[remote" not in config and repo_p not in config
+          and "url" not in config, config)
+    check("the clone's hooks/ is empty and it borrows no objects",
+          not list((clone / ".git" / "hooks").iterdir()) and not (clone / ".git" / "objects" / "info" / "alternates").exists())
+    check("the clone is at --base", git(clone, "rev-parse", "HEAD") == git(repo, "rev-parse", "main"))
+    done = tool("create", "--repo", repo_p, "--base", "main", "--branch", "wb", "--dir", clone.as_posix())
+    check("create into an existing --dir exits 2", done.returncode == 2 and "must not exist" in done.stderr, done.stderr)
+    done = tool("create", "--repo", repo_p, "--base", "nope", "--branch", "wb", "--dir", (folder / "c2").as_posix())
+    check("create with an unknown --base exits 2", done.returncode == 2 and "--base" in done.stderr, done.stderr)
+    done = tool("create", "--repo", repo_p, "--base", "main", "--branch", "a..b", "--dir", (folder / "c3").as_posix())
+    check("an invalid --branch exits 2", done.returncode == 2 and "--branch" in done.stderr, done.stderr)
+    check("create changed no ref of the repository", refs() == before, refs())
+
+    # the worker's work, then bundles made from it
+    (clone / "b.txt").write_text("worker\n", encoding="utf-8")
+    git(clone, "add", "b.txt")
+    git(clone, "commit", "-qm", "worker")
+    tip = git(clone, "rev-parse", "HEAD")
+    bundles = folder / "bundles"
+    bundles.mkdir()
+
+    def bundle(name, where, *revs):
+        path = bundles / f"{name}.bundle"
+        git(where, "bundle", "create", "-q", path, *revs)
+        return path
+
+    good = bundle("good", clone, "refs/heads/wb")
+    evil = folder / "evil"
+    git(folder, "clone", "-q", "--no-local", clone, evil)
+    git(evil, "update-ref", "refs/heads/other", tip)
+    git(evil, "update-ref", "refs/heads/wbx", tip)
+    git(evil, "tag", "-a", "-m", "t", "wb-tag", tip)
+    multi = bundle("multi", evil, "refs/heads/wb", "refs/heads/other")
+    wrong = bundle("wrong", evil, "refs/heads/other")
+    prefix = bundle("prefix", evil, "refs/heads/wbx")
+    tag = bundle("tag", evil, "refs/tags/wb-tag")
+    head_only = bundle("head", evil, "HEAD")
+    # refs/heads/wb pointing at an annotated tag (git will not make such a branch, so the header is edited): not a commit
+    raw_tag = tag.read_bytes()
+    end = raw_tag.index(b"\n\n")
+    not_commit = bundles / "notcommit.bundle"
+    not_commit.write_bytes(raw_tag[:end].replace(b" refs/tags/wb-tag", b" refs/heads/wb") + raw_tag[end:])
+    # a commit git's strict checks refuse (author line without an e-mail)
+    tree = git(evil, "rev-parse", "HEAD^{tree}")
+    raw = f"tree {tree}\nparent {tip}\nauthor broken\ncommitter x <x@y> 0 +0000\n\nbad\n"
+    bad = subprocess.run(["git", "-C", str(evil), "hash-object", "-t", "commit", "-w", "--literally", "--stdin"],
+                         input=raw.encode("utf-8"), capture_output=True).stdout.decode("ascii").strip()
+    git(evil, "update-ref", "refs/heads/wb", bad)
+    malformed = bundle("malformed", evil, "refs/heads/wb")
+    # a thin bundle that needs a commit the repository lacks
+    (evil / "c.txt").write_text("c\n", encoding="utf-8")
+    git(evil, "update-ref", "refs/heads/wb", tip)
+    git(evil, "checkout", "-q", "wb")
+    git(evil, "add", "c.txt")
+    git(evil, "commit", "-qm", "c1")
+    (evil / "c.txt").write_text("cc\n", encoding="utf-8")
+    git(evil, "commit", "-qam", "c2")
+    thin = bundle("thin", evil, "refs/heads/wb", "^HEAD~1")
+    data = good.read_bytes()
+    cut = data.index(b"\n\n") + 2
+    flipped = bytearray(data)
+    for i in range(cut + 12, min(len(data) - 20, cut + 60)):
+        flipped[i] ^= 0xFF
+    corrupt = bundles / "corrupt.bundle"
+    corrupt.write_bytes(bytes(flipped))
+    truncated = bundles / "truncated.bundle"
+    truncated.write_bytes(data[:cut + 30])
+    junk = bundles / "junk.bundle"
+    junk.write_text("not a bundle\n", encoding="utf-8")
+
+    def objects():
+        return git(repo, "count-objects", "-v")
+
+    held = objects()
+    cases = [
+        ("a bundle with two refs", multi, "exactly one ref"),
+        ("a bundle naming another branch", wrong, "expected refs/heads/wb"),
+        ("a branch name that only starts with wb", prefix, "expected refs/heads/wb"),
+        ("a tag ref", tag, "expected refs/heads/wb"),
+        ("a HEAD-only bundle", head_only, "expected refs/heads/wb"),
+        ("a tip that is a tag object, not a commit", not_commit, "not a commit"),
+        ("a malformed commit (fsck)", malformed, "strict"),
+        ("a bundle needing commits the repository lacks", thin, "verify failed"),
+        ("corrupt pack bytes", corrupt, ""),
+        ("a truncated bundle", truncated, ""),
+        ("a file that is not a bundle", junk, "not a bundle"),
+        ("a missing file", bundles / "none.bundle", "no bundle file"),
+    ]
+    for name, path, says in cases:
+        done = tool("import", "--repo", repo_p, "--branch", "wb", "--bundle", path.as_posix(), "--name", "n1")
+        check(f"import refuses {name}", done.returncode == 2 and says in done.stderr and "COLLECTED" not in done.stdout,
+              f"rc={done.returncode} {done.stdout} {done.stderr}")
+    check("after every refusal the repository's refs are unchanged", refs() == before, refs())
+    check("after every refusal no object reached the repository", objects() == held
+          and subprocess.run(["git", "-C", str(repo), "cat-file", "-e", bad], capture_output=True).returncode != 0, objects())
+    for name in ("../x", ".x", "a b", ""):
+        done = tool("import", "--repo", repo_p, "--branch", "wb", "--bundle", good.as_posix(), "--name", name)
+        check(f"import refuses --name {name!r}", done.returncode == 2 and "--name" in done.stderr, done.stderr)
+
+    done = tool("import", "--repo", repo_p, "--branch", "wb", "--bundle", good.as_posix(), "--name", "n1")
+    check("import takes the one branch into refs/dw-workers/n1/wb",
+          done.returncode == 0 and done.stdout.strip() == f"COLLECTED refs/dw-workers/n1/wb {tip}", done.stdout + done.stderr)
+    after = refs()
+    check("only refs/dw-workers/n1/wb was added; main, other and v1 are unchanged",
+          sorted(after.splitlines()) == sorted(before.splitlines() + [f"refs/dw-workers/n1/wb {tip}"]), after)
+    check("the collected commit is complete in the repository",
+          subprocess.run(["git", "-C", str(repo), "fsck", "--strict", "--no-dangling", "--no-progress"],
+                         capture_output=True).returncode == 0 and git(repo, "cat-file", "-t", tip) == "commit")
+    (clone / "b.txt").write_text("worker 2\n", encoding="utf-8")
+    git(clone, "commit", "-qam", "worker 2")
+    again = bundle("again", clone, "refs/heads/wb")
+    done = tool("import", "--repo", repo_p, "--branch", "wb", "--bundle", again.as_posix(), "--name", "n1")
+    check("a second import moves the ref and names the old commit",
+          done.returncode == 0 and done.stdout.strip().endswith(f"(was {tip})"), done.stdout + done.stderr)
+    done = tool("import", "--repo", repo_p, "--branch", "main", "--bundle", good.as_posix(), "--name", "n1")
+    check("--branch main with a bundle of refs/heads/wb exits 2", done.returncode == 2 and "expected refs/heads/main" in done.stderr,
+          done.stderr)
+    check("refs/heads/main never moves", git(repo, "rev-parse", "refs/heads/main")
+          == next(x.split()[1] for x in before.splitlines() if x.startswith("refs/heads/main ")))
+    done = tool("collect", "--repo", repo_p, "--branch", "wb", "--name", "n1")
+    check("collect without --dir exits 2", done.returncode == 2 and "--dir" in done.stderr, done.stderr)
+    done = tool("push", "--repo", repo_p, "--branch", "wb")
+    check("an unknown command exits 2", done.returncode == 2 and "unknown command" in done.stderr, done.stderr)
+
+    # run_worker.sh --clone
+    director = folder / "DIRECTOR"
+    director.mkdir()
+
+    def run(*args):
+        return subprocess.run([bash, (box / "run_worker.sh").as_posix(), "--dry-run", *[str(a) for a in args]],
+                              capture_output=True, encoding="utf-8")
+
+    done = run("--clone", clone.as_posix(), "--name", "w1", "--director", director.as_posix())
+    words = shlex.split(done.stdout) if done.returncode == 0 else []
+    mounts = [words[i + 1] for i, w in enumerate(words) if w == "-v"]
+    c = clone.as_posix()
+    check("--clone: the clone at /work, its config and hooks/ ro, DIRECTOR ro; the repository is not mounted",
+          mounts == [f"{c}:/work", f"{director.as_posix()}:/director:ro", f"{c}/.git/config:/work/.git/config:ro",
+                     f"{c}/.git/hooks:/work/.git/hooks:ro", "dw-claude-home:/home/dw/.claude"]
+          and not any(repo_p in m for m in mounts), str(mounts) + done.stderr)
+    names = sorted(words[i + 1].split("=")[0] for i, w in enumerate(words) if w == "-e")
+    check("--clone: DW_WORKER_NAME is --name; no GIT_CONFIG_* (no shared worktrees to protect)",
+          "DW_WORKER_NAME=w1" in words and names == ["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB",
+                                                     "DW_ALLOW_DOMAINS", "DW_WORKER_NAME", "XDG_CACHE_HOME"], str(names))
+    check("--clone prints no WARN", "WARN" not in done.stderr, done.stderr)
+    done = run("--clone", c, "--director", director.as_posix())
+    check("--clone without --name exits 2", done.returncode == 2 and "--name" in done.stderr, done.stderr)
+    done = run("--clone", c, "--name", "../w", "--director", director.as_posix())
+    check("--clone with a bad --name exits 2", done.returncode == 2 and "--name" in done.stderr, done.stderr)
+    done = run("--clone", c, "--name", "w1", "--git-common", (repo / ".git").as_posix(), "--director", director.as_posix())
+    check("--clone with --git-common exits 2", done.returncode == 2 and "--clone goes without" in done.stderr, done.stderr)
+    done = run("--clone", repo_p + "/nothing", "--name", "w1", "--director", director.as_posix())
+    check("--clone of a folder without .git exits 2", done.returncode == 2 and "worker_clone.sh create" in done.stderr, done.stderr)
+    (clone / ".git" / "hooks" / "post-checkout").write_text("#!/bin/sh\n", encoding="utf-8")
+    done = run("--clone", c, "--name", "w1", "--director", director.as_posix())
+    check("--clone with a file in .git/hooks exits 2", done.returncode == 2 and "hooks must be empty" in done.stderr, done.stderr)
+    (clone / ".git" / "hooks" / "post-checkout").unlink()
+    done = run("--worktree", repo_p, "--git-common", (repo / ".git").as_posix(), "--director", director.as_posix())
+    words = shlex.split(done.stdout) if done.returncode == 0 else []
+    check("--git-common still works for one version, with a WARN on stderr (Q1)",
+          done.returncode == 0 and "WARN K1" in done.stderr and "2.0 removes --git-common" in done.stderr, done.stderr)
+    check("--git-common: DW_WORKER_NAME defaults to the folder name", "DW_WORKER_NAME=repo" in words, done.stdout)
+    done = run("--worktree", repo_p, "--git-common", (repo / ".git").as_posix(), "--name", "w9", "--director", director.as_posix())
+    check("--git-common with --name uses it", "DW_WORKER_NAME=w9" in shlex.split(done.stdout or "''"), done.stdout + done.stderr)
+
+
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="director_work_selftest_")).resolve()
@@ -3259,6 +3488,7 @@ def main():
         test_review(tmp)
         test_doctor(tmp)
         test_container(tmp)
+        test_worker_clone(tmp)
         test_evidence(tmp)
         test_order_checks(tmp)
         test_preflight(tmp)
