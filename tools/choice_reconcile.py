@@ -265,7 +265,34 @@ def classify(con, kind, qid, rev, payload, decisions):
     keys = [o.get("key") for o in json.loads(snap[1]).get("options") or [] if isinstance(o, dict)]
     if keys and payload.get("choice") not in keys or not keys and payload.get("choice") != "done":
         return "bad-choice"
+    if option_check(con, qid, rev, payload, decisions)[0] == "mismatch":
+        return "snapshot_mismatch"  # registered after the reply arrived: kept, never planned
     return "ok"
+
+
+def option_check(con, qid, rev, payload, decisions):
+    """Rebuild the option the reply's choice names from the registered snapshot and compare the selectedOptionSnapshot
+    the page sent (key, and label when the page sent one). Returns (ok | missing | unregistered | mismatch, detail)."""
+    sent = payload.get("selectedOptionSnapshot")
+    if sent is None:
+        return "missing", "no selectedOptionSnapshot (an older page)"
+    if rev:
+        snap = con.execute("SELECT snapshot FROM revisions WHERE question_id=? AND revision=?", (qid, rev)).fetchone()
+        options = json.loads(snap[0]).get("options") if snap else None
+    else:
+        options = (decisions.get(qid) or {}).get("options")
+    if not isinstance(options, list) or not options:
+        return "unregistered", f"no registered options for {qid} r{rev}"
+    if not isinstance(sent, dict):
+        return "mismatch", f"selectedOptionSnapshot is {type(sent).__name__}, not an object"
+    option = next((o for o in options if isinstance(o, dict) and o.get("key") == payload.get("choice")), None)
+    if option is None:
+        return "ok", ""  # the choice itself is not an option: classify says bad-choice
+    if sent.get("key") != option.get("key") or sent.get("label") and sent.get("label") != (option.get("label") or ""):
+        saw = json.dumps({"key": sent.get("key"), "label": sent.get("label")}, ensure_ascii=False)
+        means = json.dumps({"key": option.get("key"), "label": option.get("label")}, ensure_ascii=False)
+        return "mismatch", f"choice={payload.get('choice')} is {means} in the registered snapshot, the page sent {saw}"
+    return "ok", ""
 
 
 def judge(con, kind, qid, rev, payload, decisions, idem, skey=None, before=None):
@@ -496,8 +523,18 @@ def cmd_ingest(args):
         if n:
             counts["reevaluated"] = counts.get("reevaluated", 0) + n
     for kind, skey, qid, rev, payload, idem in rows:
-        con.execute("UPDATE quarantine SET resolved_at=? WHERE source_key=? AND resolved_at IS NULL", (now_iso(), skey))
         known = con.execute("SELECT verdict, state FROM inbox WHERE source_key=?", (skey,)).fetchone()
+        if kind == "choice" and not known:  # F05: the option the user saw must be the one the choice names
+            seen, detail = option_check(con, qid, rev, payload, decisions)
+            if seen == "mismatch":
+                quarantine(con, skey, "choiceReplies" if rev else "decisions", "snapshot_mismatch",
+                           json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str))
+                print(f"  {detail}; not recorded, not planned")
+                counts["quarantined"] = counts.get("quarantined", 0) + 1
+                continue
+            if seen != "ok":
+                print(f"WARNING {skey}: {detail}; recorded without checking which option the user saw")
+        con.execute("UPDATE quarantine SET resolved_at=? WHERE source_key=? AND resolved_at IS NULL", (now_iso(), skey))
         if known:
             if known[0] in RETRYABLE and known[1] == "RECEIPT_PENDING" and reevaluate(con, qid):
                 counts["reevaluated"] = counts.get("reevaluated", 0) + 1
