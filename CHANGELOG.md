@@ -95,6 +95,7 @@ MINOR：GPT 對 v2.1.0 的獨立審查（`DIRECTOR-WORK-v2.1.0-review.md`，21 �
 - `choice_reconcile`：同一筆回覆，一次匯出有 `source`、一次沒有，又沒給 `--source`，會用兩個不同的冪等鍵，重複記帳；系統只印 WARNING。舊匯出請一律帶 `--source`。
 - 選擇頁頁面端只比對指紋字串，內容防竄改靠帳本端；兩個分頁同時送出由帳本標 conflict，頁面不仲裁。
 - 容器：真實 Docker 行為（`--sysctl` 實際關掉 IPv6、重疊掛載在 Docker Desktop 上的別名）只在本機模擬測過，沒有在真的容器裡跑；Linux 與 browser 兩個 CI job 已在 GitHub 上跑過且通過（見「數字」），但 CI 裡也沒有實際起 Docker。
+- 2.1 專案自己複製的 `guard_rules.json` 沒有新的帶引號樣式：專案路徑有空格時，暫停中 `pause_ctl status`／`procs`／`off` 還是會被擋。處理：從 2.2.0 範本更新 `guard_rules.json` 的 `pause.allow_shell`（`hook_guard.py` 也要用 2.2.0 版，`quote_blank` 在那裡）。
 - 外部 GPT 審查的重現腳本只認 v2.1.0 的版本字串；`repro_dw210.py` 對 2.2.0 的結果見 PR 說明，仍顯示「重現」的項目逐項列在那裡。
 
 ### 數字
