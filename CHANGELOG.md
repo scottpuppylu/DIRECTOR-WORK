@@ -6,6 +6,47 @@
 - **MINOR**：新增規則、文件、工具或選項，舊檔案照樣通過。
 - **PATCH**：修正文字、修 bug，規則不變。
 
+## 1.2.0 — 2026-11-07
+
+容器 worker 的三個已知缺口補上：每個 worker 有自己的 clone，碰不到原 repo 的 ref（K1）；容器裡只解析白名單名稱（DNS）；同一個 repo 開幾個容器 worker，動作紀錄都各寫各的（K6）。舊的 `--git-common` 保留一版，只印 WARN、doctor 報 NOT_ENFORCED，舊指令照樣能跑，照本檔政策是 MINOR。
+
+- `tools/container/worker_clone.sh`（K1）：
+  - `create --repo --base --branch --dir`：做一份完整的 clone（`--no-local`，沒有 hardlink 和 alternates），只留一條分支，沒有 remote 和 tag，`.git/config` 重寫、`.git/hooks` 清空，裡面沒有任何東西指回原 repo。`--dir` 必填、沒有預設，而且不能已經存在；建議放 WSL 的 ext4。
+  - `collect --repo --branch --dir --name`：在離線、沒有 capability、clone 唯讀掛載的拋棄式容器裡打包那一條分支，再交給 `import`。
+  - `import`：bundle 要剛好一個 ref `refs/heads/<分支>`，過 `git bundle verify`，objects 先在隔離 repo 過 `index-pack --strict` 和 `fsck --strict`，tip 要是 commit，才複製進原 repo 並設 `refs/dw-workers/<名稱>/<分支>`。原 repo 的其他 ref 一律不動。
+  - worker 不能 push，由總監 `collect`。
+- `run_worker.sh --clone <資料夾> --name <名稱>`：`/work` 是 worker 自己的 clone，`.git/config` 和 `.git/hooks` 另外唯讀蓋上，原 repo 不掛進容器。`--git-common` 印 `WARN K1`，2.0 拿掉。容器多設 `DW_WORKER_NAME` 和 `DW_GIT_MODE`（`clone` / `shared`）。
+- 容器 DNS：`tools/container/dns_allow.py`（只用標準庫）以使用者 `dwdns` 在容器裡跑，沒有 capability。它只回答白名單名稱的 A / AAAA：其他名稱回 NXDOMAIN，其他型別回 REFUSED，送上游的查詢重新組過（新的隨機 ID、名稱轉小寫）。
+  - 防火牆只讓 `dwdns` 連 `DW_DNS_UPSTREAM` 的 53；`127.0.0.1` 的 53 轉到它，其他位址的 53 一律拒絕。沒有關閉開關。
+  - 名稱清單是 `--allow-file`（預設 `tools/container/dns_allow.txt`，只有 `api.anthropic.com`），加上 `--login`、`--allow`。`*.` 開頭的名稱只解析、不開 443。不合法的名稱或空清單 exit 2。
+  - 上游是 `DW_DNS_UPSTREAM`，沒設就用主機 `/etc/resolv.conf` 裡不是 `127.x` 的 IPv4。
+- 動作紀錄（K6）：`audit_log.py` 的路徑可寫 `{worktree}` 和 `{container}`。`{worktree}` 取 `DW_WORKER_NAME`，`{container}` 在 hook 執行時換成容器 ID 前 12 碼（容器外是 `host`），其他 `{名稱}` 一律報錯。`setup_project_settings.py --runtime-guard` 的預設改成 `<git common dir>/director-audit/{worktree}-{container}.jsonl`，每份各自一條鏈。
+- `doctor.py`：
+  - `--probe` 在容器裡查六項，多了 `example.com` 解析不到（DNS 白名單）和 `.git` 是 worker 自己的（K1）。
+  - `DW_GIT_MODE=shared` 或 linked worktree 在容器裡，不加 `--probe` 也報 isolation NOT_ENFORCED（K1 shared .git）。
+  - `worker_clone.sh` 做的 clone，`worktree` 一項報 ENFORCED（the worker's own clone）。
+- README 的安全表加上 K1 和 DNS 兩列，缺口表改寫；`tools/README.md` 的 container 一節改成 clone 的流程，補上 1.2.0 實測和 K2 速度數字；`docs/11` 的容器 worker 開法改成 `create`、`--clone`、`collect`。
+- `selftest.py` 加上面各項的正反案例（1,344 → 1,480 項），其中惡意 bundle 12 種都拒收，拒收後原 repo 的 ref 和 objects 都不變。
+
+對齊初衷：
+1. 幫到誰：總監。1.1.0 容器 worker 的三個缺口是總監的對抗測試找到的：worker 能改別的分支和 tag、能把資料藏在 DNS 查詢裡送出、兩個 worker 的紀錄寫進同一份。每個缺口都先在拋棄式 clone 上重現，再修，再用容器實測。
+2. Desktop：在 Desktop Code 分頁的 worker session 做，全部在 WSL docker 的拋棄式 clone 上實測，沒掛真正的 repo。結果：K1 9/9、DNS 20/20、doctor 8/8；selftest 1,480/1,480，在 Python 3.9、3.11、3.12 各跑一次。容器登入（C6）、真實工單（C7）和登入後的 doctor（C8b）還沒做，要等 PO 登入。
+3. 服務：PO 不用盯細節（3）：worker 弄壞的只會是它自己的 clone，總監只收一條分支。成品要真的對（5）：doctor 照實報，`--git-common` 報 NOT_ENFORCED。零成本（7）：只用標準庫和已有的 docker image，沒有下載。
+4. 核心：每輪必讀不變；Direct 不多步驟。容器 worker 多兩個指令（`create` 和 `collect`），由總監執行，PO 不多操作。
+5. 舊檔案和舊指令：`--git-common` 照樣能跑，多印一行 WARN，doctor 從 ENFORCED 變成 NOT_ENFORCED（設計如此）。1.1.0 裝的 `{worktree}.jsonl` 照舊能用。
+
+遷移：
+1. 把 `tools/` 整個重新複製到 `DIRECTOR/tools/`，在 WSL 裡 `docker build -t dw-worker:1.2.0 tools/container`。
+2. 容器 worker 改用 `worker_clone.sh create` → `run_worker.sh --clone` → `worker_clone.sh collect`（`tools/README.md` 的 container 一節）。驗收用 `git rev-parse refs/dw-workers/<名稱>/<分支>` 取候選 commit。
+3. 動作紀錄要換成新檔名：重跑 `setup_project_settings.py --runtime-guard ... --apply`。舊檔留著不動。
+4. 主機 `/etc/resolv.conf` 只有 `127.x` 時（例如 systemd-resolved），開容器前設 `DW_DNS_UPSTREAM`，否則 `run_worker.sh` exit 2。
+
+沒做：
+- 容器登入（C6）、真實工單試跑（C7）、登入後在容器裡跑 doctor（C8b）：要 PO 用 account B 登入。
+- DNS 剩下的路：白名單名稱的查詢仍會到上游（看得到名稱、型別、時間）；查詢時間點可當很慢的隱密通道；443 的 IP 只在開容器時解析一次。
+- `--git-common` 這版沒拿掉（2.0 拿掉）；`--dns-open` 之類的關閉開關不做，要另提案。
+- 1.1.0「沒做」裡的 DNS、K1、K6 三項這版做了；那段是當時的紀錄，不改。
+
 ## 1.1.0 — 2026-11-07
 
 執行期防護：worker 的每個工具呼叫先過規則檔，危險動作擋下或等人點頭，機密不讀、輸出遮罩，每個動作記進可驗證的紀錄，可以一鍵暫停；`doctor.py` 照實報哪些真的生效。另提供在 WSL docker 容器裡跑 worker 的腳本。全部是新工具和選項，不加參數時舊行為不變，照本檔政策是 MINOR。這是防手滑，不是安全邊界（README「執行期防護」一節）。

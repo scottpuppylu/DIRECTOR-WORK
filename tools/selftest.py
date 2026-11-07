@@ -2632,6 +2632,146 @@ def test_audit(tmp):
     expect("setup plain --hooks keeps --audit", "setup_project_settings.py", 0, "--repo", wt, "--only-this", "--hooks", says="OK")
 
 
+def test_audit_names(tmp):
+    """K6: {worktree} and {container} in the log path, filled in when the command runs; one chain per file."""
+    global total
+    folder = tmp / "audit_names"
+    folder.mkdir()
+    spec = importlib.util.spec_from_file_location("audit_log_names", TOOLS / "audit_log.py")
+    audit = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(audit)
+    script = str(TOOLS / "audit_log.py")
+    ids = ["a1b2c3d4e5f6" + "0" * 52, "0f9e8d7c6b5a" + "1" * 52]
+    infos = []
+    for n, cid in enumerate(ids):
+        info = folder / f"mountinfo{n}"
+        info.write_text(f"1 0 0:1 / / rw - overlay overlay rw\n2 1 8:1 /var/lib/docker/containers/{cid}/hostname "
+                        f"/etc/hostname rw - ext4 /dev/sda1 rw\n", encoding="utf-8")
+        infos.append(info)
+    nothing = folder / "absent"
+
+    def check(name, ok, detail=""):
+        global total
+        total += 1
+        if not ok:
+            failures.append(f"audit names {name}: {detail}")
+
+    def env(**extra):
+        out = {k: v for k, v in os.environ.items() if k not in ("DW_WORKER_NAME", "CLAUDE_PROJECT_DIR")}
+        out.update(extra)
+        return out
+
+    def tool(*args, cwd=None, stdin="", **extra):
+        return subprocess.run([sys.executable, "-I", "-X", "utf8", *map(str, args)], env=env(**extra), cwd=cwd,
+                              input=stdin, capture_output=True, encoding="utf-8")
+
+    check("container ID from mountinfo is its first 12 characters", audit.container_id(infos[0], nothing) == "a1b2c3d4e5f6")
+    check("no mountinfo and no /.dockerenv gives host", audit.container_id(nothing, nothing) == "host")
+    marker = folder / "dockerenv"
+    marker.write_text("", encoding="utf-8")
+    got = audit.container_id(nothing, marker)
+    check("/.dockerenv without an ID in mountinfo gives the host name", got not in ("", "host")
+          and all(c.isalnum() or c in "._-" for c in got), got)
+    saved = os.environ.get("DW_WORKER_NAME")
+    made = set()
+    try:
+        os.environ["DW_WORKER_NAME"] = "w/1 x"
+        check("DW_WORKER_NAME wins and is made safe", audit.worker_name(folder) == "w_1_x", audit.worker_name(folder))
+        os.environ.pop("DW_WORKER_NAME")
+        check("without DW_WORKER_NAME the folder name is used", audit.worker_name(folder) == "audit_names")
+        # the same name in two containers, and two names in one container: four files, four chains
+        for name in ("w1", "w2"):
+            os.environ["DW_WORKER_NAME"] = name
+            for info in infos:
+                path = audit.expand(folder / "logs" / "{worktree}-{container}.jsonl", mountinfo=info, dockerenv=nothing)
+                for i in range(3):
+                    audit.append_entry(path, audit.hook_entry({"tool_name": "Bash", "tool_input": {"n": i}}))
+                made.add(path)
+    finally:
+        if saved is None:
+            os.environ.pop("DW_WORKER_NAME", None)
+        else:
+            os.environ["DW_WORKER_NAME"] = saved
+    names = sorted(pathlib.Path(p).name for p in made)
+    check("two names x two containers give four files", names == ["w1-0f9e8d7c6b5a.jsonl", "w1-a1b2c3d4e5f6.jsonl",
+          "w2-0f9e8d7c6b5a.jsonl", "w2-a1b2c3d4e5f6.jsonl"], str(names))
+    for path in sorted(made):
+        expect(f"audit names {pathlib.Path(path).name} is its own chain", "audit_log.py", 0, "verify", "--log", path,
+               says=["entries=3", "head_seq=3", " OK"])
+    try:
+        audit.expand(folder / "{user}.jsonl")
+        check("an unknown placeholder is refused", False, "no error")
+    except ValueError as error:
+        check("an unknown placeholder is refused", "{user}" in str(error), str(error))
+    check("a path without placeholders is left as it is", audit.expand("x/a.jsonl") == "x/a.jsonl")
+    check("only= fills in just the named ones",
+          audit.expand("{worktree}-{container}", folder, only=("worktree",)) == "audit_names-{container}")
+
+    # the command line fills them in as it runs
+    here = audit.container_id()
+    call = json.dumps({"hook_event_name": "PostToolUse", "tool_name": "Read", "tool_input": {"file_path": "a"}, "tool_response": "x"})
+    pattern = folder / "cli" / "{worktree}-{container}.jsonl"
+    want = folder / "cli" / f"cli1-{here}.jsonl"
+    done = tool(script, "append", "--log", pattern, stdin=call, DW_WORKER_NAME="cli1")
+    check("append writes the filled-in file", done.returncode == 0 and want.is_file(), done.stderr + str(want))
+    done = tool(script, "verify", "--log", pattern, DW_WORKER_NAME="cli1")
+    check("verify reads the same filled-in file", done.returncode == 0 and f"file={want.resolve().as_posix()}" in done.stdout,
+          done.stdout)
+    done = tool(script, "append", "--log", pattern, cwd=folder, stdin=call)
+    check("without DW_WORKER_NAME append uses the current folder name",
+          done.returncode == 0 and (folder / "cli" / f"audit_names-{here}.jsonl").is_file(), done.stderr)
+    bad = folder / "cli" / "{user}.jsonl"
+    done = tool(script, "append", "--log", bad, stdin=call)
+    check("append with an unknown placeholder exits 1 and names it", done.returncode == 1 and "{user}" in done.stderr
+          and not list((folder / "cli").glob("*user*")), done.stderr)
+    fake_key = "gh" + "p_" + "Z4k" * 12  # built at run time: nothing key-shaped in the source
+    bash = json.dumps({"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": {"command": "x"},
+                       "tool_response": {"stdout": "out " + fake_key, "stderr": "", "interrupted": False, "isImage": False}})
+    done = tool(script, "append", "--log", bad, stdin=bash)
+    check("append with an unknown placeholder still returns the masked output", done.returncode == 0
+          and "[MASKED:github_token]" in done.stdout and fake_key not in done.stdout, done.stdout + done.stderr)
+    for cmd in ("verify", "head"):
+        expect(f"audit names {cmd} with an unknown placeholder", "audit_log.py", 2, cmd, "--log", bad, says=["NOT_RUN", "{user}"])
+    expect("audit names cite with an unknown placeholder", "audit_log.py", 2, "cite", "--log", bad, "--from", 1, "--to", 1,
+           says=["NOT_RUN", "{user}"])
+
+    # hook_guard --audit fills them in too
+    push = json.dumps({"tool_name": "Bash", "tool_input": {"command": "git push origin main"}})
+    done = tool(TOOLS / "hook_guard.py", "--rules", TOOLS / "guard_rules.json", "--profile", "worker",
+                "--audit", folder / "guard" / "{worktree}-{container}.jsonl", stdin=push, DW_WORKER_NAME="g1")
+    written = folder / "guard" / f"g1-{here}.jsonl"
+    rows = [json.loads(x) for x in written.read_text(encoding="utf-8").splitlines()] if written.is_file() else []
+    check("hook_guard --audit writes its decision to the filled-in file", done.returncode == 2 and len(rows) == 1
+          and rows[0]["kind"] == "decision" and not list((folder / "guard").glob("*{*")), str(rows))
+
+    # setup fills in {worktree}, keeps {container} for the hook, and refuses an unknown placeholder
+    wt = folder / "wt"
+    wt.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=wt, check=True)
+    (wt / ".git" / "info" / "exclude").write_text(".claude/settings.local.json\n", encoding="utf-8")
+    per = (folder / "logs2" / "{worktree}-{container}.jsonl").as_posix()
+    done = tool(TOOLS / "setup_project_settings.py", "--repo", wt, "--only-this", "--audit-log", per, "--apply")
+    check("setup writes the {container} path", done.returncode == 0 and "SET" in done.stdout, done.stdout[-300:] + done.stderr)
+    data = json.loads((wt / ".claude" / "settings.local.json").read_text(encoding="utf-8"))
+    wanted = (folder / "logs2").resolve().as_posix() + "/wt-{container}.jsonl"
+    command = data["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+    check("setup fills in {worktree} and leaves {container} for the hook", f'append --log "{wanted}"' in command, command)
+    done = tool(TOOLS / "setup_project_settings.py", "--repo", wt, "--only-this", "--audit-log", (folder / "{user}.jsonl").as_posix())
+    check("setup refuses an unknown placeholder", done.returncode == 1 and "{user}" in done.stderr, done.stdout[-200:] + done.stderr)
+
+    # doctor fills them in the same way before it looks for the file
+    done = tool(TOOLS / "doctor.py", "--repo", wt)
+    line = next((x for x in done.stdout.splitlines() if " audit_log: " in x), "")
+    check("doctor: the filled-in file has no entries yet", line.startswith("CONFIGURED_NOT_VERIFIED")
+          and line.endswith(f"wt-{here}.jsonl has no entries yet"), done.stdout[-600:])
+    target = pathlib.Path(wanted.replace("{container}", here))
+    audit.append_entry(target, audit.hook_entry({"tool_name": "Read", "tool_input": {}}))
+    done = tool(TOOLS / "doctor.py", "--repo", wt)
+    line = next((x for x in done.stdout.splitlines() if " audit_log: " in x), "")
+    check("doctor verifies the filled-in file", line.startswith("ENFORCED") and f"file={target.resolve().as_posix()}" in line,
+          done.stdout[-600:])
+
+
 FAKE_CLAUDE = '''import json, os, sys, time
 mode = os.environ.get("FAKE_REVIEW_MODE", "block")
 with open(os.environ["FAKE_REVIEW_LOG"], "a", encoding="utf-8") as out:
@@ -2800,7 +2940,7 @@ def test_doctor(tmp):
     doctor = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(doctor)
     clean_env = {k: v for k, v in os.environ.items() if not doctor.CREDENTIAL_NAME.search(k) and not doctor.PROXY_NAME.match(k)
-                 and k not in ("CLAUDE_CODE_EXECPATH", "CLAUDE_PID", "CLAUDE_CODE_GIT_BASH_PATH")}
+                 and k not in ("CLAUDE_CODE_EXECPATH", "CLAUDE_PID", "CLAUDE_CODE_GIT_BASH_PATH", "DW_GIT_MODE")}
     outputs = []
 
     def doc(*args, repo=wt, path_claude=(new,), env_change=None, fs_root=empty_root):
@@ -2830,7 +2970,7 @@ def test_doctor(tmp):
     setup = ("--repo", wt, "--only-this", "--pause-flag", pause)
     expect("setup plain first", "setup_project_settings.py", 0, *setup, "--apply", says="SET")
     expect("setup --runtime-guard default log is in the git common dir", "setup_project_settings.py", 1, *setup,
-           "--runtime-guard", says=["runtime_guard=on", "guard_profile=worker", "director-audit/{worktree}.jsonl",
+           "--runtime-guard", says=["runtime_guard=on", "guard_profile=worker", "director-audit/{worktree}-{container}.jsonl",
                                     "env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"])
     guard = setup + ("--runtime-guard", "--audit-log", (folder / "audit" / "{worktree}.jsonl").as_posix())
     expect("setup --runtime-guard written and tested", "setup_project_settings.py", 0, *guard, "--apply",
@@ -2942,20 +3082,43 @@ def test_doctor(tmp):
     container = folder / "container"
     (container / "proc" / "1").mkdir(parents=True)
     (container / "proc" / "1" / "cgroup").write_text("0::/docker/0123abcd\n", encoding="utf-8")
-    done = doc(fs_root=container)
+    done = doc(repo=main_repo, fs_root=container)
     check("a container cgroup without --probe is CONFIGURED_NOT_VERIFIED", line(done, "isolation").startswith("CONFIGURED_NOT_VERIFIED"), done.stdout)
     closed = socket.socket()
     closed.bind(("127.0.0.1", 0))
     port = closed.getsockname()[1]
     closed.close()
-    done = doc("--probe", "--director", folder, "--egress", f"127.0.0.1:{port}", fs_root=container,
+    done = doc("--probe", "--director", folder, "--egress", f"127.0.0.1:{port}", "--dns-name", "localhost", fs_root=container,
                env_change={fake_name: fake_token})
     check("container --probe: a writable root and DIRECTOR and a credential name fail, a refused connection passes",
           line(done, "isolation").startswith("NOT_ENFORCED") and "root read-only FAIL" in done.stdout
           and "DIRECTOR read-only FAIL" in done.stdout and f"no connection to 127.0.0.1:{port} ok" in done.stdout
           and "no credential names FAIL" in done.stdout, done.stdout)
+    check("container --probe: a name that resolves fails the DNS check (localhost); a linked worktree is the shared .git",
+          "localhost does not resolve FAIL" in done.stdout and "own .git (K1) FAIL" in done.stdout, done.stdout)
+    done = doc("--probe", "--egress", f"127.0.0.1:{port}", "--dns-name", "dw-doctor-probe.invalid", repo=main_repo, fs_root=container)
+    check("container --probe: a name that does not resolve passes the DNS check",
+          "dw-doctor-probe.invalid does not resolve ok" in done.stdout, done.stdout)
+    done = doc(repo=main_repo, fs_root=container, env_change={"DW_GIT_MODE": "shared"})
+    check("container, DW_GIT_MODE=shared, no --probe: isolation NOT_ENFORCED (K1 shared .git)",
+          line(done, "isolation").startswith("NOT_ENFORCED") and "K1 shared .git" in done.stdout and done.returncode == 1,
+          done.stdout)
+    done = doc("--probe", "--egress", f"127.0.0.1:{port}", "--dns-name", "dw-doctor-probe.invalid", fs_root=container,
+               repo=main_repo, env_change={"DW_GIT_MODE": "shared"})
+    check("container --probe, DW_GIT_MODE=shared: own .git (K1) FAIL", line(done, "isolation").startswith("NOT_ENFORCED")
+          and "own .git (K1) FAIL" in done.stdout, done.stdout)
+    done = doc(fs_root=container, env_change={"DW_GIT_MODE": "clone"})
+    check("container, a linked worktree with DW_GIT_MODE=clone is still the shared .git (K1)",
+          "K1 shared .git" in line(done, "isolation"), done.stdout)
+    done = doc(repo=main_repo, fs_root=container, env_change={"DW_GIT_MODE": "clone"})
+    check("container, DW_GIT_MODE=clone in a clone: worktree ENFORCED (its own clone), isolation not yet verified",
+          line(done, "worktree").startswith("ENFORCED") and "own clone" in line(done, "worktree")
+          and line(done, "isolation").startswith("CONFIGURED_NOT_VERIFIED"), done.stdout)
+    done = doc(repo=main_repo, env_change={"DW_GIT_MODE": "clone"})
+    check("outside a container DW_GIT_MODE is ignored: the main checkout is still NOT_ENFORCED",
+          line(done, "worktree").startswith("NOT_ENFORCED"), done.stdout)
     (empty_root / ".dockerenv").write_text("", encoding="utf-8")
-    done = doc()
+    done = doc(repo=main_repo)
     check("/.dockerenv means a container", line(done, "isolation").startswith("CONFIGURED_NOT_VERIFIED"), done.stdout)
     (empty_root / ".dockerenv").unlink()
     done = doc(repo=main_repo)
@@ -3022,7 +3185,7 @@ def test_container(tmp):
 
     def run(*args):
         argv = [bash, (box / "run_worker.sh").as_posix(), "--dry-run", *[str(a) for a in args]]
-        return subprocess.run(argv, capture_output=True, encoding="utf-8")
+        return subprocess.run(argv, capture_output=True, encoding="utf-8", env={**os.environ, "DW_DNS_UPSTREAM": "192.0.2.53"})
 
     base = ("--worktree", wt.as_posix(), "--director", director.as_posix(), "--git-common", gitc.as_posix())
     done = run(*base)
@@ -3044,8 +3207,8 @@ def test_container(tmp):
     names = sorted(words[i + 1].split("=")[0] for i, w in enumerate(words) if w == "-e")
     check("only the listed environment variables, and no GIT_DIR / GIT_WORK_TREE (they would send every git to this repo)",
           names == ["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", "DW_ALLOW_DOMAINS",
-                    "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_VALUE_1",
-                    "XDG_CACHE_HOME"] and "--env-file" not in words, str(names))
+                    "DW_DNS_UPSTREAM", "DW_GIT_MODE", "DW_WORKER_NAME", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_0",
+                    "GIT_CONFIG_VALUE_1", "XDG_CACHE_HOME"] and "--env-file" not in words, str(names))
     check("default allowlist is api.anthropic.com; git never auto-gcs or prunes worktrees",
           "DW_ALLOW_DOMAINS=api.anthropic.com" in words and "GIT_CONFIG_KEY_0=gc.auto" in words and "GIT_CONFIG_VALUE_0=0" in words
           and "GIT_CONFIG_KEY_1=gc.worktreePruneExpire" in words and "GIT_CONFIG_VALUE_1=never" in words, done.stdout)
@@ -3067,7 +3230,7 @@ def test_container(tmp):
           and generated(":/repo-git/worktrees/w1/gitdir:ro") == "/work/.git\n", str(mounts))
     check("--login adds the sign-in hosts; the command comes last",
           "DW_ALLOW_DOMAINS=api.anthropic.com claude.ai platform.claude.com console.anthropic.com" in words
-          and words[-4:] == ["dw-worker:1.1.0", "claude", "-p", "hi"], done.stdout + done.stderr)
+          and words[-4:] == ["dw-worker:1.2.0", "claude", "-p", "hi"], done.stdout + done.stderr)
     done = run(*base, "--worktree-name", "w1")
     check("--worktree-name on a main checkout exits 2", done.returncode == 2 and "linked worktree" in done.stderr, done.stderr)
     done = run("--worktree", linked.as_posix(), "--director", director.as_posix(), "--git-common", gitc.as_posix())
@@ -3083,6 +3246,471 @@ def test_container(tmp):
     done = run("--worktree", wt.as_posix(), "--director", director.as_posix(), "--git-common", bare.as_posix())
     check("a .git without hooks/ and config exits 2 (docker would create them as root)",
           done.returncode == 2 and "hooks/ and config" in done.stderr, done.stderr)
+
+
+def test_worker_clone(tmp):
+    """K1 (1.2.0): worker_clone.sh create gives a clone with nothing pointing back; import takes exactly one branch from
+    a bundle into refs/dw-workers/NAME/ and refuses every other bundle without touching the repository. collect (the
+    docker part) is tested by hand; run_worker.sh --clone is checked with --dry-run."""
+    global total
+    box = TOOLS / "container"
+    folder = tmp / "worker_clone"
+    folder.mkdir()
+
+    def check(name, ok, detail=""):
+        global total
+        total += 1
+        if not ok:
+            failures.append(f"worker_clone {name}: {detail[-600:]}")
+
+    spec = importlib.util.spec_from_file_location("doctor_for_clone_test", TOOLS / "doctor.py")
+    doctor = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(doctor)
+    bash = doctor.git_bash() if os.name == "nt" else shutil.which("bash")
+    if not bash:
+        print("SKIP worker_clone.sh cases: no bash (Git Bash on Windows)")
+        return
+
+    def git(where, *args, check_rc=True):
+        done = subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "core.autocrlf=false",
+                               "-C", str(where), *map(str, args)], capture_output=True, encoding="utf-8")
+        if check_rc and done.returncode:
+            raise RuntimeError(f"git {args}: {done.stderr}")
+        return done.stdout.strip()
+
+    def tool(*args):
+        return subprocess.run([bash, (box / "worker_clone.sh").as_posix(), *[str(a) for a in args]],
+                              capture_output=True, encoding="utf-8")
+
+    repo = folder / "repo"
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    (repo / "a.txt").write_text("one\n", encoding="utf-8")
+    git(repo, "add", "a.txt")
+    git(repo, "commit", "-qm", "one")
+    git(repo, "tag", "v1")
+    git(repo, "branch", "other")
+    (repo / "a.txt").write_text("two\n", encoding="utf-8")
+    git(repo, "commit", "-qam", "two")
+    repo_p = repo.as_posix()
+
+    def refs():
+        return git(repo, "for-each-ref", "--format=%(refname) %(objectname)")
+
+    before = refs()
+
+    # create
+    clone = folder / "clone"
+    done = tool("create", "--repo", repo_p, "--base", "main", "--branch", "wb")
+    check("create without --dir exits 2 (no default)", done.returncode == 2 and "--dir is required" in done.stderr, done.stderr)
+    done = tool("create", "--repo", repo_p, "--base", "main", "--branch", "wb", "--dir", clone.as_posix())
+    check("create makes the clone", done.returncode == 0 and done.stdout.startswith("CREATED ") and clone.is_dir(),
+          done.stdout + done.stderr)
+    if not clone.is_dir():
+        return
+    check("the clone has only refs/heads/wb, no remote, no tag",
+          git(clone, "for-each-ref", "--format=%(refname)") == "refs/heads/wb" and git(clone, "remote") == "", git(clone, "for-each-ref"))
+    config = (clone / ".git" / "config").read_text(encoding="utf-8")
+    check("the clone's config names no remote and no path", "[remote" not in config and repo_p not in config
+          and "url" not in config, config)
+    check("the clone's hooks/ is empty and it borrows no objects",
+          not list((clone / ".git" / "hooks").iterdir()) and not (clone / ".git" / "objects" / "info" / "alternates").exists())
+    check("the clone is at --base", git(clone, "rev-parse", "HEAD") == git(repo, "rev-parse", "main"))
+    done = tool("create", "--repo", repo_p, "--base", "main", "--branch", "wb", "--dir", clone.as_posix())
+    check("create into an existing --dir exits 2", done.returncode == 2 and "must not exist" in done.stderr, done.stderr)
+    done = tool("create", "--repo", repo_p, "--base", "nope", "--branch", "wb", "--dir", (folder / "c2").as_posix())
+    check("create with an unknown --base exits 2", done.returncode == 2 and "--base" in done.stderr, done.stderr)
+    done = tool("create", "--repo", repo_p, "--base", "main", "--branch", "a..b", "--dir", (folder / "c3").as_posix())
+    check("an invalid --branch exits 2", done.returncode == 2 and "--branch" in done.stderr, done.stderr)
+    check("create changed no ref of the repository", refs() == before, refs())
+
+    # the worker's work, then bundles made from it
+    (clone / "b.txt").write_text("worker\n", encoding="utf-8")
+    git(clone, "add", "b.txt")
+    git(clone, "commit", "-qm", "worker")
+    tip = git(clone, "rev-parse", "HEAD")
+    bundles = folder / "bundles"
+    bundles.mkdir()
+
+    def bundle(name, where, *revs):
+        path = bundles / f"{name}.bundle"
+        git(where, "bundle", "create", "-q", path, *revs)
+        return path
+
+    good = bundle("good", clone, "refs/heads/wb")
+    evil = folder / "evil"
+    git(folder, "clone", "-q", "--no-local", clone, evil)
+    git(evil, "update-ref", "refs/heads/other", tip)
+    git(evil, "update-ref", "refs/heads/wbx", tip)
+    git(evil, "tag", "-a", "-m", "t", "wb-tag", tip)
+    multi = bundle("multi", evil, "refs/heads/wb", "refs/heads/other")
+    wrong = bundle("wrong", evil, "refs/heads/other")
+    prefix = bundle("prefix", evil, "refs/heads/wbx")
+    tag = bundle("tag", evil, "refs/tags/wb-tag")
+    head_only = bundle("head", evil, "HEAD")
+    # refs/heads/wb pointing at an annotated tag (git will not make such a branch, so the header is edited): not a commit
+    raw_tag = tag.read_bytes()
+    end = raw_tag.index(b"\n\n")
+    not_commit = bundles / "notcommit.bundle"
+    not_commit.write_bytes(raw_tag[:end].replace(b" refs/tags/wb-tag", b" refs/heads/wb") + raw_tag[end:])
+    # a commit git's strict checks refuse (author line without an e-mail)
+    tree = git(evil, "rev-parse", "HEAD^{tree}")
+    raw = f"tree {tree}\nparent {tip}\nauthor broken\ncommitter x <x@y> 0 +0000\n\nbad\n"
+    bad = subprocess.run(["git", "-C", str(evil), "hash-object", "-t", "commit", "-w", "--literally", "--stdin"],
+                         input=raw.encode("utf-8"), capture_output=True).stdout.decode("ascii").strip()
+    git(evil, "update-ref", "refs/heads/wb", bad)
+    malformed = bundle("malformed", evil, "refs/heads/wb")
+    # a thin bundle that needs a commit the repository lacks
+    (evil / "c.txt").write_text("c\n", encoding="utf-8")
+    git(evil, "update-ref", "refs/heads/wb", tip)
+    git(evil, "checkout", "-q", "wb")
+    git(evil, "add", "c.txt")
+    git(evil, "commit", "-qm", "c1")
+    (evil / "c.txt").write_text("cc\n", encoding="utf-8")
+    git(evil, "commit", "-qam", "c2")
+    thin = bundle("thin", evil, "refs/heads/wb", "^HEAD~1")
+    data = good.read_bytes()
+    cut = data.index(b"\n\n") + 2
+    flipped = bytearray(data)
+    for i in range(cut + 12, min(len(data) - 20, cut + 60)):
+        flipped[i] ^= 0xFF
+    corrupt = bundles / "corrupt.bundle"
+    corrupt.write_bytes(bytes(flipped))
+    truncated = bundles / "truncated.bundle"
+    truncated.write_bytes(data[:cut + 30])
+    junk = bundles / "junk.bundle"
+    junk.write_text("not a bundle\n", encoding="utf-8")
+
+    def objects():
+        return git(repo, "count-objects", "-v")
+
+    held = objects()
+    cases = [
+        ("a bundle with two refs", multi, "exactly one ref"),
+        ("a bundle naming another branch", wrong, "expected refs/heads/wb"),
+        ("a branch name that only starts with wb", prefix, "expected refs/heads/wb"),
+        ("a tag ref", tag, "expected refs/heads/wb"),
+        ("a HEAD-only bundle", head_only, "expected refs/heads/wb"),
+        ("a tip that is a tag object, not a commit", not_commit, "not a commit"),
+        ("a malformed commit (fsck)", malformed, "strict"),
+        ("a bundle needing commits the repository lacks", thin, "verify failed"),
+        ("corrupt pack bytes", corrupt, ""),
+        ("a truncated bundle", truncated, ""),
+        ("a file that is not a bundle", junk, "not a bundle"),
+        ("a missing file", bundles / "none.bundle", "no bundle file"),
+    ]
+    for name, path, says in cases:
+        done = tool("import", "--repo", repo_p, "--branch", "wb", "--bundle", path.as_posix(), "--name", "n1")
+        check(f"import refuses {name}", done.returncode == 2 and says in done.stderr and "COLLECTED" not in done.stdout,
+              f"rc={done.returncode} {done.stdout} {done.stderr}")
+    check("after every refusal the repository's refs are unchanged", refs() == before, refs())
+    check("after every refusal no object reached the repository", objects() == held
+          and subprocess.run(["git", "-C", str(repo), "cat-file", "-e", bad], capture_output=True).returncode != 0, objects())
+    for name in ("../x", ".x", "a b", ""):
+        done = tool("import", "--repo", repo_p, "--branch", "wb", "--bundle", good.as_posix(), "--name", name)
+        check(f"import refuses --name {name!r}", done.returncode == 2 and "--name" in done.stderr, done.stderr)
+
+    done = tool("import", "--repo", repo_p, "--branch", "wb", "--bundle", good.as_posix(), "--name", "n1")
+    check("import takes the one branch into refs/dw-workers/n1/wb",
+          done.returncode == 0 and done.stdout.strip() == f"COLLECTED refs/dw-workers/n1/wb {tip}", done.stdout + done.stderr)
+    after = refs()
+    check("only refs/dw-workers/n1/wb was added; main, other and v1 are unchanged",
+          sorted(after.splitlines()) == sorted(before.splitlines() + [f"refs/dw-workers/n1/wb {tip}"]), after)
+    check("the collected commit is complete in the repository",
+          subprocess.run(["git", "-C", str(repo), "fsck", "--strict", "--no-dangling", "--no-progress"],
+                         capture_output=True).returncode == 0 and git(repo, "cat-file", "-t", tip) == "commit")
+    (clone / "b.txt").write_text("worker 2\n", encoding="utf-8")
+    git(clone, "commit", "-qam", "worker 2")
+    again = bundle("again", clone, "refs/heads/wb")
+    done = tool("import", "--repo", repo_p, "--branch", "wb", "--bundle", again.as_posix(), "--name", "n1")
+    check("a second import moves the ref and names the old commit",
+          done.returncode == 0 and done.stdout.strip().endswith(f"(was {tip})"), done.stdout + done.stderr)
+    done = tool("import", "--repo", repo_p, "--branch", "main", "--bundle", good.as_posix(), "--name", "n1")
+    check("--branch main with a bundle of refs/heads/wb exits 2", done.returncode == 2 and "expected refs/heads/main" in done.stderr,
+          done.stderr)
+    check("refs/heads/main never moves", git(repo, "rev-parse", "refs/heads/main")
+          == next(x.split()[1] for x in before.splitlines() if x.startswith("refs/heads/main ")))
+    done = tool("collect", "--repo", repo_p, "--branch", "wb", "--name", "n1")
+    check("collect without --dir exits 2", done.returncode == 2 and "--dir" in done.stderr, done.stderr)
+    done = tool("push", "--repo", repo_p, "--branch", "wb")
+    check("an unknown command exits 2", done.returncode == 2 and "unknown command" in done.stderr, done.stderr)
+
+    # run_worker.sh --clone
+    director = folder / "DIRECTOR"
+    director.mkdir()
+
+    def run(*args):
+        return subprocess.run([bash, (box / "run_worker.sh").as_posix(), "--dry-run", *[str(a) for a in args]],
+                              capture_output=True, encoding="utf-8", env={**os.environ, "DW_DNS_UPSTREAM": "192.0.2.53"})
+
+    done = run("--clone", clone.as_posix(), "--name", "w1", "--director", director.as_posix())
+    words = shlex.split(done.stdout) if done.returncode == 0 else []
+    mounts = [words[i + 1] for i, w in enumerate(words) if w == "-v"]
+    c = clone.as_posix()
+    check("--clone: the clone at /work, its config and hooks/ ro, DIRECTOR ro; the repository is not mounted",
+          mounts == [f"{c}:/work", f"{director.as_posix()}:/director:ro", f"{c}/.git/config:/work/.git/config:ro",
+                     f"{c}/.git/hooks:/work/.git/hooks:ro", "dw-claude-home:/home/dw/.claude"]
+          and not any(repo_p in m for m in mounts), str(mounts) + done.stderr)
+    names = sorted(words[i + 1].split("=")[0] for i, w in enumerate(words) if w == "-e")
+    check("--clone: DW_WORKER_NAME is --name; no GIT_CONFIG_* (no shared worktrees to protect)",
+          "DW_WORKER_NAME=w1" in words and names == ["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB",
+                                                     "DW_ALLOW_DOMAINS", "DW_DNS_UPSTREAM", "DW_GIT_MODE", "DW_WORKER_NAME",
+                                                     "XDG_CACHE_HOME"],
+          str(names))
+    check("--clone sets DW_GIT_MODE=clone (doctor: the worker's own .git)", "DW_GIT_MODE=clone" in words, done.stdout)
+    check("--clone prints no WARN", "WARN" not in done.stderr, done.stderr)
+    done = run("--clone", c, "--director", director.as_posix())
+    check("--clone without --name exits 2", done.returncode == 2 and "--name" in done.stderr, done.stderr)
+    done = run("--clone", c, "--name", "../w", "--director", director.as_posix())
+    check("--clone with a bad --name exits 2", done.returncode == 2 and "--name" in done.stderr, done.stderr)
+    done = run("--clone", c, "--name", "w1", "--git-common", (repo / ".git").as_posix(), "--director", director.as_posix())
+    check("--clone with --git-common exits 2", done.returncode == 2 and "--clone goes without" in done.stderr, done.stderr)
+    done = run("--clone", repo_p + "/nothing", "--name", "w1", "--director", director.as_posix())
+    check("--clone of a folder without .git exits 2", done.returncode == 2 and "worker_clone.sh create" in done.stderr, done.stderr)
+    (clone / ".git" / "hooks" / "post-checkout").write_text("#!/bin/sh\n", encoding="utf-8")
+    done = run("--clone", c, "--name", "w1", "--director", director.as_posix())
+    check("--clone with a file in .git/hooks exits 2", done.returncode == 2 and "hooks must be empty" in done.stderr, done.stderr)
+    (clone / ".git" / "hooks" / "post-checkout").unlink()
+    done = run("--worktree", repo_p, "--git-common", (repo / ".git").as_posix(), "--director", director.as_posix())
+    words = shlex.split(done.stdout) if done.returncode == 0 else []
+    check("--git-common still works for one version, with a WARN on stderr (Q1)",
+          done.returncode == 0 and "WARN K1" in done.stderr and "2.0 removes --git-common" in done.stderr, done.stderr)
+    check("--git-common: DW_WORKER_NAME defaults to the folder name", "DW_WORKER_NAME=repo" in words, done.stdout)
+    check("--git-common sets DW_GIT_MODE=shared (doctor: K1 NOT_ENFORCED)", "DW_GIT_MODE=shared" in words, done.stdout)
+    done = run("--worktree", repo_p, "--git-common", (repo / ".git").as_posix(), "--name", "w9", "--director", director.as_posix())
+    check("--git-common with --name uses it", "DW_WORKER_NAME=w9" in shlex.split(done.stdout or "''"), done.stdout + done.stderr)
+
+
+def test_dns_allow(tmp):
+    """DNS allowlist (1.2.0): dns_allow.py's pure functions, then the real UDP and TCP servers on 127.0.0.1 with a fake
+    upstream on another local port (no network), then run_worker.sh's allowlist and upstream handling (--dry-run).
+    The container itself (firewall, dwdns user) is tested by hand: TASK REPORT."""
+    global total
+    import socket
+    import struct
+    import threading
+    box = TOOLS / "container"
+    folder = tmp / "dns_allow"
+    folder.mkdir()
+
+    def check(name, ok, detail=""):
+        global total
+        total += 1
+        if not ok:
+            failures.append(f"dns_allow {name}: {str(detail)[-600:]}")
+
+    spec = importlib.util.spec_from_file_location("dns_allow_for_test", box / "dns_allow.py")
+    dns = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(dns)
+
+    def query(name, qtype=1, qid=0x1234, flags=0x0100, qd=1, extra=b"", qclass=1, ar=0):
+        wire = b"".join(bytes([len(p)]) + p for p in name.encode("latin-1").split(b".") if p) + b"\0"
+        return struct.pack("!6H", qid, flags, qd, 0, 0, ar) + wire + struct.pack("!2H", qtype, qclass) + extra
+
+    def rcode(packet):
+        return packet[3] & 0xF if packet else None
+
+    names = dns.parse_list("# comment\nAPI.Anthropic.com.  claude.ai # tail\n\n*.Example.org\nclaude.ai\n")
+    check("parse_list: comments, case, trailing dot, duplicates", names == ["*.example.org", "api.anthropic.com", "claude.ai"], names)
+    for bad in ("exa!mple.com", "a..b", "-a.com", "a*.com", "*.*.com", "http://x.com", "x" * 64 + ".com", "a_b.com"):
+        try:
+            dns.parse_list("ok.com\n" + bad)
+            check(f"parse_list refuses {bad[:20]!r}", False, "no error")
+        except ValueError as err:
+            check(f"parse_list refuses {bad[:20]!r} and names line 2", "line 2" in str(err), err)
+    shipped = dns.parse_list((box / "dns_allow.txt").read_text(encoding="utf-8"))
+    check("dns_allow.txt parses and is api.anthropic.com only", shipped == ["api.anthropic.com"], shipped)
+    allow = set(names)
+    check("allowed: exact name", dns.allowed("api.anthropic.com", allow) and dns.allowed("claude.ai", allow))
+    check("allowed: an exact entry does not allow its subdomains or look-alikes",
+          not dns.allowed("x.api.anthropic.com", allow) and not dns.allowed("api.anthropic.com.evil.net", allow)
+          and not dns.allowed("anthropic.com", allow) and not dns.allowed("xclaude.ai", allow))
+    check("allowed: *.example.org takes a.example.org and a.b.example.org, not example.org or badexample.org",
+          dns.allowed("a.example.org", allow) and dns.allowed("a.b.example.org", allow)
+          and not dns.allowed("example.org", allow) and not dns.allowed("badexample.org", allow))
+
+    kind, q = dns.decide(query("API.anthropic.COM"), allow)
+    check("decide: IN A for a listed name (any case) is forwarded", kind == "forward" and q["name"] == "api.anthropic.com", (kind, q))
+    check("decide: IN AAAA is forwarded", dns.decide(query("claude.ai", 28), allow)[0] == "forward")
+    for label, packet, want in (("TXT on a listed name", query("claude.ai", 16), 5),
+                                ("ANY on a listed name", query("claude.ai", 255), 5),
+                                ("class CH", query("claude.ai", qclass=3), 5),
+                                ("opcode 2 (status)", query("claude.ai", flags=0x1100), 5),
+                                ("a name not on the list", query("example.com"), 3),
+                                ("a random subdomain of a listed name", query("q8x1.api.anthropic.com"), 3),
+                                ("the root name", query(""), 3),
+                                ("two questions", query("claude.ai", qd=2), 1),
+                                ("a compression pointer in the name", struct.pack("!6H", 1, 0x100, 1, 0, 0, 0) + b"\xc0\x0c\0\1\0\1", 1),
+                                ("a 64-byte label", struct.pack("!6H", 1, 0x100, 1, 0, 0, 0) + b"\x40" + b"a" * 64 + b"\0\0\1\0\1", 1),
+                                ("a name over 255 bytes", query(".".join(["a" * 63] * 5)), 1),
+                                ("a cut-off question", query("claude.ai")[:-3], 1)):
+        kind, out = dns.decide(packet, allow)
+        check(f"decide: {label} -> rcode {want}, same ID, nothing forwarded",
+              kind == "reply" and rcode(out) == want and out[:2] == packet[:2] and out[2] & 0x80, (kind, out))
+    check("decide: a short packet or a response is dropped",
+          dns.decide(b"\x12\x34\x01", allow) == ("drop", None) and dns.decide(query("claude.ai", flags=0x8100), allow) == ("drop", None))
+
+    worker = query("Api.AnThRoPiC.com", qid=0xBEEF, ar=1, extra=b"\0\0\x29\x10\0\0\0\0\0\0\x08SECRETS!")
+    kind, q = dns.decide(worker, allow)
+    sent = dns.upstream_query(q, 0x0F0F)
+    check("upstream query: new ID, lower-case name, RD, one question, no extra records (nothing the worker chose)",
+          kind == "forward" and sent == query("api.anthropic.com", qid=0x0F0F) and b"SECRETS" not in sent, sent)
+    upstream_answer = (sent[:2] + b"\x81\x80" + b"\0\1\0\1\0\0\0\0" + sent[12:]
+                       + b"\xc0\x0c\0\1\0\1\0\0\0\x3c\0\4" + bytes([160, 79, 104, 10]))
+    out = dns.answer_for_worker(upstream_answer, sent, q, worker)
+    check("answer_for_worker: the worker's ID and question (its letter case) come back, the answer record is kept",
+          out is not None and out[:2] == b"\xbe\xef" and out[12:12 + len(sent) - 12] == worker[12:q["end"]]
+          and out.endswith(bytes([160, 79, 104, 10])), out)
+    for label, bad in (("another ID", b"\0\0" + upstream_answer[2:]),
+                       ("not a response", upstream_answer[:2] + b"\x01\x00" + upstream_answer[4:]),
+                       ("another question", upstream_answer.replace(b"anthropic", b"anthropiq")),
+                       ("cut short", upstream_answer[:14])):
+        check(f"answer_for_worker refuses an upstream answer with {label}", dns.answer_for_worker(bad, sent, q, worker) is None)
+
+    # The real servers, on free local ports, with a fake upstream that answers every A query with 192.0.2.7.
+    seen = []
+    up = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    up.bind(("127.0.0.1", 0))
+    up.settimeout(5)
+    up_tcp = socket.socket()
+    up_tcp.bind(("127.0.0.1", up.getsockname()[1]))
+    up_tcp.listen(4)
+    up_tcp.settimeout(5)
+
+    def fake_answer(packet):
+        seen.append(packet)
+        return packet[:2] + b"\x81\x80\0\1\0\1\0\0\0\0" + packet[12:] + b"\xc0\x0c\0\1\0\1\0\0\0\x3c\0\4" + bytes([192, 0, 2, 7])
+
+    def fake_udp():
+        try:
+            while True:
+                data, peer = up.recvfrom(4096)
+                up.sendto(fake_answer(data), peer)
+        except OSError:
+            return
+
+    def fake_tcp():
+        try:
+            while True:
+                conn, _ = up_tcp.accept()
+                with conn:
+                    data = dns.read_tcp_message(conn)
+                    out = fake_answer(data)
+                    conn.sendall(struct.pack("!H", len(out)) + out)
+        except OSError:
+            return
+
+    for target in (fake_udp, fake_tcp):
+        threading.Thread(target=target, daemon=True).start()
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    import io
+    log = io.StringIO()
+    resolver = dns.Resolver(["api.anthropic.com"], ["127.0.0.1"], log=log, upstream_port=up.getsockname()[1])
+    servers = []
+    try:
+        ready = threading.Event()
+        servers = dns.serve(resolver, port, ready)
+        ready.wait(5)
+        client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        client.settimeout(5)
+        client.sendto(query("api.ANTHROPIC.com", qid=0x4242), ("127.0.0.1", port))
+        out = client.recvfrom(4096)[0]
+        check("UDP: a listed name is answered through the upstream, with the worker's ID and question",
+              out[:2] == b"\x42\x42" and rcode(out) == 0 and out.endswith(bytes([192, 0, 2, 7]))
+              and seen and seen[-1][12:] == query("api.anthropic.com")[12:] and seen[-1][:2] != b"\x42\x42", (out, seen))
+        count = len(seen)
+        client.sendto(query("leak-0123.example.com", 16), ("127.0.0.1", port))
+        out = client.recvfrom(4096)[0]
+        check("UDP: a name not on the list gets NXDOMAIN and nothing reaches the upstream",
+              rcode(out) == 3 and len(seen) == count, (out, len(seen)))
+        client.close()
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as conn:
+            for name, want in (("api.anthropic.com", 0), ("example.com", 3)):
+                packet = query(name)
+                conn.sendall(struct.pack("!H", len(packet)) + packet)
+                out = dns.read_tcp_message(conn)
+                check(f"TCP: {name} -> rcode {want} on one connection", rcode(out) == want, out)
+        check("refused names are logged once each, printable only",
+              log.getvalue().count("refused leak-0123.example.com type 16") == 1 and "refused example.com type 1" in log.getvalue(), log.getvalue())
+    finally:
+        for s in servers:
+            s.shutdown()
+            s.server_close()
+        up.close()
+        up_tcp.close()
+    check("main: no DW_DNS_UPSTREAM exits 2", subprocess.run(
+        [sys.executable, "-I", "-B", str(box / "dns_allow.py")], capture_output=True, encoding="utf-8",
+        env={**{k: v for k, v in os.environ.items() if k != "DW_DNS_UPSTREAM"}, "DW_ALLOW_DOMAINS": "a.com"}).returncode == 2)
+
+    spec = importlib.util.spec_from_file_location("doctor_for_dns_test", TOOLS / "doctor.py")
+    doctor = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(doctor)
+    bash = doctor.git_bash() if os.name == "nt" else shutil.which("bash")
+    if not bash:
+        print("SKIP run_worker.sh allowlist cases: no bash (Git Bash on Windows)")
+        return
+    clone, director = folder / "c", folder / "D"
+    (clone / ".git" / "hooks").mkdir(parents=True)
+    (clone / ".git" / "config").write_text("[core]\n", encoding="utf-8")
+    director.mkdir()
+
+    def run(*args, env=None):
+        argv = [bash, (box / "run_worker.sh").as_posix(), "--dry-run", "--clone", clone.as_posix(), "--name", "w",
+                "--director", director.as_posix(), *[str(a) for a in args]]
+        full = {k: v for k, v in os.environ.items() if k not in ("DW_DNS_UPSTREAM", "DW_RESOLV_CONF")}
+        full.update(env or {"DW_DNS_UPSTREAM": "192.0.2.53"})
+        done = subprocess.run(argv, capture_output=True, encoding="utf-8", env=full)
+        words = shlex.split(done.stdout) if done.returncode == 0 else []
+        values = {w.split("=", 1)[0]: w.split("=", 1)[1] for i, w in enumerate(words) if i and words[i - 1] == "-e"}
+        return done, words, values
+
+    done, words, values = run("--login", "--allow", "Example.COM.", "--allow", "claude.ai")
+    check("run_worker: --dns 127.0.0.1; the file, then --login, then --allow, each once, lower case",
+          "--dns" in words and words[words.index("--dns") + 1] == "127.0.0.1"
+          and values.get("DW_ALLOW_DOMAINS") == "api.anthropic.com claude.ai platform.claude.com console.anthropic.com example.com"
+          and values.get("DW_DNS_UPSTREAM") == "192.0.2.53", done.stdout + done.stderr)
+    resolv = folder / "resolv.conf"
+    resolv.write_text("nameserver 127.0.0.53\nnameserver ::1\nnameserver 10.0.0.2 # x\nsearch lan\nnameserver 10.0.0.3\n", encoding="utf-8")
+    done, words, values = run(env={"DW_RESOLV_CONF": resolv.as_posix()})
+    check("run_worker: upstream from resolv.conf without 127.x and IPv6", values.get("DW_DNS_UPSTREAM") == "10.0.0.2 10.0.0.3", done.stdout + done.stderr)
+    resolv.write_text("nameserver 127.0.0.53\n", encoding="utf-8")
+    done, _, _ = run(env={"DW_RESOLV_CONF": resolv.as_posix()})
+    check("run_worker: only 127.x in resolv.conf exits 2 (no silent fallback)", done.returncode == 2 and "DW_DNS_UPSTREAM" in done.stderr, done.stderr)
+    done, _, _ = run(env={"DW_DNS_UPSTREAM": "8.8.8.8 evil"})
+    check("run_worker: a bad DW_DNS_UPSTREAM exits 2", done.returncode == 2 and "evil" in done.stderr, done.stderr)
+    listed = folder / "allow.txt"
+    listed.write_text("*.Example.org # wild\r\n\r\nzz.test\n", encoding="utf-8")
+    (folder / "zz.example.org").write_text("", encoding="utf-8")
+    done, _, values = run("--allow-file", listed.as_posix())
+    check("run_worker: --allow-file replaces dns_allow.txt; *. stays literal (no glob), CRLF is fine",
+          values.get("DW_ALLOW_DOMAINS") == "*.example.org zz.test", done.stdout + done.stderr)
+    for label, args in (("a bad name in --allow", ("--allow", "bad_name")),
+                        ("a missing --allow-file", ("--allow-file", (folder / "none.txt").as_posix())),
+                        ("an empty allowlist", ("--allow-file", resolv.as_posix().replace("resolv.conf", "empty.txt")))):
+        if label == "an empty allowlist":
+            (folder / "empty.txt").write_text("# nothing\n", encoding="utf-8")
+        done, _, _ = run(*args)
+        check(f"run_worker: {label} exits 2", done.returncode == 2, done.stdout + done.stderr)
+    done, words, values = run("--offline", env={})
+    check("run_worker --offline: no --dns, no allowlist, no upstream needed",
+          done.returncode == 0 and "--dns" not in words and "DW_ALLOW_DOMAINS" not in values and "DW_DNS_UPSTREAM" not in values,
+          done.stdout + done.stderr)
+    entry = (box / "entrypoint.sh").read_text(encoding="utf-8")
+    firewall = (box / "init_firewall.sh").read_text(encoding="utf-8")
+    docker_file = (box / "Dockerfile").read_text(encoding="utf-8")
+    check("entrypoint: firewall dns, dns_allow.py as dwdns with no capabilities, firewall https, then dw",
+          entry.index("init_firewall.sh dns") < entry.index("--reuid=dwdns") < entry.index("init_firewall.sh https") < entry.index("--reuid=dw ")
+          and entry.count("--bounding-set=-all") == 2 and entry.count("--no-new-privs") == 2, entry)
+    check("init_firewall: only dwdns reaches the upstream on 53; 53 on 127.0.0.1 goes to 5353",
+          firewall.count("--uid-owner dwdns -j ACCEPT") == 2 and firewall.count("-d 127.0.0.1 -p udp --dport 53 -j REDIRECT --to-ports 5353") == 1
+          and firewall.count("-d 127.0.0.1 -p tcp --dport 53 -j REDIRECT --to-ports 5353") == 1
+          and "/etc/resolv.conf" not in firewall, firewall)
+    check("Dockerfile: dns_allow.py copied, user dwdns made after the cached layers",
+          "dns_allow.py /usr/local/bin/" in docker_file and docker_file.index("useradd --system --uid 999") > docker_file.index("COPY entrypoint.sh"),
+          docker_file)
 
 
 def main():
@@ -3115,9 +3743,12 @@ def main():
         test_pause(tmp)
         test_auto_pause(tmp)
         test_audit(tmp)
+        test_audit_names(tmp)
         test_review(tmp)
         test_doctor(tmp)
         test_container(tmp)
+        test_worker_clone(tmp)
+        test_dns_allow(tmp)
         test_evidence(tmp)
         test_order_checks(tmp)
         test_preflight(tmp)

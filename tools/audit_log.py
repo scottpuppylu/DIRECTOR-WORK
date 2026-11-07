@@ -22,6 +22,13 @@ anchor catches it. --anchor-log reads AUDIT_HEAD lines from a file; --anchor-rev
 committed (git show REV:PATH), so an edited working copy of the LOG does not help. Every AUDIT_HEAD line for this log
 (same absolute path) must still be on the chain with the same hash; none at all is a failure too. Lines added after
 the last anchor are covered only by the chain itself, so cutting them off is caught only by a later anchor.
+
+FILE may hold two placeholders, filled in when the command runs (append, verify, head, cite and hook_guard --audit):
+  {worktree}   DW_WORKER_NAME, else the name of CLAUDE_PROJECT_DIR, else of the current folder
+  {container}  the first 12 characters of the container ID (from /proc/self/mountinfo, else the host name when
+               /.dockerenv exists), else "host"
+so workers that share a worktree name in different containers write separate files, each its own chain. Characters
+other than letters, digits, ".", "_" and "-" become "_". Any other {word} is an error (append exit 1, others exit 2).
 """
 import argparse
 import contextlib
@@ -61,6 +68,52 @@ class AuditError(Exception):
 
 class CannotRun(Exception):
     """verify / head / cite cannot run: exit 2."""
+
+
+MOUNTINFO = "/proc/self/mountinfo"
+DOCKERENV = "/.dockerenv"
+PLACEHOLDER = re.compile(r"\{([^{}]*)\}")
+CONTAINER_ID = re.compile(r"/containers/([0-9a-f]{64})/")
+
+
+def safe_name(text):
+    return re.sub(r"[^A-Za-z0-9._-]", "_", text) or "_"
+
+
+def worker_name(folder=None):
+    """DW_WORKER_NAME, else the name of FOLDER, CLAUDE_PROJECT_DIR or the current folder."""
+    name = os.environ.get("DW_WORKER_NAME")
+    if not name:
+        name = pathlib.Path(folder or os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()).resolve().name
+    return safe_name(name)
+
+
+def container_id(mountinfo=None, dockerenv=None):
+    """12 characters of the container ID, or "host" outside a container."""
+    try:
+        with open(mountinfo or MOUNTINFO, encoding="utf-8", errors="replace") as fh:
+            found = CONTAINER_ID.search(fh.read())
+        if found:
+            return found.group(1)[:12]
+    except OSError:
+        pass
+    if os.path.exists(dockerenv or DOCKERENV):
+        import socket
+        return safe_name(socket.gethostname())[:64]
+    return "host"
+
+
+def expand(path, folder=None, only=None, mountinfo=None, dockerenv=None):
+    """PATH with {worktree} and {container} filled in (only those in ONLY when given); other {word} -> ValueError."""
+    path = str(path)
+    for word in PLACEHOLDER.findall(path):
+        if word not in ("worktree", "container"):
+            raise ValueError(f"unknown placeholder {{{word}}} in {path} (only {{worktree}} and {{container}})")
+    if (only is None or "worktree" in only) and "{worktree}" in path:
+        path = path.replace("{worktree}", worker_name(folder))
+    if (only is None or "container" in only) and "{container}" in path:
+        path = path.replace("{container}", container_id(mountinfo, dockerenv))
+    return path
 
 
 def canonical(fields):
@@ -340,9 +393,9 @@ def cmd_append(a):
         return 1
     updated = masked_output(call)
     try:
-        append_entry(a.log, hook_entry(call))
+        append_entry(expand(a.log), hook_entry(call))
         failed = None
-    except (AuditError, OSError) as error:
+    except (AuditError, OSError, ValueError) as error:
         failed = error
     if updated is not None:
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "updatedToolOutput": updated}},
@@ -375,6 +428,12 @@ def main():
     p.add_argument("--to", dest="to_seq", type=int, required=True)
     a = ap.parse_args()
     sys.stdout.reconfigure(encoding="utf-8")
+    try:
+        if a.log and a.cmd != "append":  # append expands it itself, so a masked output still goes back
+            a.log = expand(a.log)
+    except ValueError as error:
+        print(f"NOT_RUN {error}")
+        return 2
     try:
         return {"append": cmd_append, "verify": cmd_verify, "head": cmd_head, "cite": cmd_cite}[a.cmd](a)
     except CannotRun as error:

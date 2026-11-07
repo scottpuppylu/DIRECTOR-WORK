@@ -37,7 +37,8 @@ else DIR/PAUSE when --protect-director DIR is known. The Director's worktree nev
 process trees while the workers are paused. Without --guard-profile an installed entry keeps its --pause-flag.
 --audit-log FILE (config audit_log; implies --hooks) adds PostToolUse and PostToolUseFailure hooks (matcher *) that
 run audit_log.py append --log FILE, and gives the hook_guard entry --audit FILE so denies and asks are logged too.
-{worktree} in FILE becomes the worktree folder name, for one log per worker. Missing ones show MISSING
+{worktree} in FILE becomes the worktree folder name, for one log per worker; {container} is left for audit_log.py
+to fill in when the hook runs (12 characters of the container ID, "host" outside one). Missing ones show MISSING
 (hooks.PostToolUse / hooks.PostToolUseFailure); --apply replaces an audit_log entry in place. The hook test runs
 hook_guard without --audit or --pause-flag, so no test line goes into the log and no test deny counts
 toward an auto-pause. Without --audit-log an installed --audit is kept.
@@ -45,9 +46,9 @@ toward an auto-pause. Without --audit-log an installed --audit is kept.
 categories go to a second model first (claude -p, uses quota). Without it an installed --review is kept. The hook
 test drops --review, so a test call never starts a review.
 --runtime-guard (config runtime_guard: true) writes what templates/settings.runtime-guard.json shows: --guard-profile
-worker unless another profile is given, --audit-log <git common dir>/director-audit/{worktree}.jsonl unless another
-log is given, and env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB = "1" (subprocesses get no Anthropic / cloud credentials from
-the environment; GITHUB_TOKEN, GH_TOKEN, proxy credentials and GIT_CONFIG_* are kept by design). A missing one shows
+worker unless another profile is given, --audit-log <git common dir>/director-audit/{worktree}-{container}.jsonl
+unless another log is given, and env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB = "1" (subprocesses get no Anthropic / cloud
+credentials from the environment; GITHUB_TOKEN, GH_TOKEN, proxy credentials and GIT_CONFIG_* are kept by design). A missing one shows
 MISSING (env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB). doctor.py then reports what is really in force.
 """
 import argparse
@@ -117,6 +118,13 @@ def install_post(data, event, want):
             kept.append(e)
     kept.insert(len(kept) if at is None else at, want)
     data["hooks"][event] = kept
+
+
+def load_audit_log():
+    spec = importlib.util.spec_from_file_location("audit_log", AUDIT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def load_guard_rules():
@@ -348,7 +356,7 @@ def main():
     ap.add_argument("--guard-review", action="store_true", help="give guarded hooks --review: asks of the rules' review "
                     "categories go to a second model first, which uses claude -p quota (config: guard_review)")
     ap.add_argument("--audit-log", help="action log for audit_log.py hooks; {worktree} becomes the worktree folder "
-                    "name (config: audit_log)")
+                    "name, {container} the container ID when the hook runs (config: audit_log)")
     ap.add_argument("--runtime-guard", action="store_true", help="write the runtime guard set: worker profile (unless "
                     "--guard-profile), an action log per worktree (unless --audit-log) and env "
                     "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 (config: runtime_guard)")
@@ -390,7 +398,12 @@ def main():
     rules = load_guard_rules() if profile else None
     pause = a.pause_flag or cfg.get("pause_flag")
     pause = pathlib.Path(pause).resolve() if pause else None
-    audit = a.audit_log or cfg.get("audit_log") or ((common / "director-audit" / "{worktree}.jsonl").as_posix() if runtime else None)
+    audit = a.audit_log or cfg.get("audit_log") or ((common / "director-audit" / "{worktree}-{container}.jsonl").as_posix() if runtime else None)
+    if audit:
+        try:
+            load_audit_log().expand(audit, only=())  # only checks: no placeholder other than {worktree} / {container}
+        except ValueError as error:
+            sys.exit(f"audit_log: {error}")
     review = a.guard_review or cfg.get("guard_review") is True
     hooks = a.hooks or cfg.get("hooks") is True or protect is not None or profile is not None or bool(audit)
 
