@@ -977,7 +977,13 @@ def test_chat_to_product(tmp):
               ("templates/BRIEF.md", "只有使用者能改這張卡"), ("templates/BRIEF.md", "| B-1 |"),
               ("templates/WORK_ORDER.md", "B-2"), ("templates/choice_page.html", "<title>"),
               ("templates/choice_page.html", 'collection("decisions")'), ("templates/choice_page.html", 'collection("notes")'),
-              ("templates/choice_page.html", 'doc("brief/current")'), ("templates/choice_page.html", "總監建議")]
+              ("templates/choice_page.html", 'doc("brief/current")'), ("templates/choice_page.html", "總監建議"),
+              ("templates/choice_page.html", "sendToClaude"), ("templates/choice_page.html", "canSendToClaude"),
+              ("templates/choice_page.html", "seenAt"), ("templates/choice_page.html", '"comments":{}'),
+              ("templates/choice_page.html", "S.drafts[d.id]"),
+              ("docs/12_chat_to_product.md", "### 六、選擇頁不漏讀"), ("docs/12_chat_to_product.md", '"comments": {}'),
+              ("docs/12_chat_to_product.md", "seenAt"), ("docs/12_chat_to_product.md", "ArtifactComments"),
+              ("docs/03_communication.md", "選擇頁"), ("docs/06_resume_lossless.md", "選擇頁")]
     for path, needle in wanted:
         total += 1
         if needle not in (root / path).read_text(encoding="utf-8"):
@@ -1024,7 +1030,7 @@ def test_vocabulary():
             failures.append(f"vocabulary: {path} no longer contains {text!r}; change tools/vocabulary.json and the docs together")
 
 
-MUST_READ_LIMIT = 12392  # bytes of the 每輪必讀 docs on 2026-11-06 (v0.13 moved pure reasons to docs/10; +33 for the IN_FLIGHT fields kept in docs/06, review D01); every round re-reads them, so growth costs quota
+MUST_READ_LIMIT = 12440  # bytes of the 每輪必讀 docs on 2026-11-06 (v0.13 moved pure reasons to docs/10; +33 for the IN_FLIGHT fields kept in docs/06, review D01); 2.0.1 +48: PO 2026-11-08 the choice page counts as 待決頁 for no-miss reading (docs/03, docs/06 one clause each); every round re-reads them, so growth costs quota
 
 
 def test_must_read_size():

@@ -1,7 +1,8 @@
 <title>專案選擇頁</title>
 <meta name="claude:viewport-fit-sides" content="cover">
-<!-- DIRECTOR-WORK templates/choice_page.html：使用者的選擇頁（docs/12）。總監用 Artifact 工具發布，capabilities {"db":{},"user":{},"assets":{}}。
-     資料都在 db，不寫進本檔：brief/current（初衷卡摘要）、decisions/<id>（要使用者選的題）、notes（使用者給總監的話）。欄位見 docs/12。 -->
+<!-- DIRECTOR-WORK templates/choice_page.html：使用者的選擇頁（docs/12）。總監用 Artifact 工具發布，capabilities {"db":{},"user":{},"assets":{},"comments":{}}。
+     資料都在 db，不寫進本檔：brief/current（初衷卡摘要）、decisions/<id>（要使用者選的題）、notes（使用者給總監的話）。欄位見 docs/12。
+     不漏讀（docs/12 第六節）：送出時用 comments.sendToClaude 叫醒總監的對話；總監讀到時在題目寫 seenAt，超過 10 分鐘沒讀到，頁面會標出來。 -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=Noto+Serif+TC:wght@600;700&family=IBM+Plex+Mono:wght@500&display=swap">
 <style>
@@ -63,6 +64,8 @@ textarea{width:100%;box-sizing:border-box;min-height:64px;border:1px solid var(-
 button:focus-visible,textarea:focus-visible,summary:focus-visible,a:focus-visible{outline:2px solid var(--ask);outline-offset:2px}
 .msg{font-size:.85rem;color:var(--muted)}
 .ans{font-size:.9rem;background:var(--pick-soft);border-radius:8px;padding:8px 10px;white-space:pre-line}
+.seen{font-size:.8rem;color:var(--pick)}
+.late{font-size:.85rem;color:var(--ask);background:var(--ask-soft);border-radius:8px;padding:6px 10px}
 .res{font-size:.9rem;background:var(--pin-soft);border-radius:8px;padding:8px 10px}
 .empty{border:1px dashed var(--line);border-radius:10px;padding:16px;color:var(--muted)}
 details summary{cursor:pointer;color:var(--muted);font-size:.85rem;font-weight:700;letter-spacing:.06em}
@@ -73,7 +76,7 @@ details .list{margin-top:10px}
 <main class="wrap">
   <header>
     <h1 id="name">專案選擇頁</h1>
-    <p class="sub">總監要你決定的事都在這裡。點一個選項、按送出，總監下一輪就會讀到。</p>
+    <p class="sub">總監要你決定的事都在這裡。點一個選項、按送出就好。總監的對話開著時會馬上收到通知；沒開著時，總監下一輪一開始就會讀到。</p>
     <p class="msg" id="status">正在讀取…</p>
   </header>
 
@@ -109,12 +112,22 @@ details .list{margin-top:10px}
 </main>
 
 <script>
-const S={db:null,canWrite:true,decisions:[],notes:[],brief:null,loaded:false,picks:{}};
+const S={db:null,comments:null,canWrite:true,decisions:[],notes:[],brief:null,loaded:false,picks:{},drafts:{}};
+const LATE_MIN=10;
 const $=id=>document.getElementById(id);
 function el(tag,cls,text){const e=document.createElement(tag);if(cls)e.className=cls;if(text!=null)e.textContent=text;return e}
 function fmt(iso){if(!iso)return"";try{return new Date(iso).toLocaleString("zh-TW",{month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit"})}catch(e){return iso}}
 function optLabel(d,key){const o=(d.options||[]).find(o=>o.key===key);return o?o.label:key}
 function traces(d,h){(d.brief||[]).forEach(b=>h.append(el("span","trace",b)))}
+
+/* 叫醒總監：資料寫進 db 之後才呼叫；失敗不影響已送出的回覆，總監下一輪照樣會讀到。anchor 要在按下時先取，重畫後元素就不在了。 */
+async function anchorOf(node){try{return S.comments?await S.comments.anchorFor(node):null}catch(e){return null}}
+async function notify(anchor,text){
+  const later="總監下一輪會讀到";
+  if(!S.comments||!anchor)return later;
+  try{if(await S.comments.canSendToClaude()!=="available")return later;
+    await S.comments.sendToClaude({anchor,text:text.slice(0,1500)});return"已通知總監"}
+  catch(e){return later}}
 
 function renderBrief(){
   const box=$("brief");const b=S.brief;
@@ -152,36 +165,49 @@ function renderOpen(d){
     opts.append(b)});
   if((d.options||[]).length)c.append(opts);
   if(d.recommended&&d.why)c.append(el("p","why","總監為什麼建議「"+optLabel(d,d.recommended)+"」："+d.why));
-  const ta=el("textarea");ta.id="note-"+d.id;ta.placeholder="想補充的話（可以不寫）";c.append(ta);
+  const ta=el("textarea");ta.id="note-"+d.id;ta.placeholder="想補充的話（可以不寫）";ta.value=S.drafts[d.id]||"";
+  ta.addEventListener("input",()=>{S.drafts[d.id]=ta.value});c.append(ta);
   const row=el("div","row");send=el("button","send",(d.options||[]).length?"送出選擇":"我知道了");send.type="button";
   send.disabled=!S.canWrite||((d.options||[]).length>0&&!S.picks[d.id]);
   const msg=el("span","msg");row.append(send,msg);c.append(row);
   send.addEventListener("click",async()=>{
     send.disabled=true;msg.textContent="送出中…";
-    const choice=(d.options||[]).length?S.picks[d.id]:"done";
-    try{await S.db.doc("decisions/"+d.id).update({status:"answered",answer:{choice,note:ta.value.trim(),at:new Date().toISOString()}});msg.textContent="已送出"}
+    const choice=(d.options||[]).length?S.picks[d.id]:"done";const note=ta.value.trim();const anchor=await anchorOf(c);
+    try{await S.db.doc("decisions/"+d.id).update({status:"answered",answer:{choice,note,at:new Date().toISOString()}});delete S.drafts[d.id];msg.textContent="已送出"
+      const told=await notify(anchor,"選擇頁回覆："+(d.code||d.id)+"「"+(d.title||"")+"」"+(choice==="done"?"已讀":"選了「"+optLabel(d,choice)+"」")+(note?"。補充："+note:"")+"。請照 docs/12 讀選擇頁處理。");
+      msg.textContent="已送出，"+told}
     catch(e){msg.textContent=e&&(e.code==="permission_denied"||e.code==="invalid_argument")?"你沒有這一頁的寫入權限":"送出失敗，請稍後再試";send.disabled=false}});
   return c}
 
 function renderAnswered(d){
   const c=el("article","card answered");const h=el("div","head");h.append(el("span","code",d.code||d.id));traces(d,h);c.append(h,el("p","title",d.title||""));
-  const a=d.answer||{};c.append(el("div","ans",(a.choice==="done"?"已讀":"你選了："+optLabel(d,a.choice))+(a.note?"\n補充："+a.note:"")+"\n（"+fmt(a.at)+"）"));return c}
+  const a=d.answer||{};c.append(el("div","ans",(a.choice==="done"?"已讀":"你選了："+optLabel(d,a.choice))+(a.note?"\n補充："+a.note:"")+"\n（"+fmt(a.at)+"）"));
+  if(d.seenAt)c.append(el("p","seen","總監已讀（"+fmt(d.seenAt)+"），處理中"));
+  else{const m=Math.floor((Date.now()-Date.parse(a.at||""))/60000);
+    c.append(m>=LATE_MIN?el("p","late","已經 "+m+" 分鐘，總監還沒讀到。可以在聊天裡跟總監說一聲。"):el("p","seen","總監還沒讀到"))}
+  return c}
+
+function renderAnsweredList(){
+  const ans=S.decisions.filter(d=>d.status==="answered");
+  const A=$("answered");A.replaceChildren(...ans.map(renderAnswered));if(!ans.length)A.append(el("div","empty","沒有等總監處理的回覆。"))}
 
 function renderClosed(d){
   const c=el("article","card closed");const h=el("div","head");h.append(el("span","code",d.code||d.id));c.append(h,el("p","title",d.title||""));
   const a=d.answer||{};if(a.choice)c.append(el("p","msg","你的回覆："+(a.choice==="done"?"已讀":optLabel(d,a.choice))+(a.note?"｜"+a.note:"")));
   if(d.resolution)c.append(el("div","res","總監處理："+d.resolution));return c}
 
+/* 資料同步進來會整區重畫：補充文字存在 S.drafts，重畫後放回，正在打字的框把游標也放回去。 */
 function render(){
+  const f=document.activeElement,fid=f&&f.tagName==="TEXTAREA"&&f.id!=="note-text"?f.id:null,s0=fid?f.selectionStart:0,s1=fid?f.selectionEnd:0;
   renderBrief();
   const open=S.decisions.filter(d=>d.status==="open").sort((a,b)=>(a.priority??9)-(b.priority??9));
-  const ans=S.decisions.filter(d=>d.status==="answered");
   const closed=S.decisions.filter(d=>d.status==="closed").sort((a,b)=>String(b.closedAt||"").localeCompare(String(a.closedAt||""))).slice(0,15);
   const O=$("open");O.replaceChildren(...open.map(renderOpen));if(!open.length)O.append(el("div","empty","現在沒有要你選的。總監有新問題時會放在這裡。"));
-  const A=$("answered");A.replaceChildren(...ans.map(renderAnswered));if(!ans.length)A.append(el("div","empty","沒有等總監處理的回覆。"));
+  renderAnsweredList();
   const C=$("closed");C.replaceChildren(...closed.map(renderClosed));if(!closed.length)C.append(el("div","empty","還沒有結案的項目。"));
   const N=$("notes");const notes=S.notes.slice().sort((a,b)=>String(b.at).localeCompare(String(a.at))).slice(0,5);
-  N.replaceChildren(...notes.map(n=>el("p","msg",fmt(n.at)+"｜"+(n.status==="read"?"總監已讀｜":"未讀｜")+n.text)))}
+  N.replaceChildren(...notes.map(n=>el("p","msg",fmt(n.at)+"｜"+(n.status==="read"?"總監已讀｜":"未讀｜")+n.text)));
+  const back=fid&&$(fid);if(back){back.focus();try{back.setSelectionRange(s0,s1)}catch(e){}}}
 
 async function init(){
   const db=await claude.use("db");
@@ -189,6 +215,8 @@ async function init(){
   S.db=db;
   try{const user=await claude.use("user");if(user&&user.can){const w=await Promise.resolve(user.can("data.write"));if(w===false)S.canWrite=false}}catch(e){}
   if(!S.canWrite)$("note-send").disabled=true;
+  try{S.comments=await claude.use("comments")}catch(e){}
+  setInterval(renderAnsweredList,60000);
   const timer=setTimeout(()=>{if(!S.loaded)$("status").textContent="資料暫時連不上，連上後會自動更新。"},10000);
   db.collection("decisions").onSnapshot(snap=>{S.decisions=snap.docs.filter(d=>d.exists).map(d=>({id:d.id,...d.data()}));
     if(!snap.metadata.fromCache){S.loaded=true;clearTimeout(timer);$("status").textContent="最後同步："+fmt(new Date().toISOString())}render()},
@@ -197,7 +225,9 @@ async function init(){
   db.collection("notes").onSnapshot(snap=>{S.notes=snap.docs.filter(d=>d.exists).map(d=>({id:d.id,...d.data()}));render()},()=>{});
   $("note-send").addEventListener("click",async()=>{
     const t=$("note-text").value.trim();if(!t)return;const b=$("note-send");b.disabled=true;$("note-msg").textContent="送出中…";
-    try{await db.collection("notes").add({text:t,at:new Date().toISOString(),status:"new"});$("note-text").value="";$("note-msg").textContent="已送出"}
+    const anchor=await anchorOf($("note-text"));
+    try{await db.collection("notes").add({text:t,at:new Date().toISOString(),status:"new"});$("note-text").value="";$("note-msg").textContent="已送出"
+      $("note-msg").textContent="已送出，"+await notify(anchor,"選擇頁留言："+t+"。請照 docs/12 讀選擇頁處理。")}
     catch(e){$("note-msg").textContent="送出失敗，請稍後再試"}b.disabled=!S.canWrite});
 }
 render();init();

@@ -36,7 +36,7 @@
 
 適用：中途有兩個以上做法、使用者看了才能決定的事，例如 A 風格或 B 風格、版面、配色、角色長相。不適用：純技術選擇（總監自己決定）、要使用者動手的事（照 `docs/03` 待決頁）。
 
-1. **發布**：複製 `templates/choice_page.html`，用 Artifact 工具發布，`capabilities` 給 `{"db": {}, "user": {}, "assets": {}}`，`icon` 用 `checklist`。私人頁面，只有使用者看得到；網址寫進 `DIRECTOR_OPERATING_RULES.md`，第一份回報附上。
+1. **發布**：複製 `templates/choice_page.html`，用 Artifact 工具發布，`capabilities` 給 `{"db": {}, "user": {}, "assets": {}, "comments": {}}`（`comments` 用來叫醒總監，見第六節），`icon` 用 `checklist`。私人頁面，只有使用者看得到；網址寫進 `DIRECTOR_OPERATING_RULES.md`，第一份回報附上。
 2. **開題**：用 `ArtifactData` 寫 `decisions/<編號>`：
 
    ```json
@@ -50,7 +50,7 @@
    - 每題都要有 `brief`（對到哪幾條 B）、`recommended` 和 `why`（總監建議和理由，用使用者的話）。對不到初衷卡的題目不要開，先回頭問要不要改卡。
    - 圖：先截真實成品的圖，用 Artifact 工具 `asset: true` 上傳到這一頁，`url` 用上傳結果給的網址。不要用示意圖假裝是成品。
    - 一題只問一件事；選項最多四個。
-3. **讀回覆**：每一輪第一個動作，用 `ArtifactData` 查 `decisions` 裡 `status == "answered"` 的，和 `notes` 裡 `status == "new"` 的。同一輪處理：照選擇做或派工，把題目改成 `closed` 並寫 `resolution`、`closedAt`；留言改成 `read`。
+3. **讀回覆**：每一輪第一個動作，用 `ArtifactData` 查 `decisions` 裡 `status == "answered"` 的，和 `notes` 裡 `status == "new"` 的。同一輪處理：先寫 `seenAt`（第六節），照選擇做或派工，把題目改成 `closed` 並寫 `resolution`、`closedAt`；留言改成 `read`。
 4. 聊天裡只說一句「選擇頁新增了 CH-01」，不在聊天裡重複整題。
 
 ### 五、不做歪的檢查
@@ -65,6 +65,19 @@
    - 「TRACES_TO 找不到的編號」有東西：工單對到不存在的需求，改工單。
    - 「沒有工單的需求」有東西：還有沒做的需求，排進下一批，或問使用者是不是不要了。
 3. 成品交件時，對著初衷卡每一列的「怎麼算做到」檢查，結果寫進 gate 報告；最後由使用者看成品說「對」。
+
+### 六、選擇頁不漏讀
+
+選擇頁和待決頁一樣不准漏讀（`docs/03`「PO 的訊息不漏讀」）。
+
+1. **送出就叫醒**：使用者在頁面送出回覆或留言時，頁面用 comments 的 `sendToClaude` 在那一題留一則給總監的訊息。總監的對話開著、而且這一頁的監看是「auto-replies armed」時，總監馬上被叫醒。
+   - 發布後、每次恢復（壓縮、換對話）後，用 `ArtifactComments` 列出監看，確認選擇頁是 armed。不是的，請使用者在聊天裡貼一次選擇頁網址，再用 `ArtifactComments` 的 watch 打開。
+   - 叫醒只是加速。對話沒開、通知沒送到，第四節第 3 步照樣會在下一輪第一個動作讀到。
+2. **已讀回條**：讀到 `answered` 的題目，同一輪先寫 `seenAt`（ISO 時間），再處理、改 `closed`、寫 `resolution` 和 `closedAt`。
+   - 頁面上，已回覆卻沒有 `seenAt` 超過 10 分鐘的題目會標出來，使用者看得到總監還沒讀到，可以在聊天裡提醒。
+   - 處理晚了照實寫在 `resolution`：幾點才讀到、晚了多久。
+3. 處理完，把叫醒用的留言串用 `ArtifactComments` resolve 掉。
+4. 每輪結束前自查：選擇頁已讀、沒有「已回覆卻沒關閉」的題目。有總管時，總管例行查的「已回覆超過 10 分鐘還沒關閉」也包含選擇頁。
 
 ## 為什麼
 

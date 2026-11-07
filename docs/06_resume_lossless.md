@@ -26,7 +26,7 @@
 
 ### 總監自身的恢復
 
-1. 讀待決頁上 PO 已回覆的項目和新留言（`docs/03`）。
+1. 讀待決頁上 PO 已回覆的項目和新留言（`docs/03`），含選擇頁（`docs/12` 第六節）。
 2. 讀 `DIRECTOR_LOG.md` 最後 30 行，找出還沒處理完的 PO 指示。
 3. 讀 `ACTIVE_WORKSTREAMS.md`、未讀的 worker 訊息；有 session 清單工具就對照各 session 的狀態。
 4. 跑機制檢查腳本，缺的重建。
