@@ -119,6 +119,7 @@
 2. **先記帳再動手**：本機帳本 `<WS>/DIRECTOR/choice_inbox.sqlite3`，用 `tools/choice_reconcile.py`：
 
    ```text
+   python -I -X utf8 <WS>/DIRECTOR/tools/choice_reconcile.py publish --db <WS>/DIRECTOR/choice_inbox.sqlite3 --question CH-01 --revision 2
    python -I -X utf8 <WS>/DIRECTOR/tools/choice_reconcile.py ingest --db <WS>/DIRECTOR/choice_inbox.sqlite3 --export <讀回來的 JSON>
    python -I -X utf8 <WS>/DIRECTOR/tools/choice_reconcile.py plan --db <WS>/DIRECTOR/choice_inbox.sqlite3 --question CH-01 --revision 2 --orders <WS>/DIRECTOR/orders
    python -I -X utf8 <WS>/DIRECTOR/tools/choice_reconcile.py advance --db <WS>/DIRECTOR/choice_inbox.sqlite3 --question CH-01 --revision 2 --from QUEUED --to CLAIMED --session <你的名字>
@@ -127,15 +128,20 @@
    - `ingest` 把每筆回覆記一列，標出重複、同題不同答案、舊版、hash 不符、選項不存在。只有 `ok` 和 `legacy` 能派工；其他的照實回給使用者（寫回條 `resolution`），不要猜。
    - `plan` 給這一題這一版固定的工單編號；再跑一次還是同一張。工單照這個編號寫。
    - 狀態：`RECORDED → PLANNED → QUEUED → CLAIMED → RECEIPT_PENDING → CLOSED`。`advance` 只在狀態還是 `--from` 時才改；兩個總監同時接手，只有一個成功，另一個拿到 `LOST`，就不要再做。做到一半不知道有沒有做完的，改成 `RECONCILE`，先查證再決定。
+   - **領取與接手（2.2）**：動到 `CLAIMED` 或 `RECONCILE` 的 `advance` 都要帶 `--session <你的名字>`。領取時記下持有者，世代（`generation`）加 1。只有持有者能把 `CLAIMED` 交成 `RECEIPT_PENDING`；別人看到卡住的領取，用 `--from CLAIMED --to RECONCILE --session <自己> --generation <看到的世代>` 接手：世代不對拿到 `LOST`，表示有人先動了。接手會記一筆事件，工具印出要去查的工單編號；查證做完了才往下走，沒做就從 `RECONCILE` 回 `QUEUED` 重派。2.1 留下、沒有持有者的領取，一律先走 `RECONCILE`。
+   - **版本與現行版（2.2）**：`register` 只存不可改的快照，「頁面上現在是哪一版」另外記。選擇頁真的換上新版後跑 `publish --revision N`；題目關掉跑 `publish --close`。新版登記了卻還沒 `publish`，舊版的 `plan` 回 `HOLD`，不派工。`plan` 和領取都會再查一次版本、hash、題目是否還開著；不符的回 `REFUSED`（exit 1），工單不要開，已排的改 `RECONCILE`。匯出裡的 `decisions` 也會帶動現行版。
+   - **壞資料隔離（2.2）**：匯出逐筆讀。讀不懂的那一筆記進隔離區，印 `QUARANTINED <來源> reason=<原因>`，其他筆照常記帳；原因有 `not-a-list`、`not-an-object`、`missing-id`、`missing-question`、`bad-revision`、`bad-answer`。下次匯出同一筆已修好，就自動離開隔離區。確認是垃圾的，`settle --key <來源> --to CLOSED` 結案，之後不再提起。先到的回覆因為快照還沒登記被標 `unknown-revision`，`register` 或 `publish` 之後會自動重判；要手動重判跑 `rescan`。
    - 沒被採用的那幾列用 `settle` 結案：留言讀過 `--to NOTED`；被新回覆取代 `--to SUPERSEDED`；重複、衝突、不合格的回覆照實回給使用者後 `--to CLOSED`。已關閉的 2.0 舊答案直接記成 `CLOSED`。
-   - 2.1 是 shadow：帳本只提示、不擋任何工具；資料壞了只印一行 `CHOICE_RECONCILE: SHADOW_ERROR <原因>`，exit 0。沒跑帳本不算違規，但重複派工要自己負責。
-3. **回條**：總監每走一步，新增一筆 `choiceReceipts`：`{"questionId", "revision", "submissionId", "stage", "at", "wo", "resolution"}`，`stage` 是 `seen`、`claimed`、`handed`、`closed`。舊題照 2.0 也寫 `decisions` 的 `seenAt`，處理完改 `closed` 並寫 `resolution`、`closedAt`；留言改成 `read`。
+   - 2.2 仍是 shadow：帳本只提示、不擋其他工具；帳本檔本身壞了只印一行 `CHOICE_RECONCILE: SHADOW_ERROR <原因>`，exit 0。單筆資料壞了改進隔離區，不再整批報錯。沒跑帳本不算違規，但重複派工要自己負責。2.1 的帳本第一次被 2.2 打開時自動升級，升級前先留一份 `<帳本>.v210.bak`。
+   - **回覆身分（2.2）**：一筆回覆由四個欄位認出來：`questionId + revision + snapshotHash + submissionId`。帳本、回條、頁面都用這四個一起配對，少一個就不算同一筆；只對上其中幾個的回條另列「配不上」，不拿來改任何一筆的狀態。2.0 舊題沒有版本，`revision` 記 0、`snapshotHash` 記空字串。
+   - **冪等鍵（2.2）**：同一筆送出重送幾次都只算一次，鍵是 `頁面來源 + 事件種類 + submissionId`，寫成 `<source>|<kind>|<submissionId>`；`source` 是匯出 JSON 的 `source`（頁面的 artifact id），`kind` 是 `choice` 或 `note`。同一個鍵、內容相同，記成重複（`duplicate`），不再算新的；同一個鍵、內容不同，兩份原件都留著，標 `conflict-same-submission`，照實回給使用者，不覆寫。頁面重試時沿用同一個 `submissionId`。
+3. **回條**：總監每走一步，新增一筆 `choiceReceipts`：`{"questionId", "revision", "snapshotHash", "submissionId", "stage", "at", "wo", "resolution"}`，`stage` 是 `seen`、`claimed`、`handed`、`closed`。舊題照 2.0 也寫 `decisions` 的 `seenAt`，處理完改 `closed` 並寫 `resolution`、`closedAt`；留言改成 `read`。
    - 2.1 新題的選項讀不到時（`choiceRevisions` 還沒載入或沒有這一版），頁面顯示「載入中」或「這一版選項讀不到，請在聊天告訴總監」，不能送出。圖片和影片的網址只接受 `https:`、`/_blob/` 和相對路徑。
    - 頁面上每一筆回覆顯示三種狀態：沒有回條是「已儲存，等總監讀取」；`seen` 或 `claimed` 是「總監已收件，處理中」；`handed`、`closed` 或題目已關是「已交接／處理完成」。
    - 逾時分兩種：存好超過 10 分鐘還沒有回條，標「（沒收到）」，是叫醒或讀取出了問題；收件超過 30 分鐘還沒交接，標「（收到但卡住）」，是處理出了問題。使用者看得到卡在哪一步，可以在聊天裡提醒。
    - 處理晚了照實寫在 `resolution`：幾點才讀到、晚了多久。
 4. 處理完，把叫醒用的留言串用 `ArtifactComments` resolve 掉。
-5. 每輪結束前自查：跑 `choice_reconcile.py status`，`not_handed`、`stuck`、`receipts_pending`、`notes` 都是 0；選擇頁沒有「已回覆卻沒關閉」的題目。有總管時，總管例行查的「已回覆超過 10 分鐘還沒關閉」也包含選擇頁。
+5. 每輪結束前自查：跑 `choice_reconcile.py status`，最後一行要是 `clear=yes`（`not_handed`、`stuck`、`receipts_pending`、`notes`、`reconcile`、`quarantined` 都是 0）；選擇頁沒有「已回覆卻沒關閉」的題目。給程式讀用 `status --json`，只印一份 JSON。有總管時，總管例行查的「已回覆超過 10 分鐘還沒關閉」也包含選擇頁。
 
 ## 為什麼
 
