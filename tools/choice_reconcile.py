@@ -26,11 +26,11 @@ quarantine (QUARANTINED <key> reason=<code>) and never stops the good rows.
 Reply identity: questionId + revision + snapshotHash + submissionId. Idempotency key: <source>|<kind>|<submissionId>; the
 same key with the same content is a duplicate, with other content conflict-same-submission (both rows kept).
 
-States: RAW -> RECORDED -> PLANNED -> QUEUED -> CLAIMED -> RECEIPT_PENDING -> CLOSED; QUEUED | CLAIMED -> RECONCILE ->
+States: RAW -> RECORDED -> PLANNED -> QUEUED -> CLAIMED -> RECEIPT_PENDING -> CLOSED; PLANNED | QUEUED | CLAIMED -> RECONCILE ->
 CLAIMED | QUEUED; RECORDED -> RECEIPT_PENDING for a duplicate, stale, conflicting or invalid reply. plan and every claim
 re-check that the revision is still the one the page shows, that its hash matches and that the question is open. A claim
 raises the generation and names the holder (--session); only the holder may move CLAIMED -> RECEIPT_PENDING; anyone may
-move CLAIMED -> RECONCILE (a takeover, logged), then claim it again. All moves are compare-and-set on state (and on
+move CLAIMED -> RECONCILE (a takeover, logged; anyone but the holder must give --generation), then claim it again. All moves are compare-and-set on state (and on
 --generation when given) inside BEGIN IMMEDIATE, so of two Directors only one wins (the other gets exit 1 and LOST).
 
 settle closes an inbox row no decision adopts: a read note (NOTED), a reply a newer one replaced (SUPERSEDED), or a
@@ -40,13 +40,16 @@ status counts every state; clear=yes only when nothing is waiting, in flight, wi
 
 Shadow mode: nothing here blocks other tools or the old flow. A broken export, a bad --now, a broken ledger or a missing
 folder print one line "CHOICE_RECONCILE: SHADOW_ERROR <reason>" (status --json: one JSON document with "error") and exit
-0 (register: exit 2, the page needs its hash). Exit 2 for a usage error; plan / advance / settle / publish exit 1 when
+0 (register: exit 2, the page needs its hash). A ledger another Director holds longer than --busy-timeout prints
+"CHOICE_RECONCILE: BUSY ..." (plan / advance: "BUSY <key>") and exits 1 for every command: nothing ran, retry. Exit 2
+for a usage error (and for a takeover without --generation); plan / advance / settle / publish exit 1 when
 the change did not happen (only MOVED / PLANNED / SETTLED / PUBLISHED mean it did).
 """
 import argparse
 import datetime
 import hashlib
 import json
+import os
 import pathlib
 import re
 import sqlite3
@@ -57,7 +60,7 @@ STATES = ("RAW", "RECORDED", "PLANNED", "QUEUED", "CLAIMED", "RECONCILE", "RECEI
 SETTLE = {"RECORDED": {"NOTED", "SUPERSEDED", "CLOSED"}, "RECEIPT_PENDING": {"CLOSED", "SUPERSEDED"}}  # inbox rows no decision adopts
 WAITING = ("ok", "legacy")  # verdicts of a reply the Director still has to act on
 RETRYABLE = ("unknown-revision",)  # verdicts that a later snapshot or revision can change
-MOVES = {"RAW": {"RECORDED"}, "RECORDED": {"PLANNED", "RECEIPT_PENDING"}, "PLANNED": {"QUEUED"},
+MOVES = {"RAW": {"RECORDED"}, "RECORDED": {"PLANNED", "RECEIPT_PENDING"}, "PLANNED": {"QUEUED", "RECONCILE"},
          "QUEUED": {"CLAIMED", "RECONCILE"}, "RECONCILE": {"CLAIMED", "QUEUED"}, "CLAIMED": {"RECEIPT_PENDING", "RECONCILE"},
          "RECEIPT_PENDING": {"CLOSED"}, "CLOSED": set()}
 SEEN = ("PLANNED", "QUEUED", "CLAIMED", "RECONCILE")  # the Director has the reply but has not handed it over
@@ -103,16 +106,55 @@ def migrate(con, path):
     """Create the 2.2 tables; upgrade a 2.1.0 ledger in place (copy kept first, no row dropped, WO-IDs kept)."""
     if con.execute("PRAGMA user_version").fetchone()[0] >= SCHEMA_VERSION:
         return
-    old = con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='inbox'").fetchone()
-    backup = pathlib.Path(str(path) + ".v210.bak")
-    if old and not backup.exists():
-        target = sqlite3.connect(str(backup))
-        con.backup(target)
-        target.close()
-    con.execute("BEGIN IMMEDIATE")
-    if con.execute("PRAGMA user_version").fetchone()[0] >= SCHEMA_VERSION:  # another Director upgraded it meanwhile
-        con.execute("ROLLBACK")
-        return
+    con.execute("BEGIN IMMEDIATE")  # the backup and the upgrade happen under one lock
+    try:
+        if con.execute("PRAGMA user_version").fetchone()[0] >= SCHEMA_VERSION:  # another Director upgraded it meanwhile
+            con.execute("ROLLBACK")
+            return
+        old = con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='inbox'").fetchone()
+        if old:
+            backup_v210(path)
+        upgrade(con, old)
+        con.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        con.execute("COMMIT")
+    except BaseException:
+        if con.in_transaction:
+            con.execute("ROLLBACK")
+        raise
+
+
+def backup_v210(path):
+    """Copy the 2.1 ledger before the upgrade: to a temp file, checked, then linked to a name nobody holds yet.
+    Called with BEGIN IMMEDIATE held, so no one writes meanwhile; any failure stops the upgrade."""
+    final = pathlib.Path(str(path) + ".v210.bak")
+    temp = final.with_name(f"{final.name}.{os.getpid()}.tmp")
+    try:
+        source, target = sqlite3.connect(str(path), timeout=5.0), sqlite3.connect(str(temp))
+        try:
+            source.backup(target)
+            check = target.execute("PRAGMA quick_check").fetchone()[0]
+            tables = target.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='inbox'").fetchone()[0]
+            version = target.execute("PRAGMA user_version").fetchone()[0]
+        finally:
+            source.close()
+            target.close()
+        if check != "ok" or tables != 1 or version >= SCHEMA_VERSION:
+            raise ValueError(f"backup check failed (quick_check={check}, inbox={tables}, user_version={version}); not upgraded")
+        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        for name in (final, final.with_name(f"{final.name}.{stamp}")):
+            try:
+                os.link(str(temp), str(name))
+                return name
+            except FileExistsError:
+                continue
+        raise ValueError(f"cannot claim a backup name next to {final}; not upgraded")
+    finally:
+        if temp.exists():
+            temp.unlink()
+
+
+def upgrade(con, old):
+    """The 2.1 -> 2.2 schema change itself; runs inside migrate's transaction."""
     for statement in TABLES:
         if not statement.startswith("CREATE INDEX"):
             con.execute(statement)
@@ -135,8 +177,6 @@ def migrate(con, path):
                         (idem_key(m.group(1) if m else "", kind, sub), body.get("snapshotHash") or "", skey))
         con.execute("UPDATE effects SET generation=1 WHERE claimed_at IS NOT NULL AND (generation IS NULL OR generation=0)")
         con.execute("UPDATE effects SET generation=0 WHERE generation IS NULL")
-    con.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
-    con.execute("COMMIT")
 
 
 def connect(path, timeout=5.0):
@@ -285,7 +325,7 @@ def cmd_register(args):
         print("CHOICE_RECONCILE: a snapshot needs questionId and an integer revision >= 1")
         return 2
     digest = snapshot_hash(snap)
-    con = connect(args.db)
+    con = connect(args.db, timeout=args.busy_timeout)
     con.execute("BEGIN IMMEDIATE")
     old = con.execute("SELECT snapshot_hash FROM revisions WHERE question_id=? AND revision=?", (qid, rev)).fetchone()
     if old and old[0] != digest:
@@ -437,8 +477,14 @@ def read_rows(con, data, source):
 
 def cmd_ingest(args):
     data = load_json(args.export)
-    source = str(data.get("source") or "artifact")
-    con = connect(args.db)
+    given = str(data.get("source") or "")
+    if given and args.source and given != args.source:
+        print(f"WARNING the export says source={given}, --source says {args.source}; using the export's")
+    if not given and not args.source:
+        print('WARNING the export has no top-level "source" and no --source was given; using "artifact". '
+              "Give --source <artifact id> every time, or the same reply in another export counts twice")
+    source = given or args.source or "artifact"
+    con = connect(args.db, timeout=args.busy_timeout)
     counts = {}
     con.execute("BEGIN IMMEDIATE")
     rows, decisions, bad = read_rows(con, data, source)
@@ -476,7 +522,7 @@ def cmd_ingest(args):
 
 
 def cmd_rescan(args):
-    con = connect(args.db)
+    con = connect(args.db, timeout=args.busy_timeout)
     con.execute("BEGIN IMMEDIATE")
     qids = [q for (q,) in con.execute("SELECT DISTINCT question_id FROM inbox WHERE kind='choice' AND revision>0")]
     total = sum(reevaluate(con, qid) for qid in qids)
@@ -518,7 +564,8 @@ def cmd_plan(args):
         con.execute("ROLLBACK")
         note = f" (asked for {args.wo}; kept the first one)" if args.wo and args.wo != old[0] else ""
         why = live(con, args.question, args.revision)
-        warn = f" WARNING {why}; move it to RECONCILE" if why and old[1] not in ("RECEIPT_PENDING", "CLOSED") else ""
+        warn = (f" WARNING {why}; advance --from {old[1]} --to RECONCILE --session <you> to look into it"
+                if why and "RECONCILE" in MOVES.get(old[1], set()) else "")
         print(f"PLANNED {key} {old[0]} state={old[1]} already{note}{warn}")
         return 0
     pick = con.execute("SELECT source_key, payload FROM inbox WHERE question_id=? AND revision=? AND state='RECORDED' AND kind='choice' "
@@ -569,6 +616,11 @@ def cmd_advance(args):
         print(f"LOST {key}: state is {row[0] if row else 'unknown'}, not {args.from_}; someone else moved it")
         return 1
     state, source_key, holder, generation, wo, effect = row
+    if args.from_ == "CLAIMED" and args.to == "RECONCILE" and holder != args.session and args.generation is None:
+        con.execute("ROLLBACK")
+        print(f"REFUSED {key}: held by {holder or 'nobody (2.1 claim)'} at generation {generation}; a takeover needs "
+              f"--generation {generation} (the one you saw), so a newer claim is never taken by mistake")
+        return 2
     if args.generation is not None and args.generation != generation:
         con.execute("ROLLBACK")
         print(f"LOST {key}: generation is {generation}, not {args.generation}; someone took it over")
@@ -681,7 +733,7 @@ def cmd_status(args):
     now = datetime.datetime.fromisoformat(args.now.replace("Z", "+00:00")) if args.now else datetime.datetime.now(datetime.timezone.utc)
     if now.tzinfo is None:
         now = now.replace(tzinfo=datetime.timezone.utc)
-    report = status_report(connect(args.db), now, args.late_min, args.stuck_min)
+    report = status_report(connect(args.db, timeout=args.busy_timeout), now, args.late_min, args.stuck_min)
     if args.json:
         print(json.dumps(report, ensure_ascii=False))
         return 0
@@ -731,6 +783,7 @@ def main(argv=None):
     group.add_argument("--revision", type=int)
     group.add_argument("--close", action="store_true")
     sub.choices["ingest"].add_argument("--export", required=True)
+    sub.choices["ingest"].add_argument("--source", help="the page's artifact id when the export has no top-level source")
     for name in ("plan", "advance"):
         sub.choices[name].add_argument("--question", required=True)
         sub.choices[name].add_argument("--revision", required=True, type=int)
@@ -758,6 +811,13 @@ def main(argv=None):
         return run(args)
     except (sqlite3.Error, OSError, ValueError, TypeError, KeyError, AttributeError) as error:
         reason = f"{type(error).__name__}: {error}".replace("\n", " ")[:300]
+        if isinstance(error, sqlite3.OperationalError) and any(w in str(error).lower() for w in ("locked", "busy")):
+            if args.cmd == "status" and args.json:
+                print(json.dumps({"schema": "dw-choice-status/2", "error": reason, "busy": True, "clear": False,
+                                  "summary": f"CHOICE_RECONCILE: BUSY {reason}"}, ensure_ascii=False))
+            else:
+                print(f"CHOICE_RECONCILE: BUSY {reason}; another Director holds the ledger, nothing changed, try again")
+            return 1  # not shadow: the command did not run, the caller must retry
         if args.cmd == "register":  # registering a snapshot is not shadow: the page needs its hash
             print(f"CHOICE_RECONCILE: cannot register: {reason}")
             return 2
