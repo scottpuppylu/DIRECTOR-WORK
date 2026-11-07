@@ -80,11 +80,26 @@ jobs:
         shell: bash
         working-directory: "dw 專案 路徑"
         run: |
+          # Taking every PATH folder that holds git off PATH also drops ps, bash, sed ... on Linux (they share /usr/bin), and
+          # status.py's process probe needs ps. So: link everything from those folders except git into a private folder.
+          shim="$RUNNER_TEMP/nogit-bin"
+          rm -rf "$shim"; mkdir -p "$shim"
           clean=""
           IFS=: read -ra dirs <<< "$PATH"
-          for d in "${dirs[@]}"; do [ -x "$d/git" ] || clean="${clean:+$clean:}$d"; done
-          PATH="$clean"
+          for d in "${dirs[@]}"; do
+            if [ -x "$d/git" ]; then
+              for f in "$d"/*; do
+                b="${f##*/}"
+                case "$b" in git|git-*) continue ;; esac
+                [ -e "$shim/$b" ] || ln -s "$f" "$shim/$b" 2>/dev/null || true
+              done
+            else
+              clean="${clean:+$clean:}$d"
+            fi
+          done
+          PATH="$shim${clean:+:$clean}"
           if command -v git >/dev/null 2>&1; then echo "git is still on PATH"; exit 1; fi
+          command -v ps >/dev/null 2>&1 || { echo "ps is gone from PATH"; exit 1; }
           python -I -X utf8 tools/selftest.py
 
   # 2.2.0 (F21): the choice page is checked in a real browser (the Chrome the runner already has; no paid service).
