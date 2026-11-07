@@ -27,9 +27,14 @@ env_scrub NOT_ENFORCED and is listed by name. Values are never printed. CLAUDE_C
 GITHUB_TOKEN, GH_TOKEN, proxy credentials and GIT_CONFIG_* by design, so they show up here even when it is on.
 isolation: outside a container NOT_ENFORCED, so on native Windows doctor always exits 1: there is no OS-level
 isolation for shell commands there. In a container (/.dockerenv, /run/.containerenv or a container cgroup) it is
-CONFIGURED_NOT_VERIFIED, and with --probe four checks decide it, ENFORCED only when all four pass: a file cannot be
+CONFIGURED_NOT_VERIFIED, and with --probe six checks decide it, ENFORCED only when all six pass: a file cannot be
 made in / (read-only root), nor in --director DIR (mounted read-only), a TCP connection to example.com:443 fails
-(egress allowlist), and no credential-like variable names are left. --probe makes one outbound connection attempt.
+(egress allowlist), example.com does not resolve (DNS allowlist, dns_allow.py), the worker's .git is its own (K1),
+and no credential-like variable names are left. --probe makes one outbound connection attempt and one DNS lookup.
+K1: run_worker.sh sets DW_GIT_MODE. A container started with --git-common (DW_GIT_MODE=shared, or a linked worktree,
+whose .git is the repository's) can change every branch and tag of the repository: isolation is NOT_ENFORCED
+(K1 shared .git) with or without --probe. A clone made by worker_clone.sh (DW_GIT_MODE=clone, not a linked worktree)
+counts as the worker's own worktree. Outside a container DW_GIT_MODE is ignored.
 Besides the claudes on PATH, ~/.local/bin and the npm global folder are looked at and listed as "other" (no WARN).
 """
 import argparse
@@ -149,6 +154,29 @@ def can_connect(target):
         return False
 
 
+def can_resolve(name):
+    try:
+        return bool(socket.getaddrinfo(name, None))
+    except (OSError, UnicodeError):
+        return False
+
+
+def git_dirs(repo):
+    """(git dir, common dir), absolute; empty strings when git cannot tell."""
+    return tuple(subprocess.run(["git", "rev-parse", "--path-format=absolute", flag], cwd=repo, capture_output=True,
+                                text=True).stdout.strip() for flag in ("--git-dir", "--git-common-dir"))
+
+
+def git_mode(dirs):
+    """In a container: "shared" (run_worker --git-common: the repository's .git), "clone" (worker_clone.sh), else None.
+    A linked worktree in a container always means the shared .git, whatever DW_GIT_MODE says."""
+    linked = bool(dirs[0] and dirs[1] and os.path.normcase(dirs[0]) != os.path.normcase(dirs[1]))
+    mode = os.environ.get("DW_GIT_MODE")
+    if linked or mode == "shared":
+        return "shared"
+    return "clone" if mode == "clone" and dirs[0] else None
+
+
 def show(version):
     return ".".join(map(str, version)) if version else "unknown"
 
@@ -185,13 +213,14 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--repo", help="the worktree to check (default: current folder)")
     ap.add_argument("--probe", action="store_true", help="also check the environment variable names this process sees; "
-                    "in a container also the four isolation checks")
+                    "in a container also the six isolation checks")
     ap.add_argument("--director", help="the DIRECTOR folder, which must be read-only inside a container (--probe)")
     ap.add_argument("--home", help=argparse.SUPPRESS)  # tests: another user folder
     ap.add_argument("--managed", help=argparse.SUPPRESS)  # tests: another managed-settings.json
     ap.add_argument("--path-claude", action="append", help=argparse.SUPPRESS)  # tests: these instead of PATH
     ap.add_argument("--fs-root", default="/", help=argparse.SUPPRESS)  # tests: where /.dockerenv is looked for
     ap.add_argument("--egress", default="example.com:443", help=argparse.SUPPRESS)  # tests: a host:port that must fail
+    ap.add_argument("--dns-name", default="example.com", help=argparse.SUPPRESS)  # tests: a name that must not resolve
     a = ap.parse_args()
     setup = load("setup_project_settings")
     counts = {"ENFORCED": 0, "CONFIGURED_NOT_VERIFIED": 0, "NOT_ENFORCED": 0, "MISSING": 0, "WARN": 0}
@@ -334,12 +363,20 @@ def main():
         item("WARN", "permission mode", "defaultMode is bypassPermissions: only the hook and deny / ask rules stand")
 
     # isolation, worktree, pause, review
-    if in_container(pathlib.Path(a.fs_root)) and not a.probe:
+    container = in_container(pathlib.Path(a.fs_root))
+    dirs = git_dirs(repo)
+    mode = git_mode(dirs) if container else None
+    if container and not a.probe and mode == "shared":
+        item("NOT_ENFORCED", "isolation", "container: K1 shared .git (run_worker --git-common): the worker can change "
+             "every branch and tag of the repository; use run_worker --clone")
+    elif container and not a.probe:
         item("CONFIGURED_NOT_VERIFIED", "isolation", "in a container; run doctor --probe --director DIR to check its limits")
-    elif in_container(pathlib.Path(a.fs_root)):
+    elif container:
         checks = [("root read-only", not can_write(a.fs_root)),
                   ("DIRECTOR read-only", bool(a.director) and pathlib.Path(a.director).is_dir() and not can_write(a.director)),
                   (f"no connection to {a.egress}", not can_connect(a.egress)),
+                  (f"{a.dns_name} does not resolve", not can_resolve(a.dns_name)),
+                  ("own .git (K1)", mode != "shared"),
                   ("no credential names", not credential_names())]
         failed = [name for name, ok in checks if not ok]
         item("NOT_ENFORCED" if failed else "ENFORCED", "isolation", "container: " + ", ".join(
@@ -351,11 +388,12 @@ def main():
     if profile == "director":
         print("INFO                     worktree: director profile, not checked")
     else:
-        dirs = [subprocess.run(["git", "rev-parse", "--path-format=absolute", flag], cwd=repo, capture_output=True,
-                               text=True).stdout.strip() for flag in ("--git-dir", "--git-common-dir")]
         linked = dirs[0] and dirs[1] and os.path.normcase(dirs[0]) != os.path.normcase(dirs[1])
-        item("ENFORCED" if linked else "NOT_ENFORCED", "worktree",
-             "a linked worktree of its own" if linked else "this is the main checkout, not a worker's own worktree")
+        if mode == "clone":
+            item("ENFORCED", "worktree", "the worker's own clone (worker_clone.sh)")
+        else:
+            item("ENFORCED" if linked else "NOT_ENFORCED", "worktree",
+                 "a linked worktree of its own" if linked else "this is the main checkout, not a worker's own worktree")
     if command and setup.pause_arg(command):
         flag = pathlib.Path(setup.pause_arg(command))
         try:

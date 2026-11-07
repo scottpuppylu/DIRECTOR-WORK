@@ -2940,7 +2940,7 @@ def test_doctor(tmp):
     doctor = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(doctor)
     clean_env = {k: v for k, v in os.environ.items() if not doctor.CREDENTIAL_NAME.search(k) and not doctor.PROXY_NAME.match(k)
-                 and k not in ("CLAUDE_CODE_EXECPATH", "CLAUDE_PID", "CLAUDE_CODE_GIT_BASH_PATH")}
+                 and k not in ("CLAUDE_CODE_EXECPATH", "CLAUDE_PID", "CLAUDE_CODE_GIT_BASH_PATH", "DW_GIT_MODE")}
     outputs = []
 
     def doc(*args, repo=wt, path_claude=(new,), env_change=None, fs_root=empty_root):
@@ -3082,20 +3082,43 @@ def test_doctor(tmp):
     container = folder / "container"
     (container / "proc" / "1").mkdir(parents=True)
     (container / "proc" / "1" / "cgroup").write_text("0::/docker/0123abcd\n", encoding="utf-8")
-    done = doc(fs_root=container)
+    done = doc(repo=main_repo, fs_root=container)
     check("a container cgroup without --probe is CONFIGURED_NOT_VERIFIED", line(done, "isolation").startswith("CONFIGURED_NOT_VERIFIED"), done.stdout)
     closed = socket.socket()
     closed.bind(("127.0.0.1", 0))
     port = closed.getsockname()[1]
     closed.close()
-    done = doc("--probe", "--director", folder, "--egress", f"127.0.0.1:{port}", fs_root=container,
+    done = doc("--probe", "--director", folder, "--egress", f"127.0.0.1:{port}", "--dns-name", "localhost", fs_root=container,
                env_change={fake_name: fake_token})
     check("container --probe: a writable root and DIRECTOR and a credential name fail, a refused connection passes",
           line(done, "isolation").startswith("NOT_ENFORCED") and "root read-only FAIL" in done.stdout
           and "DIRECTOR read-only FAIL" in done.stdout and f"no connection to 127.0.0.1:{port} ok" in done.stdout
           and "no credential names FAIL" in done.stdout, done.stdout)
+    check("container --probe: a name that resolves fails the DNS check (localhost); a linked worktree is the shared .git",
+          "localhost does not resolve FAIL" in done.stdout and "own .git (K1) FAIL" in done.stdout, done.stdout)
+    done = doc("--probe", "--egress", f"127.0.0.1:{port}", "--dns-name", "dw-doctor-probe.invalid", repo=main_repo, fs_root=container)
+    check("container --probe: a name that does not resolve passes the DNS check",
+          "dw-doctor-probe.invalid does not resolve ok" in done.stdout, done.stdout)
+    done = doc(repo=main_repo, fs_root=container, env_change={"DW_GIT_MODE": "shared"})
+    check("container, DW_GIT_MODE=shared, no --probe: isolation NOT_ENFORCED (K1 shared .git)",
+          line(done, "isolation").startswith("NOT_ENFORCED") and "K1 shared .git" in done.stdout and done.returncode == 1,
+          done.stdout)
+    done = doc("--probe", "--egress", f"127.0.0.1:{port}", "--dns-name", "dw-doctor-probe.invalid", fs_root=container,
+               repo=main_repo, env_change={"DW_GIT_MODE": "shared"})
+    check("container --probe, DW_GIT_MODE=shared: own .git (K1) FAIL", line(done, "isolation").startswith("NOT_ENFORCED")
+          and "own .git (K1) FAIL" in done.stdout, done.stdout)
+    done = doc(fs_root=container, env_change={"DW_GIT_MODE": "clone"})
+    check("container, a linked worktree with DW_GIT_MODE=clone is still the shared .git (K1)",
+          "K1 shared .git" in line(done, "isolation"), done.stdout)
+    done = doc(repo=main_repo, fs_root=container, env_change={"DW_GIT_MODE": "clone"})
+    check("container, DW_GIT_MODE=clone in a clone: worktree ENFORCED (its own clone), isolation not yet verified",
+          line(done, "worktree").startswith("ENFORCED") and "own clone" in line(done, "worktree")
+          and line(done, "isolation").startswith("CONFIGURED_NOT_VERIFIED"), done.stdout)
+    done = doc(repo=main_repo, env_change={"DW_GIT_MODE": "clone"})
+    check("outside a container DW_GIT_MODE is ignored: the main checkout is still NOT_ENFORCED",
+          line(done, "worktree").startswith("NOT_ENFORCED"), done.stdout)
     (empty_root / ".dockerenv").write_text("", encoding="utf-8")
-    done = doc()
+    done = doc(repo=main_repo)
     check("/.dockerenv means a container", line(done, "isolation").startswith("CONFIGURED_NOT_VERIFIED"), done.stdout)
     (empty_root / ".dockerenv").unlink()
     done = doc(repo=main_repo)
@@ -3184,7 +3207,7 @@ def test_container(tmp):
     names = sorted(words[i + 1].split("=")[0] for i, w in enumerate(words) if w == "-e")
     check("only the listed environment variables, and no GIT_DIR / GIT_WORK_TREE (they would send every git to this repo)",
           names == ["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", "DW_ALLOW_DOMAINS",
-                    "DW_DNS_UPSTREAM", "DW_WORKER_NAME", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_0",
+                    "DW_DNS_UPSTREAM", "DW_GIT_MODE", "DW_WORKER_NAME", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_0",
                     "GIT_CONFIG_VALUE_1", "XDG_CACHE_HOME"] and "--env-file" not in words, str(names))
     check("default allowlist is api.anthropic.com; git never auto-gcs or prunes worktrees",
           "DW_ALLOW_DOMAINS=api.anthropic.com" in words and "GIT_CONFIG_KEY_0=gc.auto" in words and "GIT_CONFIG_VALUE_0=0" in words
@@ -3431,8 +3454,10 @@ def test_worker_clone(tmp):
     names = sorted(words[i + 1].split("=")[0] for i, w in enumerate(words) if w == "-e")
     check("--clone: DW_WORKER_NAME is --name; no GIT_CONFIG_* (no shared worktrees to protect)",
           "DW_WORKER_NAME=w1" in words and names == ["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB",
-                                                     "DW_ALLOW_DOMAINS", "DW_DNS_UPSTREAM", "DW_WORKER_NAME", "XDG_CACHE_HOME"],
+                                                     "DW_ALLOW_DOMAINS", "DW_DNS_UPSTREAM", "DW_GIT_MODE", "DW_WORKER_NAME",
+                                                     "XDG_CACHE_HOME"],
           str(names))
+    check("--clone sets DW_GIT_MODE=clone (doctor: the worker's own .git)", "DW_GIT_MODE=clone" in words, done.stdout)
     check("--clone prints no WARN", "WARN" not in done.stderr, done.stderr)
     done = run("--clone", c, "--director", director.as_posix())
     check("--clone without --name exits 2", done.returncode == 2 and "--name" in done.stderr, done.stderr)
@@ -3451,6 +3476,7 @@ def test_worker_clone(tmp):
     check("--git-common still works for one version, with a WARN on stderr (Q1)",
           done.returncode == 0 and "WARN K1" in done.stderr and "2.0 removes --git-common" in done.stderr, done.stderr)
     check("--git-common: DW_WORKER_NAME defaults to the folder name", "DW_WORKER_NAME=repo" in words, done.stdout)
+    check("--git-common sets DW_GIT_MODE=shared (doctor: K1 NOT_ENFORCED)", "DW_GIT_MODE=shared" in words, done.stdout)
     done = run("--worktree", repo_p, "--git-common", (repo / ".git").as_posix(), "--name", "w9", "--director", director.as_posix())
     check("--git-common with --name uses it", "DW_WORKER_NAME=w9" in shlex.split(done.stdout or "''"), done.stdout + done.stderr)
 

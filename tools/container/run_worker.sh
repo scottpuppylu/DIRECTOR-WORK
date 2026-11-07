@@ -76,8 +76,9 @@ done
 [ -n "$DIRECTOR" ] && [ -d "$DIRECTOR" ] || die "--director must be an existing folder"
 [ -z "$NAME" ] || { [[ "$NAME" =~ ^[A-Za-z0-9._-]+$ ]] && [[ "$NAME" != .* ]]; } || die "--name: letters, digits, . _ - only, not starting with ."
 
-GITMOUNTS=() GITENV=()
+GITMOUNTS=() GITENV=() GITMODE=shared
 if [ -n "$CLONE" ]; then
+  GITMODE=clone
   [ -z "$WORKTREE$GITCOMMON$WTNAME" ] || die "--clone goes without --worktree, --git-common and --worktree-name"
   [ -n "$NAME" ] || die "--clone needs --name"
   [ -d "$CLONE/.git" ] && [ -f "$CLONE/.git/config" ] && [ -d "$CLONE/.git/hooks" ] \
@@ -137,6 +138,7 @@ ARGS=(docker run --rm --init
   -e XDG_CACHE_HOME=/tmp/cache
   "${GITENV[@]}"
   -e "DW_WORKER_NAME=$NAME"
+  -e "DW_GIT_MODE=$GITMODE"   # doctor: clone = the worker's own .git, shared = K1 NOT_ENFORCED
 )
 if [ "$OFFLINE" = 1 ]; then
   ARGS+=(--network none)
