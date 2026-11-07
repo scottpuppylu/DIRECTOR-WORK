@@ -36,8 +36,17 @@ whose .git is the repository's) can change every branch and tag of the repositor
 (K1 shared .git) with or without --probe. A clone made by worker_clone.sh (DW_GIT_MODE=clone, not a linked worktree)
 counts as the worker's own worktree. Outside a container DW_GIT_MODE is ignored.
 Besides the claudes on PATH, ~/.local/bin and the npm global folder are looked at and listed as "other" (no WARN).
+Launch folders: Claude Code reads .claude/settings*.json only from the folder a session was started in, not from the
+worktree it later works in. doctor lists, for every worktree of the repo, whether its settings have a hook_guard entry
+and how many sessions started there (or below it) in the last --launch-days days (default 30), from the "cwd" of the
+first lines of the transcripts in ~/.claude/projects/ whose folder name is that worktree's path (other projects'
+transcripts are not opened). WARN "settings unread": a worktree has a hook_guard entry but no session started there;
+WARN "launch folder unguarded": sessions start in a worktree without one while another worktree has one. With a
+hook_guard --sessions file (setup_project_settings.py --session-map) the permission check takes the mildest decision of
+the profiles that file can give, as setup writes it.
 """
 import argparse
+import datetime
 import importlib.util
 import json
 import os
@@ -200,6 +209,52 @@ def git_bash():
     return None
 
 
+def project_folder_name(path):
+    """The ~/.claude/projects folder name Claude Code gives a launch folder: every character but A-Z, a-z, 0-9 is -."""
+    return re.sub(r"[^A-Za-z0-9]", "-", str(path))
+
+
+def launch_counts(home, folders, days):
+    """{folder: [sessions, last start date]} for sessions whose transcript says they started in that folder or below it
+    (the deepest folder wins); None when HOME/.claude/projects does not exist."""
+    root = home / ".claude" / "projects"
+    if not root.is_dir():
+        return None
+    key = lambda f: os.path.normcase(os.path.normpath(str(f)))
+    folders = sorted({key(f): f for f in folders}.items(), key=lambda kv: -len(kv[0]))
+    counts = {f: [0, ""] for _, f in folders}
+    names = [project_folder_name(f) for _, f in folders]
+    since = datetime.datetime.now().timestamp() - days * 86400
+    for project in root.iterdir():
+        if not project.is_dir() or not any(project.name == n or project.name.startswith(n + "-") for n in names):
+            continue
+        for transcript in project.glob("*.jsonl"):
+            try:
+                if transcript.stat().st_mtime < since:
+                    continue
+                cwd, when = None, ""
+                with open(transcript, encoding="utf-8", errors="replace") as fh:
+                    for _, text in zip(range(50), fh):
+                        try:
+                            entry = json.loads(text)
+                        except ValueError:
+                            continue
+                        if isinstance(entry, dict) and isinstance(entry.get("cwd"), str):
+                            cwd, when = entry["cwd"], str(entry.get("timestamp") or "")[:10]
+                            break
+            except OSError:
+                continue
+            if not cwd:
+                continue
+            here = key(cwd)
+            for k, folder in folders:
+                if here == k or here.startswith(k.rstrip("\\/") + os.sep):
+                    counts[folder][0] += 1
+                    counts[folder][1] = max(counts[folder][1], when)
+                    break
+    return counts
+
+
 def in_container(root):
     if (root / ".dockerenv").exists() or (root / "run" / ".containerenv").exists():
         return True
@@ -215,6 +270,7 @@ def main():
     ap.add_argument("--probe", action="store_true", help="also check the environment variable names this process sees; "
                     "in a container also the six isolation checks")
     ap.add_argument("--director", help="the DIRECTOR folder, which must be read-only inside a container (--probe)")
+    ap.add_argument("--launch-days", type=int, default=30, help="launch folders: transcripts of the last N days (default 30)")
     ap.add_argument("--home", help=argparse.SUPPRESS)  # tests: another user folder
     ap.add_argument("--managed", help=argparse.SUPPRESS)  # tests: another managed-settings.json
     ap.add_argument("--path-claude", action="append", help=argparse.SUPPRESS)  # tests: these instead of PATH
@@ -331,14 +387,23 @@ def main():
 
     # permissions, env, mode
     profile = setup.profile_arg(command) if command else None
-    if profile in setup.PROFILES:
-        wanted = setup.wanted_permissions(setup.load_guard_rules(), profile)
+    smap = setup.sessions_arg(command) if command else None
+    profiles = profile
+    if profile in setup.PROFILES and smap:
+        try:
+            profiles = sorted(set(setup.session_profiles(pathlib.Path(smap), profile)) | {profile})
+            print(f"INFO                     sessions: {smap} gives {', '.join(profiles)}")
+        except SystemExit as error:
+            item("MISSING", "sessions file", str(error))
+            profiles = None
+    if profile in setup.PROFILES and profiles:
+        wanted = setup.wanted_permissions(setup.load_guard_rules(), profiles)
         have = {k: [p for _, d in data for p in ((d.get("permissions") or {}).get(k) or []) if isinstance(d.get("permissions"), dict)]
                 for k in wanted}
         missing = {k: [p for p in v if p not in have[k]] for k, v in wanted.items()}
         if any(missing.values()):
             item("MISSING", "permissions", ", ".join(f"{len(v)} of permissions.{k}" for k, v in missing.items() if v)
-                 + f" for the {profile} profile")
+                 + f" for the {profile} profile" + (" with the sessions file" if smap else ""))
         else:
             item("CONFIGURED_NOT_VERIFIED", "permissions", f"every {profile} deny / ask rule is set (Claude Code applies "
                  "them; this run does not)")
@@ -403,6 +468,31 @@ def main():
         print(f"INFO                     pause: {'on: ' + (first[0][:200] if first else '') if first is not None else 'off'} ({flag.as_posix()})")
     if command and setup.review_arg(command):
         print("INFO                     review: on; each review is one claude -p call (no money, uses subscription quota)")
+
+    # launch folders: settings are read only where a session starts
+    trees = list(setup.worktrees(repo))
+    counts_by = launch_counts(home, trees, a.launch_days)
+    if counts_by is None:
+        print(f"INFO                     launch folders: no {(home / '.claude' / 'projects').as_posix()}, not checked")
+    else:
+        guarded = {}
+        for tree in trees:
+            local = read_layer(tree / ".claude" / "settings.local.json")
+            shared = read_layer(tree / ".claude" / "settings.json")
+            guarded[tree] = bool(setup.guard_entries(local) or setup.guard_entries(shared))
+            n, last = counts_by.get(tree, [0, ""])
+            print(f"INFO                     launch: {tree.as_posix()} sessions={n}{f' last={last}' if last else ''} "
+                  f"hook_guard={'yes' if guarded[tree] else 'no'}")
+        started = [t.as_posix() for t in trees if counts_by.get(t, [0])[0]] or ["none"]
+        for tree in trees:
+            n = counts_by.get(tree, [0])[0]
+            if guarded[tree] and not n:
+                item("WARN", "settings unread", f"{tree.as_posix()} has a hook_guard entry, but no session started there in "
+                     f"{a.launch_days} days; settings are read only from the launch folder (sessions start in: "
+                     f"{', '.join(started)})")
+            elif n and not guarded[tree] and any(guarded.values()):
+                item("WARN", "launch folder unguarded", f"{n} session(s) started in {tree.as_posix()}, whose settings have "
+                     "no hook_guard entry, while another worktree has one (setup_project_settings.py --session-map)")
     c = counts
     print(f"DOCTOR: enforced={c['ENFORCED']} not_verified={c['CONFIGURED_NOT_VERIFIED']} not_enforced={c['NOT_ENFORCED']} "
           f"missing={c['MISSING']} warn={c['WARN']}")

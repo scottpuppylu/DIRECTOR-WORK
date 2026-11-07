@@ -3257,6 +3257,87 @@ def test_doctor(tmp):
     check("no doctor run printed the fake credential value", all(fake_token not in out for out in outputs), "value leaked")
 
 
+def test_doctor_launch(tmp):
+    """1.3.0 item 9: doctor lists each worktree's hook_guard settings against the sessions that started there (from the
+    transcripts' cwd) and WARNs on settings no session reads; with a --sessions file the permission check is the mildest."""
+    global total
+    folder = tmp / "launch"
+    main_repo, wt, home = folder / "main", folder / "wt", folder / "home"
+    for path in (main_repo, home / ".claude" / "projects"):
+        path.mkdir(parents=True)
+
+    def git_in(repo, *args):
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args], cwd=repo, check=True,
+                       capture_output=True)
+
+    git_in(main_repo, "init", "-q")
+    git_in(main_repo, "commit", "-q", "--allow-empty", "-m", "init")
+    git_in(main_repo, "worktree", "add", "-q", "--detach", str(wt))
+    (main_repo / ".git" / "info" / "exclude").write_text(".claude/settings.local.json\n", encoding="utf-8")
+    main_repo, wt = main_repo.resolve(), wt.resolve()
+    (main_repo / "sub").mkdir()
+
+    def transcript(cwd, name, age_days=0):
+        project = home / ".claude" / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(cwd))
+        project.mkdir(parents=True, exist_ok=True)
+        path = project / f"{name}.jsonl"
+        path.write_text(json.dumps({"type": "queue-operation"}) + "\n" + json.dumps(
+            {"type": "user", "cwd": str(cwd), "timestamp": "2026-11-07T01:00:00.000Z", "sessionId": name}) + "\n",
+            encoding="utf-8")
+        if age_days:
+            old = time.time() - age_days * 86400
+            os.utime(path, (old, old))
+
+    def doc(*args):
+        done = subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "doctor.py"), "--repo", str(main_repo),
+                               "--home", str(home), "--managed", str(folder / "managed.json"), "--path-claude",
+                               str(folder / "none.py"), *[str(x) for x in args]], capture_output=True, encoding="utf-8")
+        return done.stdout + done.stderr
+
+    def check(name, ok, detail):
+        global total
+        total += 1
+        if not ok:
+            failures.append(f"doctor launch {name}: {detail[-700:]}")
+
+    expect("guard the worktree only", "setup_project_settings.py", 0, "--repo", wt, "--only-this", "--guard-profile", "worker",
+           "--apply", says="SET")
+    transcript(main_repo, "s-main")
+    transcript(main_repo / "sub", "s-sub")
+    transcript(wt, "s-old", age_days=90)
+    out = doc()
+    check("counts the main checkout's sessions, a subfolder too", f"launch: {main_repo.as_posix()} sessions=2 last=2026-11-07 "
+          "hook_guard=no" in out, out)
+    check("an old transcript does not count", f"launch: {wt.as_posix()} sessions=0 hook_guard=yes" in out, out)
+    check("settings no session reads are a WARN", re.search(r"WARN +settings unread: " + re.escape(wt.as_posix()), out)
+          is not None and "sessions start in: " + main_repo.as_posix() in out, out)
+    check("the unguarded launch folder is a WARN", re.search(r"WARN +launch folder unguarded: 2 session\(s\) started in "
+          + re.escape(main_repo.as_posix()), out) is not None, out)
+    out = doc("--launch-days", 120)
+    check("--launch-days takes the old one in", f"launch: {wt.as_posix()} sessions=1" in out and "settings unread" not in out, out)
+    transcript(wt, "s-wt")
+    out = doc()
+    check("a session in the guarded worktree clears that WARN", "settings unread" not in out
+          and f"launch: {wt.as_posix()} sessions=1" in out, out)
+    shutil.rmtree(home / ".claude" / "projects")
+    out = doc()
+    check("no transcripts folder: not checked, no WARN", "launch folders: no " in out and "settings unread" not in out
+          and "launch folder unguarded" not in out, out)
+
+    # a sessions file: the permission check takes the mildest decision, as setup wrote it
+    smap = folder / "sessions.json"
+    smap.write_text(json.dumps({"schema_version": 1, "default": "worker", "sessions": {"S-C": "cleaner", "S-D": "director"}}),
+                    encoding="utf-8")
+    expect("setup the map in the main checkout", "setup_project_settings.py", 0, "--repo", main_repo, "--only-this",
+           "--session-map", smap, "--apply", says="SET")
+    out = doc()
+    check("doctor reads the sessions file", "sessions: " in out and "cleaner, director, worker" in out
+          and not re.search(r"MISSING +permissions", out), out)
+    smap.write_text("{", encoding="utf-8")
+    out = doc()
+    check("a broken sessions file is MISSING", re.search(r"MISSING +sessions file: bad sessions file", out) is not None, out)
+
+
 def test_container(tmp):
     """1.1.0 batch 2: tools/container files without Docker. run_worker.sh --dry-run prints the docker command; the
     Dockerfile pins the base image and Claude Code; init_firewall.sh allows only the listed hosts. Docker itself is
@@ -4131,6 +4212,7 @@ def main():
         test_audit_names(tmp)
         test_review(tmp)
         test_doctor(tmp)
+        test_doctor_launch(tmp)
         test_container(tmp)
         test_worker_clone(tmp)
         test_dns_allow(tmp)
