@@ -562,6 +562,27 @@ python -I -X utf8 report_vs_audit.py --report <報告.md> --log <動作紀錄.js
 - 最後一行 `REPORT_VS_AUDIT: PASS|FAIL|NONE claims= ok= failed= session= logs=`；FAIL exit 1，不能跑 exit 2。
 - 只證明「有跑、結果和報告一致」，不證明跑的內容對；動作紀錄沒有 exit code，用 ok / error 判斷。
 
+## choice_reconcile.py（2.1.0，shadow）
+
+```text
+python -I -X utf8 choice_reconcile.py register --db <DIRECTOR>/choice_inbox.sqlite3 --snapshot <一題一版.json>
+python -I -X utf8 choice_reconcile.py ingest   --db <DIRECTOR>/choice_inbox.sqlite3 --export <從選擇頁讀回來的.json>
+python -I -X utf8 choice_reconcile.py plan     --db <DIRECTOR>/choice_inbox.sqlite3 --question CH-01 --revision 2 [--wo WO-012] [--orders <DIRECTOR>/orders]
+python -I -X utf8 choice_reconcile.py advance  --db <DIRECTOR>/choice_inbox.sqlite3 --question CH-01 --revision 2 --from QUEUED --to CLAIMED [--session <名字>] [--result <文字>]
+python -I -X utf8 choice_reconcile.py settle   --db <DIRECTOR>/choice_inbox.sqlite3 --key <來源鍵> --to NOTED|SUPERSEDED|CLOSED [--result <文字>]
+python -I -X utf8 choice_reconcile.py status   --db <DIRECTOR>/choice_inbox.sqlite3 [--now <ISO>] [--late-min 10] [--stuck-min 30] [--json]
+```
+
+- 選擇頁回覆的本機帳本（`docs/12` 第四、六節），一個 SQLite 檔，四個表：`revisions`（每題每版的內容和 hash，登記後不能改）、`inbox`（每筆回覆一列，用來源鍵去重）、`decisions`（每題每版最多採用一筆和它的狀態）、`effects`（固定的 WO 編號、誰接手、結果）。
+- `register` 印 `snapshotHash=sha256:…`（JSON 排序鍵、UTF-8、不含 `snapshotHash` 和 `id`）；同一版內容不同就 `REFUSED`，exit 1。
+- `ingest` 的 JSON：`{"source": "<artifact>", "decisions": [...], "choiceReplies": [...], "notes": [...]}`，每筆是 db 的欄位加 `id`。每筆標 `ok`、`legacy`（2.0 舊題）、`note`、`duplicate`、`conflict`、`conflict-same-submission`、`stale`、`bad-hash`、`bad-choice`、`unknown-revision`；後面這些只記錄，進 `RECEIPT_PENDING`，要回給使用者。題目已關閉的 2.0 舊答案記成 `legacy-closed`，直接 `CLOSED`。再跑一次同一份不會多記（`already=`）。
+- `plan` 在 `BEGIN IMMEDIATE` 裡採用最早一筆 `RECORDED` 回覆，給固定 WO 編號（沒給 `--wo` 就取帳本和 `--orders` 裡最大號加一）；再跑還是同一張（`already`）。沒有可採用的回覆 `NOTHING`，exit 1。
+- `advance` 只照 `RAW → RECORDED → PLANNED → QUEUED → CLAIMED | RECONCILE → RECEIPT_PENDING → CLOSED`（`RECONCILE → CLAIMED | QUEUED`）走；不是一步 exit 2。狀態已經不是 `--from` 就 `LOST`，exit 1：兩個總監同時接手，只有一個成功。
+- `settle` 結案沒被採用的那幾列：留言 `NOTED`、被取代 `SUPERSEDED`、回給使用者後 `CLOSED`；已被採用的要用 `advance`，exit 1。
+- `status` 列出還沒結束的：只有 `ok`、`legacy` 的 `RECORDED` 回覆超過 `--late-min` 分才標「沒交出去」，留言另計 `notes=`；`PLANNED / QUEUED / CLAIMED / RECONCILE` 超過 `--stuck-min` 分標「收到但卡住」。最後一行 `CHOICE_RECONCILE: open= not_handed= stuck= receipts_pending= notes= (shadow: hints only)`，一律 exit 0；沒有帳本也 exit 0。
+- 壞資料、壞 `--now`、壞帳本、資料夾不存在：`ingest`、`plan`、`advance`、`settle`、`status` 只印 `CHOICE_RECONCILE: SHADOW_ERROR <原因>`，exit 0；`register` exit 2。只有 `MOVED`、`PLANNED`、`SETTLED` 代表狀態真的改了。
+- 2.1 是 shadow：只提示、不擋任何工具；讀 db 和寫回條仍由總監用 `ArtifactData` 做，本工具不連網。
+
 ## selftest.py
 
 ```text
