@@ -245,6 +245,7 @@ ANSWER:
 | Monitor 的指令 | 要 claude ≥ 2.1.314 才經過 hook；NOT_VERIFIED | 欄位格式照官方文件假設，沒有在真的 Monitor 上取樣。doctor 依版本報 |
 | worktree 隔離 | **檢查** | doctor 報告，不強制 |
 | OS 層隔離 | 原生 Windows：**沒有**（NOT_ENFORCED） | 指令和 Claude Code 同權限跑，能動到整台機器的檔案；也沒有網路出口管制。doctor 在原生 Windows 上永遠報這一項，所以一定 exit 1 |
+| 容器裡的 worker（`tools/container/`） | **擋**：根目錄和 DIRECTOR 唯讀、沒有 capability、只能連 `api.anthropic.com:443` | 實測 35 案繞路探測都擋下；`.git` 仍可寫（K1）、DNS 外洩擋不到。doctor `--probe --director` 在容器裡查四項 |
 
 刻意沒做、或依使用者決定不做的：
 
@@ -255,7 +256,9 @@ ANSWER:
 | gh token scope | token scope 維持 repo/read:org/gist/workflow，依使用者決定不縮小；防護改靠擋讀取 token 的指令和容器內不放 token |
 | 子程序憑證清洗 | `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1` 依官方設計**保留** `GITHUB_TOKEN`、`GH_TOKEN`、proxy 帳密和 `GIT_CONFIG_*`；原生 Windows 上的行為未證實，`doctor.py --probe` 只列名稱 |
 | OTEL 的 `safety_event` | 2.1.312 起官方不再送，DW 不依賴 |
-| 容器隔離 | 只有在容器裡跑的 worker 有；Desktop 開的 session 不在容器裡 |
+| 容器隔離 | 只有用 `tools/container/run_worker.sh` 開的 worker 有；Desktop 開的 session 不在容器裡 |
+| 容器裡的 `.git` | 整個可寫（`hooks/`、`config`、`worktrees/` 除外）：worker 能動別的 branch 的 ref 和 tag。總監用 `git rev-parse` 取候選 commit |
+| 容器的 DNS | 對 resolver 的 DNS 放行，所以資料可以藏在 DNS 查詢裡送出去；這版沒有白名單 resolver |
 | hook 可以被關掉 | 任一設定層 `disableAllHooks: true` 就全部失效；DW 不能、也不該鎖使用者的設定，doctor 會報 NOT_ENFORCED |
 | 憑證代理 | 沒有。憑證仍在環境變數和檔案裡，DW 只擋「讀」的常見寫法 |
 | 紀錄的外部見證 | 沒有。只有雜湊鏈加上從 commit 取的錨點 |

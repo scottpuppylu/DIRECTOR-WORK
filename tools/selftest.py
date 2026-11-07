@@ -9,6 +9,7 @@ import json
 import os
 import pathlib
 import re
+import shlex
 import shutil
 import signal
 import socket
@@ -1171,9 +1172,9 @@ def test_hook_protect(tmp):
     guard("Write to orders", 2, "Write", director / "orders" / "WO-002-new.md")
     guard("Edit of DIRECTOR_LOG", 2, "Edit", director / "DIRECTOR_LOG.md")
     guard("relative path from the hook cwd", 2, "Write", "../DIRECTOR/orders/WO-001-a.md", cwd=worker)
-    guard("backslashes", 2, "Edit", str(director / "orders" / "WO-001-a.md").replace("/", "\\"))
     guard(".. detour", 2, "Write", director / "orders" / ".." / "orders" / "sub" / "x.md")
-    if os.name == "nt":
+    if os.name == "nt":  # elsewhere a backslash is part of a file name, and that file is not under orders/
+        guard("backslashes", 2, "Edit", str(director / "orders" / "WO-001-a.md").replace("/", "\\"))
         guard("other case on Windows", 2, "Edit", str(director / "ORDERS" / "wo-001-a.md").upper())
     guard("other file in DIRECTOR", 0, "Write", director / "notes.md")
     guard("folder named like orders", 0, "Write", director / "orders-old" / "x.md")
@@ -2949,6 +2950,117 @@ def test_doctor(tmp):
     check("no doctor run printed the fake credential value", all(fake_token not in out for out in outputs), "value leaked")
 
 
+def test_container(tmp):
+    """1.1.0 batch 2: tools/container files without Docker. run_worker.sh --dry-run prints the docker command; the
+    Dockerfile pins the base image and Claude Code; init_firewall.sh allows only the listed hosts. Docker itself is
+    tested by hand (TASK REPORT), not here."""
+    global total
+    box = TOOLS / "container"
+    folder = tmp / "container"
+    wt, director, linked = folder / "wt", folder / "DIRECTOR", folder / "wt-w1"
+    gitc = wt / ".git"
+    for path in (director, gitc / "worktrees" / "w1", gitc / "hooks", linked):
+        path.mkdir(parents=True)
+    (gitc / "config").write_text("[core]\n", encoding="utf-8")
+    (linked / ".git").write_text(f"gitdir: {gitc.as_posix()}/worktrees/w1\n", encoding="utf-8")
+
+    def check(name, ok, detail=""):
+        global total
+        total += 1
+        if not ok:
+            failures.append(f"container {name}: {detail[-600:]}")
+
+    texts = {p.name: p.read_bytes() for p in box.iterdir() if p.is_file()}
+    check("container files have no CR (they run in Linux)", all(b"\r" not in t for t in texts.values()), str(list(texts)))
+    attrs = (TOOLS.parent / ".gitattributes").read_text(encoding="utf-8")
+    check(".gitattributes keeps *.sh and the Dockerfile LF", "*.sh text eol=lf" in attrs and "tools/container/Dockerfile text eol=lf" in attrs, attrs)
+    docker_file = texts["Dockerfile"].decode("utf-8")
+    check("Dockerfile pins the base image by digest",
+          re.search(r"^FROM python:3\.12-slim-bookworm@sha256:[0-9a-f]{64}$", docker_file, re.M) is not None, docker_file[:300])
+    check("Dockerfile pins the Claude Code version and turns off the updater",
+          re.search(r"^ARG CLAUDE_VERSION=\d+\.\d+\.\d+$", docker_file, re.M) is not None and "DISABLE_AUTOUPDATER=1" in docker_file, docker_file)
+    firewall = texts["init_firewall.sh"].decode("utf-8")
+    check("init_firewall.sh: default allowlist is api.anthropic.com only, then REJECT, policy DROP",
+          'ALLOW="${DW_ALLOW_DOMAINS:-api.anthropic.com}"' in firewall and "iptables -P OUTPUT DROP" in firewall
+          and firewall.rstrip().count("-j REJECT") == 1, firewall)
+    check("init_firewall.sh puts /usr/sbin on PATH (iptables is there on Debian; the image PATH has no sbin)",
+          re.search(r'^export PATH="/usr/sbin:/sbin:\$PATH"', firewall, re.M) is not None, firewall[:400])
+    entry = texts["entrypoint.sh"].decode("utf-8")
+    check("entrypoint drops to dw with no capabilities", "--reuid=dw" in entry and "--bounding-set=-all" in entry and "--no-new-privs" in entry, entry)
+
+    spec = importlib.util.spec_from_file_location("doctor_for_container_test", TOOLS / "doctor.py")
+    doctor = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(doctor)
+    bash = doctor.git_bash() if os.name == "nt" else shutil.which("bash")
+    if not bash:
+        print("SKIP run_worker.sh --dry-run cases: no bash (Git Bash on Windows)")
+        return
+
+    def run(*args):
+        argv = [bash, (box / "run_worker.sh").as_posix(), "--dry-run", *[str(a) for a in args]]
+        return subprocess.run(argv, capture_output=True, encoding="utf-8")
+
+    base = ("--worktree", wt.as_posix(), "--director", director.as_posix(), "--git-common", gitc.as_posix())
+    done = run(*base)
+    words = shlex.split(done.stdout) if done.returncode == 0 else []
+    check("--dry-run prints a docker run command", done.returncode == 0 and words[:2] == ["docker", "run"], done.stdout + done.stderr)
+    for flag in ("--rm", "--init", "--read-only", "no-new-privileges"):
+        check(f"docker command has {flag}", flag in words, done.stdout)
+    check("--cap-drop ALL, and only NET_ADMIN NET_RAW SETUID SETGID SETPCAP added (root firewall step; setpriv drops all)",
+          "ALL" in words and words[words.index("--cap-drop") + 1] == "ALL"
+          and sorted(words[i + 1] for i, w in enumerate(words) if w == "--cap-add") == ["NET_ADMIN", "NET_RAW", "SETGID", "SETPCAP", "SETUID"], done.stdout)
+    mounts = [words[i + 1] for i, w in enumerate(words) if w == "-v"]
+    check("main checkout: worktree rw, DIRECTOR ro, its .git/hooks, .git/config and .git/worktrees ro, the Claude volume",
+          mounts == [f"{wt.as_posix()}:/work", f"{director.as_posix()}:/director:ro",
+                     f"{gitc.as_posix()}/hooks:/work/.git/hooks:ro", f"{gitc.as_posix()}/config:/work/.git/config:ro",
+                     f"{gitc.as_posix()}/worktrees:/work/.git/worktrees:ro", "dw-claude-home:/home/dw/.claude"], str(mounts))
+    home_dir = pathlib.Path.home().as_posix()
+    check("no host home, .ssh or gh config is mounted",
+          not any(m.startswith(home_dir + ":") or "/.ssh" in m or "/.config/gh" in m for m in mounts), str(mounts))
+    names = sorted(words[i + 1].split("=")[0] for i, w in enumerate(words) if w == "-e")
+    check("only the listed environment variables, and no GIT_DIR / GIT_WORK_TREE (they would send every git to this repo)",
+          names == ["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", "DW_ALLOW_DOMAINS",
+                    "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_VALUE_1",
+                    "XDG_CACHE_HOME"] and "--env-file" not in words, str(names))
+    check("default allowlist is api.anthropic.com; git never auto-gcs or prunes worktrees",
+          "DW_ALLOW_DOMAINS=api.anthropic.com" in words and "GIT_CONFIG_KEY_0=gc.auto" in words and "GIT_CONFIG_VALUE_0=0" in words
+          and "GIT_CONFIG_KEY_1=gc.worktreePruneExpire" in words and "GIT_CONFIG_VALUE_1=never" in words, done.stdout)
+    linked_base = ("--worktree", linked.as_posix(), "--director", director.as_posix(), "--git-common", gitc.as_posix())
+    done = run(*linked_base, "--login", "--worktree-name", "w1", "--", "claude", "-p", "hi")
+    words = shlex.split(done.stdout) if done.returncode == 0 else []
+    mounts = [words[i + 1] for i, w in enumerate(words) if w == "-v"]
+    def generated(target):  # the text of the generated file run_worker mounts read-only at target
+        source = next((m[:-len(target)] for m in mounts if m.endswith(target)), "")
+        if source and os.name == "nt":
+            source = subprocess.run([bash, "-c", 'cygpath -w "$1"', "-", source], capture_output=True, encoding="utf-8").stdout.strip()
+        return pathlib.Path(source).read_text(encoding="utf-8") if source and pathlib.Path(source).is_file() else None
+    check("linked worktree: .git at /repo-git with hooks/, config and worktrees/ ro, its own record rw",
+          mounts[2:7] == [f"{gitc.as_posix()}:/repo-git", f"{gitc.as_posix()}/hooks:/repo-git/hooks:ro",
+                          f"{gitc.as_posix()}/config:/repo-git/config:ro", f"{gitc.as_posix()}/worktrees:/repo-git/worktrees:ro",
+                          f"{gitc.as_posix()}/worktrees/w1:/repo-git/worktrees/w1"] and len(mounts) == 10, str(mounts))
+    check("linked worktree: a ro /work/.git file points at worktrees/w1, whose ro gitdir points back at /work/.git",
+          generated(":/work/.git:ro") == "gitdir: /repo-git/worktrees/w1\n"
+          and generated(":/repo-git/worktrees/w1/gitdir:ro") == "/work/.git\n", str(mounts))
+    check("--login adds the sign-in hosts; the command comes last",
+          "DW_ALLOW_DOMAINS=api.anthropic.com claude.ai platform.claude.com console.anthropic.com" in words
+          and words[-4:] == ["dw-worker:1.1.0", "claude", "-p", "hi"], done.stdout + done.stderr)
+    done = run(*base, "--worktree-name", "w1")
+    check("--worktree-name on a main checkout exits 2", done.returncode == 2 and "linked worktree" in done.stderr, done.stderr)
+    done = run("--worktree", linked.as_posix(), "--director", director.as_posix(), "--git-common", gitc.as_posix())
+    check("a linked worktree without --worktree-name exits 2", done.returncode == 2 and "<worktree>/.git" in done.stderr, done.stderr)
+    done = run(*base, "--offline")
+    check("--offline: --network none and no allowlist", "--network none" in done.stdout and "DW_ALLOW_DOMAINS" not in done.stdout, done.stdout)
+    done = run(*linked_base, "--worktree-name", "nope")
+    check("an unknown --worktree-name exits 2", done.returncode == 2 and "no worktree named nope" in done.stderr, done.stderr)
+    done = run("--worktree", wt.as_posix(), "--git-common", gitc.as_posix())
+    check("no --director exits 2", done.returncode == 2 and "--director" in done.stderr, done.stderr)
+    bare = folder / "bare.git"
+    bare.mkdir()
+    done = run("--worktree", wt.as_posix(), "--director", director.as_posix(), "--git-common", bare.as_posix())
+    check("a .git without hooks/ and config exits 2 (docker would create them as root)",
+          done.returncode == 2 and "hooks/ and config" in done.stderr, done.stderr)
+
+
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="director_work_selftest_")).resolve()
@@ -2980,6 +3092,7 @@ def main():
         test_audit(tmp)
         test_review(tmp)
         test_doctor(tmp)
+        test_container(tmp)
         test_evidence(tmp)
         test_order_checks(tmp)
         test_preflight(tmp)

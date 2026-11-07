@@ -373,6 +373,80 @@ python -I -X utf8 evidence_record.py verify <紀錄.json> --rerun-recorded   # �
 - 暫存資料夾只有已 commit 的檔，沒有 `.git`、未追蹤檔和被忽略的檔，跑完就刪。這證明「跑的是總監核准的檢查、在候選 commit 的 tree 上」，但檢查仍會執行候選 commit 裡 worker 寫的測試碼，不是沙箱。`--repo` 仍要乾淨，建議用 `git worktree add --detach <目錄> <候選 commit>` 新開（只新增 worktree，不刪別的）。
 - `--rerun-recorded` 是 v0.12 的 `--rerun`：在紀錄的 cwd 跑紀錄寫的指令。能改紀錄的人就能決定跑什麼，所以結論是 `test=recorded-command-passed source=record`，永遠不印 `test=passed`。v0.12 只寫 `--rerun` 的指令現在會 exit 2，改成上面的完整寫法。
 
+## container/（1.1.0）：在容器裡跑 worker
+
+在 WSL 裡用 docker 開一個 worker，給它 OS 層的隔離和網路出口管制。原生 Windows 上這兩項 doctor 都報 NOT_ENFORCED，這是 DW 目前唯一能讓 `isolation` 變成 ENFORCED 的路。
+
+```text
+# 在 WSL 裡（docker 在那裡），一次：
+docker build -t dw-worker:1.1.0 tools/container
+# 每個 worker：
+bash tools/container/run_worker.sh --worktree /mnt/d/.../wt --director /mnt/d/.../DIRECTOR \
+     --git-common /mnt/d/.../repo/.git [--worktree-name <名稱>] [--offline | --login | --allow <host>] [--dry-run] -- claude
+```
+
+- `Dockerfile`：基底 `python:3.12-slim-bookworm` 用 digest 釘住，Claude Code 用 `ARG CLAUDE_VERSION` 釘版本，`DISABLE_AUTOUPDATER=1`。要升級就改這兩行重 build，不會自己更新。
+- `run_worker.sh` 給容器的東西只有：
+  - `/work`：worker 的 worktree，唯一能寫的專案資料夾。
+  - `/director`：DIRECTOR，唯讀。
+  - repo 的 `.git`，可寫（見 K1），其中三處另外唯讀蓋上：
+    - `hooks/` 和 `config`：之後在主機上執行。少了這兩個就 exit 2，免得 docker 用 root 身分在主機上建出來。
+    - `worktrees/`：別的 worktree 的紀錄。它們的 `gitdir` 檔寫的是 Windows 路徑，容器裡看起來不存在，所以容器裡的 `git worktree prune` 會把它們刪掉。
+  - 兩種 worktree：
+    - 主 checkout（不給 `--worktree-name`）：`--git-common` 必須是 `<worktree>/.git`，`.git` 就在 `/work/.git`。
+    - linked worktree（`--worktree-name <名稱>`）：`.git` 掛在 `/repo-git`。主機上 worktree 的 `.git` 檔寫的是 Windows 路徑，Linux 的 git 讀不懂，所以另外唯讀掛一個 `/work/.git` 檔指到 `/repo-git/worktrees/<名稱>`。自己那筆紀錄可寫（index、HEAD、logs），其中 `gitdir` 檔唯讀換成 `/work/.git`，prune 就不會刪它。
+  - docker volume `dw-claude-home` → `/home/dw/.claude`：只放容器裡 Claude Code 自己的登入。
+  - 環境變數只有這些：`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`、`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`、`XDG_CACHE_HOME`、`DW_ALLOW_DOMAINS`，以及 `GIT_CONFIG_COUNT/KEY/VALUE` 設的 `gc.auto=0` 和 `gc.worktreePruneExpire=never`（git 不會自己 gc 或 prune）。不帶 `--env-file`，主機的變數一個都不進去。
+  - 沒有 `GIT_DIR` 和 `GIT_WORK_TREE`：設成全域變數，容器裡每個 git 都會指到這個 repo，連在別的資料夾跑的也是（selftest 在暫存區 `git init` 就壞了）。
+  - 不掛主機的家目錄、`~/.ssh`、gh 設定、AppData，也沒有 docker socket。
+- 權限：`--cap-drop ALL`，只加回 NET_ADMIN、NET_RAW、SETUID、SETGID、SETPCAP，給 entrypoint 以 root 設防火牆用。設完 `setpriv` 換成使用者 `dw`，並清空所有 capability（包括 bounding set，所以要 SETPCAP）和 `no_new_privs`。另有 `--read-only`（根目錄唯讀，`/tmp`、`/run` 是 tmpfs）、`--pids-limit 512 --memory 4g --cpus 4`。
+- 網路（`init_firewall.sh`）：OUTPUT 預設 DROP。只放行 loopback、已建立連線的回應、對 `/etc/resolv.conf` 裡 resolver 的 DNS，以及 `DW_ALLOW_DOMAINS` 的名稱在**開容器當下**解析到的 IPv4 的 TCP 443。其他一律 REJECT；IPv6 一律 DROP。
+  - 預設只有 `api.anthropic.com`。
+  - `--login` 加 `claude.ai`、`platform.claude.com`、`console.anthropic.com`，只有第一次登入要用。
+  - `--allow <host>` 再加別的名稱。
+  - `--offline` 是 `--network none`，完全沒有網路。
+- `--dry-run` 只印出 docker 指令，什麼都不跑。selftest 用它檢查掛載、權限和環境變數。
+
+實測（2026-11-07，WSL2 docker，repo 在 `/mnt/d`，throwaway clone）：
+
+| 項目 | 結果 |
+|---|---|
+| C1 pull 基底（digest） | 7.4 秒 |
+| C2 build（含 apt 和 Claude Code 2.1.317 安裝） | 73 秒；之後只改腳本重 build 3 秒；image 797 MB |
+| C3 開容器到結束（`-- true`） | 有防火牆約 0.95 秒，`--offline` 約 0.59 秒 |
+| C4 容器裡 `git status` | 約 0.6 秒（主機同一份 clone 約 0.09 秒） |
+| C4 容器裡 selftest（`--offline`） | 1304/1304 通過，約 390–430 秒；只在 Windows 跑的案例不算（junction、8.3 短檔名、反斜線等）。主機同一份 clone 1326/1326，約 283 秒 |
+| C5 防火牆和繞路探測 | 35 案全部符合預期（見下） |
+| C8 容器裡 `setup_project_settings.py --runtime-guard --protect-director /director --apply`，再 `doctor.py --probe --director /director` | linked worktree：enforced=5、not_verified=2（audit_log 還沒有紀錄、permissions），not_enforced=0，exit 0。主 checkout 多一項 worktree NOT_ENFORCED（不是 worker 自己的 worktree） |
+
+C5 探測，全部在容器裡以 `dw` 身分跑：
+- 能連：`api.anthropic.com:443`。
+- 連不上（REJECT 或 DROP）：
+  - `curl https://example.com`（0.09 秒內被拒）、`example.com:443`、`1.1.1.1:443`（直接用 IP）、`github.com:443`、`api.anthropic.com:80`
+  - `host.docker.internal:443`、gateway 的 22 和 2375（docker API）
+  - 對 resolver 以外的 DNS（9.9.9.9）、IPv6
+- 做不到：
+  - 以 `dw` 改 iptables、`su` 成 root（沒有 sudo）
+  - 寫 `/` 和 `/usr/local/bin`、寫 `/director` 和 `/director/orders`、掛 tmpfs
+- 都沒有：capability（Inh、Prm、Eff、Bnd、Amb 全 0）、docker socket、`/mnt/c`、`/mnt/d`、`~/.ssh`、`~/.config/gh`、像憑證的變數名稱。
+- `git status`、`git commit`（帶 `-c user.name=... -c user.email=...`）照常可用，主 checkout 和 linked worktree 都實測過；commit 後主機上的 `git worktree list` 照常。
+- 在容器裡真的跑 `git worktree prune`：exit 0，但別的 worktree 的紀錄都還在（寫不進唯讀的 `worktrees/`）；linked worktree 自己的紀錄也還在，`prune -n` 什麼都不列。
+
+已知風險：
+- **K1：`.git` 整個可寫。** 實測在容器裡能做到：
+  - 移動或刪除別的 branch 的 ref、打 tag、改 `packed-refs`、寫 objects。
+  - `hooks/` 和 `config` 唯讀之後，放 hook、設 `core.hooksPath`、加 alias 都擋下了。這三條是「容器裡寫、主機上跑」的路。
+  - `worktrees/` 唯讀之後，容器裡的 `git worktree prune` 刪不掉別的 worktree 的紀錄。代價：容器裡不能 `git worktree add`；`git gc` 有別的 worktree 時會 exit 128（它要改別的 worktree 的 reflog），要 gc 就在主機上跑。
+  - 剩下的會影響 ref 的正確性，但不會在主機上執行東西。總監驗收時用 `git rev-parse <worker 分支>` 取候選 commit，不信 worker 寫的 ref。
+  - worktree 本身的檔案（腳本、`.claude/settings.local.json`）容器裡照樣能改，主機上之後有人跑它就會執行。這和不用容器時一樣，靠 hook_guard 的 G40 和審查。
+- **K2：drvfs 慢，filemode 不同。** `/mnt/d` 上的 git 約慢 6–7 倍。image 設 `core.filemode false`，免得每個檔都顯示權限改了。
+- **K3：Desktop 開的 session 不在容器裡。** 只有用 `run_worker.sh` 開的 CLI worker 有隔離。
+- **K4：容器用的是 account B 的額度。** 第一次要 PO 在容器裡 `/login`。憑證只存在 volume 裡，DW 不碰。
+- **K5：容器裡的 Claude Code 版本另外釘。** 和主機分開升級；doctor 在容器裡報的是容器裡的版本。
+- **K6：容器裡的設定寫的是容器路徑。** 在容器裡跑 `setup_project_settings.py`，hook 指令和 audit log 路徑都是 `/work/...`、`/repo-git/...`，這份 worktree 之後只能在容器裡用。audit log 檔名取自 worktree 資料夾名，容器裡每個 worker 都是 `work.jsonl`：同一個 repo 開兩個容器 worker，會寫進同一份紀錄。這版沒修，一個 repo 一次只開一個容器 worker。
+- **DNS 外洩擋不到。** 對 resolver 的 DNS 要放行，名稱才查得到；在 WSL 上 resolver 是 docker 預設的 `8.8.8.8`。所以資料可以藏在 DNS 查詢裡送出去。要擋，得在容器裡放一個只回答白名單名稱的 resolver，這版沒做。
+- **IP 只在開容器時解析一次。** `api.anthropic.com` 的 IP 在 session 中途換掉，連線就會失敗，要重開容器。
+
 ## selftest.py
 
 ```text

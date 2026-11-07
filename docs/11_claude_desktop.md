@@ -30,6 +30,7 @@
 - 新 session 的權限模式不一定和總監一樣（實測：從提案卡開出的 worker 是 `bypassPermissions`）。開完用 `get_session` 看；不能靠權限詢問擋住越界，要靠工單的 SCOPE / FORBIDDEN、`scope_check.py`，需要時加裝 `hook_guard.py`。`bypassPermissions` 只略過權限詢問，不略過 hook（實測 2026-11-04：worker 資料夾的 `.claude/settings.local.json` 裝了 `hook_guard.py`，`git push`、`git clean -fd` 照樣被擋）。
 - 安裝時加 `--protect-director <DIRECTOR 路徑> --director-worktree <總監的 worktree>`，worker 的 hook 也會擋 Write / Edit 改 `orders/` 和 `DIRECTOR_LOG.md`，總監自己的 worktree 不受影響。這只是防手誤，不是安全隔離：Bash / PowerShell 寫檔、MultiEdit、NotebookEdit 都擋不到，改了工單還是靠 `--dispatch-log` 的雜湊比對查出（`docs/02`）；細節見 `tools/README.md`。
 - 1.1.0 起用 `setup_project_settings.py --runtime-guard` 一次裝好整組防護，再在 worker 的資料夾跑 `tools/doctor.py`，看哪些真的生效（原生 Windows 上隔離一項永遠是 NOT_ENFORCED）。
+- 要 OS 隔離和網路出口管制，worker 改在 WSL 的容器裡開：`tools/container/run_worker.sh`（用法、掛載和實測見 `tools/README.md`）。這種 worker 是 CLI，不是 `start_session` 開的 Desktop session，不會出現在 `list_sessions`；進度只看它的 RESUME_STATE 和分支。第一次要 PO 在容器裡 `/login`（account B），DW 不碰帳密。容器裡的 `.git` 仍有一部分可寫（K1），驗收照樣用 `git rev-parse <worker 分支>` 取候選 commit。
 - worker 的資料夾要先寫好壓縮門檻（`tools/setup_project_settings.py --apply`）。沒寫的資料夾，`get_usage` 會看到上下文視窗 1,000,000。
 - 額度重置後的喚醒（`docs/06b`）是被計時器叫醒的那一輪：只用 `SendMessage` 叫醒既有的 session，不開新的（從這種一輪送訊息是否可行，未實測）。
 
