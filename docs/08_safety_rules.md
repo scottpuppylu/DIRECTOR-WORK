@@ -18,7 +18,7 @@ PO 核准是一次一件、一次一個 session，不推廣到之後的動作。
 
 - 不 force push、不 `reset --hard`、不 `git clean`、不刪 worktree / 分支 / tag。
 - **不用裸 `git stash` / `git stash pop`**：stash 是所有 worktree 共用的，可能拿到別的 session 的修改。暫存用 WIP commit；真的要 stash，用 `git stash push -u -m "<唯一標記>"`，記下 SHA，用 `git stash apply <sha>` 還原。
-- 可選：`tools/setup_project_settings.py --hooks` 裝 hook，自動擋上面幾條和依名稱結束程序；只是安全帶，規則照樣要守。
+- 可選：`tools/setup_project_settings.py --hooks` 裝 hook，提醒上面幾條和依名稱結束程序（`--guard-mode block` 才擋）；只是安全帶，規則照樣要守。
 - 不改凍結的歷史版本、golden 檔、回放資料；新行為用新版本 ID。
 - 不碰 repo 裡未追蹤、不屬於自己工單的資料。
 - 每個 gate checkpoint 本機 commit / tag。若 PO 授權了私人備份推送，用一支會拒絕大檔與疑似秘密、只做一般 push、事後核對遠端 SHA 的腳本；腳本拒絕就停下回報，不繞過。只推自己的分支。

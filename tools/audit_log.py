@@ -8,7 +8,7 @@
 
 One JSON object per line: seq, ts, session_id, agent_id, tool, tool_use_id, kind (result / failure / decision), input
 (the tool input masked by secret_mask.py, at most 500 characters), result (status ok / error / interrupted, or the
-decision deny / ask / pause; with the sha256 and length of the masked output, never the output itself), duration_ms,
+decision deny / ask / remind / pause; with the sha256 and length of the masked output, never the output itself), duration_ms,
 rule (decision lines), prev (the hash of the line before; 64 zeros for seq 1) and hash (sha256 of the line's other
 fields as sorted compact JSON). hook_guard.py --audit FILE adds the decision lines, so a blocked call is on the chain.
 Lines are added under a lock file (FILE.lock, os.open O_CREAT|O_EXCL; busy for 5 s -> exit 1; a lock older than 30 s
@@ -160,7 +160,7 @@ def hook_entry(call):
 
 
 def decision_entry(call, decision, rule):
-    """The fields of a hook_guard decision (deny / ask / pause) and the rule that gave it."""
+    """The fields of a hook_guard decision (deny / ask / remind / pause) and the rule that gave it."""
     return dict(common(call), kind="decision", result={"status": decision}, rule=rule, duration_ms=None)
 
 

@@ -18,7 +18,7 @@ Python 3.9 以上，只用標準函式庫。一律用 `python -I -X utf8 <tool> 
 | `vocabulary.json` | 判定、下一步、RESULT、治理模式、證據等級等固定用詞的唯一來源；`gate_check.py` 讀它 | — | — |
 | `scope_check.py` | 比對實際改動和工單的 SCOPE / FORBIDDEN | 不寫 | 不花 |
 | `evidence_record.py` | 跑驗收指令，留下 exit code、輸出結尾、產物 SHA-256；之後可重新比對 | `run` 寫一份小 JSON，不覆蓋舊的 | 不花 |
-| `hook_guard.py` | PreToolUse hook：擋下 push、`reset --hard`、`git clean`、裸 stash、刪 worktree / 分支 / tag、依名稱結束程序；加 `--protect` 時另擋 Write / Edit 改工單和 `DIRECTOR_LOG.md`；加 `--rules` 時依 `guard_rules.json` 對每個工具呼叫回 deny / ask / 不出聲；加 `--review` 時先把部分 ask 交給第二個模型看；加 `--sessions` 時依 `session_id` 選 director / worker / cleaner | 不寫 | 不花；放行時不輸出。`--review` 每次審查用一次 `claude -p`（不花錢，但吃訂閱額度） |
+| `hook_guard.py` | PreToolUse hook：預設只提醒（`--mode remind`，呼叫照跑），`--mode ask` 交給使用者，`--mode block` 才擋；對象是 push、`reset --hard`、`git clean`、裸 stash、刪 worktree / 分支 / tag、依名稱結束程序；加 `--protect` 時另擋 Write / Edit 改工單和 `DIRECTOR_LOG.md`；加 `--rules` 時依 `guard_rules.json` 對每個工具呼叫回 deny / ask / 不出聲；加 `--review` 時先把部分 ask 交給第二個模型看；加 `--sessions` 時依 `session_id` 選 director / worker / cleaner | 不寫 | 不花；放行時不輸出。`--review` 每次審查用一次 `claude -p`（不花錢，但吃訂閱額度） |
 | `doctor.py` | 報告一個 worktree 實際生效的防護：claude 版本（生效的那個和 PATH 上每一個）、各設定層合併後的 hook、動作紀錄、權限規則、`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`、隔離、worktree、各 worktree 最近有沒有 session 從那裡啟動；每項標 ENFORCED / CONFIGURED_NOT_VERIFIED / NOT_ENFORCED / MISSING | 不寫 | 不花：`claude --version` 只在本機印版本 |
 | `status_gen.py`（1.3.0） | 產生一支工作線的 `status.py`：log 尾段、雜湊、磁碟 GiB、git、最新輸出；總監版再加待決頁計數、未結案工單、未送出訊息、最近 1 小時的動作紀錄、常駐程序 | 只寫 `--out` 那一支（已存在要 `--force`）；產生的 `status.py` 不寫 | 不花 |
 | `poll_hint.py`（1.3.0） | PostToolUse hook：同一個 session 10 分鐘內讀同一份 log 第 3 次時，提示「等完成通知」，不擋；`report` 從動作紀錄算各 session 讀 log 的次數 | hook 只寫暫存資料夾的小狀態檔；`report` 不寫 | 不花 |
@@ -35,7 +35,7 @@ python -I -X utf8 setup_project_settings.py --repo <repo>                     # 
 python -I -X utf8 setup_project_settings.py --repo <repo> --apply             # 寫入
 python -I -X utf8 setup_project_settings.py --config <DIRECTOR>/director_work.json --apply
 python -I -X utf8 setup_project_settings.py --plugins-off a@m,b@m --apply     # PO 勾過的才放
-python -I -X utf8 setup_project_settings.py --hooks --apply                   # 加裝 hook_guard
+python -I -X utf8 setup_project_settings.py --hooks --apply                   # 加裝 hook_guard（提醒模式）
 python -I -X utf8 setup_project_settings.py --protect-director <DIRECTOR> --director-worktree <總監的 worktree> --apply
 python -I -X utf8 setup_project_settings.py --guard-profile worker --director-worktree <總監的 worktree> --apply
 python -I -X utf8 setup_project_settings.py --guard-profile worker --protect-director <DIRECTOR> --director-worktree <總監的 worktree> --apply   # worker 加暫停旗標
@@ -50,13 +50,14 @@ python -I -X utf8 setup_project_settings.py --runtime-guard --protect-director <
 - 設定檔欄位見 `../director_work.example.json`；命令列參數優先於設定檔。
 - 新開 worktree 後要再跑一次（這個檔案不跟著 git 走）。
 - `--hooks`：加一個 `Bash|PowerShell` 的 PreToolUse hook，用目前的 Python 跑 `hook_guard.py`；已有就不重複加。
+- `--guard-mode remind|ask|block`（設定檔 `guard_mode`，1.3.1）：hook 標出的呼叫怎麼處理。預設 `remind`：照跑，附一行提醒；`ask`：交給使用者當場決定；`block`：exit 2 擋下，是明確 opt-in 的嚴格模式。**不要預設把 block 裝到工作線**，工作線的 AI 會因此不敢動手（docs/10 L-045）。`remind` 不寫 `--mode`，其他模式在指令加 `--mode X`；沒給時沿用已裝項目的 `--mode`（沒有就是 remind）。模式不同也算 `MISSING (hooks.PreToolUse command)`。
 - `--protect-director <DIRECTOR>`（設定檔 `protect_director`，隱含 `--hooks`）：hook 的 matcher 改成 `Bash|PowerShell|Write|Edit`，指令加 `--protect "<DIRECTOR>"`。`--director-worktree`（設定檔 `director_worktree`）指定的總監 worktree 維持原本的 hook，總監照常改工單。
 - 已裝的 hook_guard 項目和要的不同時，`--apply` 就地換掉，不另外追加：
   - matcher 或 `--protect` 不同：`MISSING (hooks.PreToolUse matcher)`。
   - 指令不是逐字相同（換了 Python、hook_guard.py 搬走或不存在）：`MISSING (hooks.PreToolUse command)`。
   - 沒給 `--protect-director` 時，沿用已裝項目的 `--protect`（或沒有）。
 - `--guard-profile worker|director`（設定檔 `guard_profile`，隱含 `--hooks`）：hook 的 matcher 改成 `*`（每個工具呼叫都檢查），指令加 `--rules "<tools>/guard_rules.json" --profile <身分>`，並設 `"onFailure": "block"`：hook 自己壞掉（例如規則檔寫壞，exit 1）時擋下，不放行。`--director-worktree` 指定的 worktree 一律用 director。
-  - 每條規則的 `permissions` 依這個身分的結論寫進 `permissions.deny` 或 `permissions.ask`（第二層：這兩種規則在每個權限模式都有效，包括 bypass）。缺的報 `MISSING (permissions.deny)` / `MISSING (permissions.ask)`；`--apply` 只補上缺的，放錯清單的（換身分後）搬過去，其他權限規則不動。
+  - block 模式：每條規則的 `permissions` 依這個身分的結論寫進 `permissions.deny` 或 `permissions.ask`（第二層：這兩種規則在每個權限模式都有效，包括 bypass）。ask 模式全部寫進 `permissions.ask`。remind 模式只寫機密規則（G50）的 `permissions.deny`，其他一條都不寫，舊安裝留下的規則權限從兩個清單拿掉（否則 Claude Code 照樣擋）；ask 模式的 G50 也留在 deny，使用者自己加的權限規則不動。缺的報 `MISSING (permissions.deny)` / `MISSING (permissions.ask)`；`--apply` 只補上缺的，放錯清單的（換身分後）搬過去，其他權限規則不動。
   - profile 不同也算 `MISSING (hooks.PreToolUse matcher)`。沒給 `--guard-profile` 時沿用已裝項目的 `--profile`，和 `--protect` 一樣。
   - worker 的指令再加 `--pause-flag "<旗標檔>"`：`--pause-flag`（設定檔 `pause_flag`），沒給就用 `--protect-director` 的 `<DIRECTOR>/PAUSE`。總監的 worktree 不加：worker 暫停時，總監還要停程序樹。旗標檔不同也算 `MISSING (hooks.PreToolUse matcher)`；沒給 `--guard-profile` 時沿用已裝項目的 `--pause-flag`。
 - `--audit-log <檔案>`（設定檔 `audit_log`，隱含 `--hooks`）：加 PostToolUse 和 PostToolUseFailure 兩個 hook（matcher `*`），執行 `audit_log.py append --log "<檔案>"`；hook_guard 的指令也加 `--audit "<檔案>"`，擋下和詢問也記進同一條鏈。路徑裡的 `{worktree}` 在 setup 時換成 worktree 資料夾名稱；`{container}` 留到 hook 執行時由 audit_log.py 換成容器 ID 前 12 碼（容器外是 `host`）。所以一個 worker、一個容器各一份紀錄，各自一條鏈；其他 `{名稱}` 一律報錯。缺的報 `MISSING (hooks.PostToolUse)` / `MISSING (hooks.PostToolUseFailure)`，`--apply` 就地換掉舊的 audit_log 項目。沒給 `--audit-log` 時沿用已裝項目的 `--audit`。下面的 hook 測試不帶 `--audit`，測試呼叫不會寫進紀錄。
@@ -66,19 +67,25 @@ python -I -X utf8 setup_project_settings.py --runtime-guard --protect-director <
   - 另加 `env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB = "1"`：子程序（Bash、hook 等）拿不到環境變數裡的 Anthropic 和雲端憑證。官方文件寫明它**保留** `GITHUB_TOKEN`、`GH_TOKEN`、proxy 帳密和 `GIT_CONFIG_*`。缺的報 `MISSING (env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB)`。
   - 範本裡的 `<PYTHON>`、`<DW>`、`<PAUSE_FLAG>`、`<AUDIT_LOG>` 由 setup 換成實際路徑；selftest 確認範本和 setup 寫出的內容相同。範本不含 sandbox（原生 Windows 沒有）、`blockWritesOutsideWorkingDirectories`（依使用者決定不啟用）和 WSL2 版本。
   - 寫完用 `doctor.py` 看實際生效的是哪些。
-- 項目到位後，實際跑一次 hook：一個要放行的指令（exit 0）、一個要擋的指令（exit 2），有 `--protect` 時再加一個寫進 `orders/` 的 Write（exit 2）。有 `--profile` 時再加一個每個身分都擋的 MCP 呼叫（`buy_item`，exit 2，證明規則檔有讀到）。放行那次 stdout 也要是空的。結果印在 OK / SET 那行：`(hook test: allow=0 block=2 block-write=2 block-rule=2)`；不對就是 `HOOK_FAIL`，exit 1。
+- 項目到位後，實際跑一次 hook：一個要放行的指令（exit 0）、一個要標出的指令，有 `--protect` 時再加一個寫進 `orders/` 的 Write。有 `--profile` 時再加一個每個身分都標出的 MCP 呼叫（`buy_item`，證明規則檔有讀到）。放行那次 stdout 也要是空的。標出的那幾次依模式要得到：block `2`、ask `ask`（ask JSON）、remind `remind`（exit 0 加提醒 JSON）。結果印在 OK / SET 那行，例如 `(hook test: allow=0 block=remind block-rule=remind)`、block 模式 `(hook test: allow=0 block=2 block-write=2 block-rule=2)`；不對就是 `HOOK_FAIL`，exit 1。
 
 ## hook_guard.py
 
-- Claude Code 每次執行 Bash / PowerShell 前把指令以 JSON 傳進來；違反 `docs/08` 的指令 exit 2，理由印到 stderr，指令不執行。
-- 只在引號外拆 `&&`、`;`、`|`、`$(...)`。引號裡的字串只有被執行時才檢查：`bash` / `sh -c`、`cmd /c`、`powershell -Command`、`eval`、`Invoke-Expression`，以及雙引號裡的 `$(...)`。所以 `grep "git stash"`、`git commit -m "...git push..."` 不會被擋。
+- Claude Code 每次執行 Bash / PowerShell 前把指令以 JSON 傳進來。`docs/08` 列的指令依 `--mode`（1.3.1）處理：
+  - `remind`（預設）：exit 0，指令照跑；stdout 一行 JSON，`systemMessage` 給使用者看、`hookSpecificOutput.additionalContext` 給模型看，都是 `hook_guard reminder [ID]: 原因`，給模型的那份另註明「只是提醒；使用者已在對話裡核准就直接做、不要再問」。使用者核准後 AI 直接執行，不必拆設定。
+  - `ask`：exit 0，stdout 是 `permissionDecision: "ask"` 的 JSON，使用者當場決定。
+  - `block`：明確 opt-in 的嚴格模式，exit 2，理由印到 stderr，指令不執行（1.3.0 以前的行為）。
+  - 暫停旗標（`--pause-flag`）是人明確設下的停止，每個模式都擋；機密規則（G50–G52，類別 `secret`）的 deny 也是每個模式都擋，讀機密不在「核准就執行」的範圍。自動暫停和 `--review` 只在 block 模式作用。
+  - 以下寫「擋」「deny」「exit 2」的地方都是 block 模式；remind / ask 模式同一批呼叫得到提醒或 ask。
+- Bash 的 here-document（`cat <<'EOF' ... EOF`、`<<-`、不加引號的 `EOF`）內容是資料，不是指令，不檢查；不加引號時內容裡的 `$(...)` 和反引號照樣會執行，照樣檢查。找不到結尾那一行的 here-document 照原文檢查，藏不了指令。`<<<` 不是 here-document。
+- 只在引號外拆 `&&`、`;`、`|`、`$(...)`。引號裡的字串只有被執行時才檢查：`bash` / `sh -c`、`cmd /c`、`powershell -Command`、`eval`、`Invoke-Expression`，以及雙引號裡的 `$(...)`。所以 `grep "git stash"`、`git commit -m "...git push..."`、`echo "git push origin"` 不會被擋。
 - 略過 `git -C <dir>`、`-c k=v` 這類全域選項；`C:\...\git.exe` 這種反斜線路徑也認得。
 - 依名稱結束程序：`Stop-Process` 沒帶 `-Id` 一律擋，包括 `Get-Process x | Stop-Process`。
 - 放行：`git stash push -m <標記>`、`stash apply / list / show`、`git clean -n`、`reset --soft`、`taskkill /PID`、`Stop-Process -Id`。
 - 不加 `--rules` 時**沒有涵蓋刪檔**：`rm -rf`、`Remove-Item -Recurse` 照常執行，刪檔照 `docs/08` 和 `docs/06b`「刪檔之前」。
 - 清理員的 session 不裝這個 hook：它要刪 worktree，而 `worktree remove / prune` 會被擋。1.3.0 起可以改用 `--sessions`（下面）的 cleaner。
 - `--sessions <檔>`（1.3.0，要配 `--rules`）：同一個資料夾啟動的 session 共用一份 settings，所以依 hook 輸入的 `session_id` 選 profile。檔案格式見 `templates/guard_sessions.json`：`sessions` 是 `session_id` → `director` / `worker` / `cleaner`（或 `{profile, name}`），`default` 給沒列到的，`protected` 是任何角色都不能刪或搬的路徑。cleaner = worker 但刪除規則不套用。總監的 session 不受暫停旗標影響。檔案讀不到或格式錯就 exit 1。安裝：`setup_project_settings.py --hooks --rules --session-map <檔> --apply`，權限清單取各角色最寬鬆的那個。hook 輸入只有 `session_id`，沒有 session 名稱，所以要先從 Desktop 或對話紀錄查到 id 再寫進檔案。
-- 只是安全帶，不是安全邊界：寫在腳本檔裡或執行時才組出來的指令看不到。PO 核准的 push 由 PO 自己執行，或先移除 hook。
+- 只是安全帶，不是安全邊界：寫在腳本檔裡或執行時才組出來的指令看不到。PO 在對話裡核准 push 之後，AI 直接執行：remind 模式照跑、ask 模式由使用者當場點頭；不必移除 hook。只有 block 模式會擋下已核准的動作，所以工作線預設不裝 block。
 - `--protect <DIRECTOR>`：Write / Edit 的 `file_path` 落在 `<DIRECTOR>/orders/` 底下或就是 `<DIRECTOR>/DIRECTOR_LOG.md` 時 exit 2。相對路徑以 hook 輸入的 `cwd` 為準；兩邊都先 resolve（展開 junction、symlink、`..`），Windows 再展開 8.3 短檔名、不分大小寫比對。
 - Windows 路徑先正規化：去掉 `\\?\` 和 `\\.\` 前綴（磁碟或 UNC 路徑）；NTFS 資料流（`DIRECTOR_LOG.md::$DATA`、`x.md:note`）視為檔案本身。其他裝置路徑（GLOBALROOT、volume GUID）不比對，一律擋下並請改用磁碟或 UNC 路徑。
 - 目標或它的上層資料夾已存在時，再用檔案識別（磁碟序號＋檔案編號）和 `DIRECTOR_LOG.md`、`orders/` 底下的每個檔案和資料夾比對，所以同一個物件換個名字（UNC 別名、既有檔案的 hardlink）也會擋下。
@@ -125,7 +132,7 @@ hook_guard.py --rules <tools>/guard_rules.json --profile worker|director [--prot
 | G52 | 機密 | deny | deny | 印出 token 或密碼的指令：`gh auth token`、`gh auth status --show-token`、`git credential fill`、credential helper 的 `get`、`aws configure get`、`aws configure export-credentials`、`aws sts get-session-token`、`az account get-access-token`、`gcloud auth print-*-token`、`kubectl config view --raw`、`security find-*-password -w` |
 
 - worker 的刪除是 deny，訊息會說下一步：把可刪清單（路徑、大小、原因）送給總監或清理員。
-- push 對總監也是 deny：沒加 `--rules` 時 `git push` 本來就對每個人擋（PO 自己執行），規則檔沿用。
+- block 模式下 push 對總監也是 deny：沒加 `--rules` 時 `git push` 本來就對每個人標出，規則檔沿用。PO 核准的 push 要在 block 模式下執行，就改用 remind 或 ask 模式；1.3.1 起預設就是 remind。
 - G50–G52 對總監也是 deny：讀到的機密會留在對話紀錄裡，誰讀都一樣。需要憑證時回報要哪一個、做什麼用。
 - G50 只看讀取工具；寫 `.credentials.json` 仍由 G40 處理。
 - G50–G52 擋不到的（寫進限制）：`grep -r` 不指定檔案時掃到 `.env`；`python -c`、`node -e` 這類直譯器讀檔；`$X` 間接展開的變數名；指令輸出本身帶出的 token（例如程式把 token 印到 log）。輸出遮罩屬於下一批。
@@ -136,7 +143,7 @@ hook_guard.py --rules <tools>/guard_rules.json --profile worker|director [--prot
 
 ### `--audit`（1.1.0）
 
-- `--audit <檔案>`：hook_guard 的每個 deny、ask 和暫停擋下都用 `audit_log.py` 加一行 `kind=decision`，`rule` 是規則 ID（G..）、`builtin`（沒有規則 ID 的內建擋法）或 `PAUSE`。放行不寫（放行的呼叫由 PostToolUse hook 記）。
+- `--audit <檔案>`：hook_guard 的每個 deny、ask、remind 和暫停擋下都用 `audit_log.py` 加一行 `kind=decision`（`result.status` 是 `deny` / `ask` / `remind` / `pause`），`rule` 是規則 ID（G..）、`builtin`（沒有規則 ID 的內建擋法）或 `PAUSE`。放行不寫（放行的呼叫由 PostToolUse hook 記）。
 - 紀錄寫不進去（鎖被占、磁碟滿、最後一行壞掉）時照樣做原本的決定，不會因此放行或多擋。
 
 ### `--review`（1.1.0）
@@ -165,7 +172,7 @@ hook_guard.py --rules <tools>/guard_rules.json --profile worker --pause-flag <DI
   - `allow_write`：Write / Edit / MultiEdit / NotebookEdit 只放行進度檔 `**/RESUME_STATE.md`、`**/TASK_REPORT*.md`。
   - `allow_shell`：每個身分一組 regex。Bash / PowerShell 沒有 `run_in_background`、整行沒有把輸出寫到檔案（不在引號裡的 `>`、`>>`、`2>`、`&>`、`>|`、`>(...)`，`$(...)` 裡的也算；`2>&1`、`>&2` 只是合併串流，照常放行），而且拆出的每個子指令（`名稱 參數...`，不分大小寫）都完整比對到其中一條才放行。預設放行 `git status/log/diff/show/rev-parse`（不可帶 `--output`、`-c`）、`tasklist`、`Get-Process`、`ps`、排序和篩選輸出的指令、`pause_ctl.py status|procs`；`pause_ctl.py off` 只有 director 放行。
 - 被擋的：其他 Bash / PowerShell、背景執行、Monitor、Agent、Workflow、其他寫檔、MCP 寫入動作、`start_session`。
-- 自動暫停（規則檔 `auto_pause`）：worker 在 600 秒內被擋 5 次（規則擋下和內建擋法都算），第 5 次就由 hook 自己寫入旗標，第一行是 `PAUSE by hook_guard at 時間: auto: 5 denies in 600s (G02 G50 ...)`，擋下訊息後面多一行 `AUTO-PAUSED ...`。次數記在旗標旁的 `<旗標>.denies`，暫停後清空；已經暫停時的擋下不再計數。director 是 `null`，不開。解除照舊由總監跑 `pause_ctl.py off`，暫停中的 worker 只放行 `pause_ctl.py status`。`.denies` 讀寫失敗時照常擋下、不暫停，不會卡住。setup 的 hook 測試不帶 `--pause-flag`，測試的擋下不計數。`auto_pause` 格式錯（缺身分、次數或秒數不是正整數）：exit 1。
+- 自動暫停（規則檔 `auto_pause`，只在 `--mode block`）：worker 在 600 秒內被擋 5 次（規則擋下和內建擋法都算），第 5 次就由 hook 自己寫入旗標，第一行是 `PAUSE by hook_guard at 時間: auto: 5 denies in 600s (G02 G50 ...)`，擋下訊息後面多一行 `AUTO-PAUSED ...`。次數記在旗標旁的 `<旗標>.denies`，暫停後清空；已經暫停時的擋下不再計數。director 是 `null`，不開。解除照舊由總監跑 `pause_ctl.py off`，暫停中的 worker 只放行 `pause_ctl.py status`。`.denies` 讀寫失敗時照常擋下、不暫停，不會卡住。setup 的 hook 測試不帶 `--pause-flag`，測試的擋下不計數。`auto_pause` 格式錯（缺身分、次數或秒數不是正整數）：exit 1。
 - 給了 `--pause-flag` 卻沒給 `--rules`，或規則檔沒有 `pause` 段、`pause` 段格式錯：exit 1（配合 `onFailure: block` 等於全部擋下）。
 - 限制：旗標只擋**新的**工具呼叫，已經在跑的程式（背景批次、子程序）照跑，要依 `docs/02` 停整條程序樹，再用 `pause_ctl.py procs` 確認；含空白的路徑在 allowlist regex 裡比不到 `\S+`，會被擋（寧可多擋）。
 
@@ -244,9 +251,9 @@ python -I -X utf8 doctor.py --probe --director <DIRECTOR>        # 容器裡：�
   - < 2.1.314：Monitor 的指令不經過 hook → `Monitor commands: NOT_ENFORCED`。
   - PATH 上任何一個 < 2.1.295 → `WARN`（PATH 順序一變就會用到它）。要不要移除或更新由 PO 決定，doctor 不動它。
 - 設定層：使用者（`~/.claude/settings.json`）、專案（`.claude/settings.json`）、本機（`.claude/settings.local.json`）、managed（Windows `C:/Program Files/ClaudeCode/managed-settings.json`，其他 `/etc/claude-code/managed-settings.json`）。hook 和權限清單各層相加；`env` 的鍵和 `defaultMode` 取最高一層的值；任一層 `disableAllHooks: true` → 所有 hook 項目 NOT_ENFORCED。
-- `hook_guard`：要有 matcher `*`、`onFailure: block`、`--profile` 的項目，再實際跑一次（和 setup 的 hook 測試相同，不帶 `--audit`、`--pause-flag`、`--review`）。
+- `hook_guard`：要有 matcher `*`、`onFailure: block`、`--profile` 的項目，再實際跑一次（和 setup 的 hook 測試相同，依 `--mode` 判斷，不帶 `--audit`、`--pause-flag`、`--review`）。ENFORCED 那行寫出模式（`mode remind` 等）。
 - `audit_log`：PostToolUse 和 PostToolUseFailure 都要指到同一份紀錄；紀錄存在就跑 `verify`。
-- `permissions`：規則檔對這個 profile 產生的每一條都在 → CONFIGURED_NOT_VERIFIED（由 Claude Code 執行，doctor 無法實測）。`defaultMode` 是 `bypassPermissions` → WARN。
+- `permissions`：依 hook 的 `--mode` 算要的清單。規則檔對這個 profile 產生的每一條都在 → CONFIGURED_NOT_VERIFIED（由 Claude Code 執行，doctor 無法實測）。remind 模式只要機密規則（G50）的 deny，就寫 `remind mode: only the secret rules' deny is written`；清單裡還留著這個模式不要的規則權限（例如從 block 換成 remind 卻沒重跑 setup）→ MISSING，因為那條照樣會擋。`defaultMode` 是 `bypassPermissions` → WARN。
 - `env_scrub`：設定在但沒加 `--probe` → CONFIGURED_NOT_VERIFIED。`--probe` 只看**變數名稱**：名稱像憑證（token、secret、password、api key 等），或 proxy 變數的值帶 `帳號:密碼@`，就 NOT_ENFORCED 並列出名稱。**值一律不印**；selftest 用一個假的 token 值確認輸出裡沒有它。SCRUB 開著時 `GITHUB_TOKEN`、`GH_TOKEN`、proxy 帳密照樣會被列出，因為官方設計就保留它們。
 - `isolation`：不在容器裡 → NOT_ENFORCED。在容器裡（`/.dockerenv`、`/run/.containerenv` 或 cgroup 顯示 docker / containerd / kubepods / libpod）→ CONFIGURED_NOT_VERIFIED；加 `--probe` 再查六項，六項都過才 ENFORCED：根目錄寫不進去、`--director` 的資料夾寫不進去、連不上 `example.com:443`、`example.com` 解析不到（DNS 白名單）、`.git` 是 worker 自己的（K1）、沒有像憑證的變數名稱。`--probe` 在容器裡會試連一次外部網路、查一次 DNS。
   - K1：`run_worker.sh` 會設 `DW_GIT_MODE`。`--git-common` 開的容器（`DW_GIT_MODE=shared`，或 linked worktree，它的 `.git` 就是 repo 的）不加 `--probe` 也直接報 NOT_ENFORCED（K1 shared .git）。`worker_clone.sh` 做的 clone（`DW_GIT_MODE=clone`、不是 linked worktree）在 `worktree` 那一項算 ENFORCED（the worker's own clone）。容器外不看 `DW_GIT_MODE`。
@@ -497,13 +504,15 @@ C5 探測，全部在容器裡以 `dw` 身分跑：
 ## usage_mix.py（1.3.0）
 
 ```text
-python -I -X utf8 usage_mix.py --since 2026-11-01 [--until ...] [--session <id 前綴>] [--project-dir <資料夾名>] [--all] [--json] [--check]
+python -I -X utf8 usage_mix.py --since 2026-11-01 [--until ...] [--session <id 前綴>] [--project-dir <資料夾名>] [--all] [--by-session] [--json] [--check]
 ```
 
 - 讀 `~/.claude/projects` 的對話紀錄（含 subagent），每次呼叫算額度等價量：輸入 × 1 + 快取寫入 × 1.25 + 快取讀取 × 0.1 + 輸出 × 5（每 token），平分給它選的工具呼叫。同一個 `message.id` 拆成幾行的先合併（L-035），分叉或續接的 session 重複的只算一次。
 - 印五大類的比例和門檻（讀和查 ≤ 30%、實際動手 ≥ 30%）、細類、各 session 的比例，最後一行 `RESULT ON_TARGET|OFF_TARGET`；`--check` 沒達到就 exit 1。
+- shell 指令依序歸類（1.3.1 把原本的 `shell_other` 拆開）：`wait_board`、`render`、`engine_run`、`log_check`、`git`、`disk`；python 執行（`python`、`py -3`、`pytest`、`uv run`、直接跑 `.py`）是 `python_other`，帶審查工具名的是 `review_tools`；`build`（make、cmake、msbuild、dotnet、cargo、npm、node、gcc、pip 等編譯建置）；`list_files`；`shell_search`（grep、rg、findstr、Select-String）；`file_ops`（cat、sed、cp、mv、mkdir、rm、echo、Copy-Item、Set-Content 等）；`sys_query`（程序、版本、環境變數、網路）；剩下的才是 `shell_other`。`build` 和 `python_other` 算實際動手，其他算讀和查。
+- `--by-session`（1.3.1）：每個 session 一行（它的 subagent 算在它身上），依花費排序：佔總量比例、呼叫數、等價量、五大類比例、花最多的五個細類。`--top N` 只列前 N 個、不含細類。
 - RESTART 行：新 session 第一次呼叫的上下文、新 session 或壓縮後到第一個實際動手的呼叫數和等價量、依上下文大小的單價，和由這些算出的損益兩平點（`docs/04`「開新 session 划不划算」）。
-- `--patterns <檔>` 加專案自己的字（執行檔、審查工具名），讓 shell 指令歸到對的類別；專案字只放在那個檔，不進工具。
+- `--patterns <檔>` 加專案自己的字（執行檔、審查工具名、建置指令），讓 shell 指令歸到對的類別；鍵可以是 `wait_board`、`render`、`engine_run`、`log_check`、`git`、`disk`、`review_tools`、`list_files`、`review_read`、`engine_mcp`、`python`、`build`、`shell_search`、`file_ops`、`sys_query`。專案字只放在那個檔，不進工具。
 - 只印比例和數字，不印訊息內容。紀錄格式不是官方介面，改版後可能讀不到；讀不到就印 UNKNOWN，不印 0。
 
 ## status_gen.py（1.3.0）

@@ -17,19 +17,28 @@ CLAUDE_CODE_AUTO_COMPACT_WINDOW was confirmed to work. Both are written.
 Plugins: "enabledPlugins": {"name@marketplace": false} turns off a USER-installed plugin for this project only.
 Plugins that come from the desktop app / claude.ai: whether this setting turns them off is not tested.
 --hooks also adds a PreToolUse hook that runs hook_guard.py (next to this file) before every Bash / PowerShell call.
+--guard-mode remind|ask|block (config guard_mode) is what a call the hook flags gets. remind, the default, lets it
+run with a one-line reminder; ask hands it to the user's permission prompt; block (exit 2) is the explicit opt-in
+strict mode. Do not install block on worker lines by default: a guard that stops work the user approved makes the
+agent afraid to act. remind writes no --mode; another mode adds --mode X to the command. Without --guard-mode an
+installed --mode is kept, and an entry without one counts as remind.
 --protect-director DIR makes that hook also cover Write / Edit with --protect DIR (no edits to DIR/orders/** and
 DIR/DIRECTOR_LOG.md); the worktree named by --director-worktree keeps the plain hook. An installed hook_guard entry
 with another matcher or --protect shows MISSING (hooks.PreToolUse matcher); one whose command is not exactly the one
 this copy would write (another Python, a hook_guard.py that moved) shows MISSING (hooks.PreToolUse command). --apply
 replaces it in place. Without --protect-director the installed entry's --protect is kept. A hook that is in place is
-then run twice, on a command it must allow and on one it must block (also a Write into DIR/orders/ when protected);
-a hook that does not answer 0 and 2 is HOOK_FAIL.
+then run twice, on a command it must allow and on one it must flag (also a Write into DIR/orders/ when protected);
+the allowed one must exit 0 with nothing on stdout, the flagged one must give its mode's answer (block: exit 2; ask:
+the ask JSON; remind: exit 0 and the reminder JSON), else HOOK_FAIL.
 --guard-profile worker|director|cleaner (implies --hooks) makes the hook check every tool call (matcher *) against
 guard_rules.json (next to this file) with that profile, and sets "onFailure": "block" so a hook that breaks blocks
-instead of letting the call through. The --director-worktree always gets the director profile. Each rule's
-"permissions" go into permissions.deny or permissions.ask, by the profile's decision for that rule (second layer:
-deny and ask rules hold in every permission mode); a rule permission sitting in the other list is moved. Missing
-ones show MISSING (permissions.deny / permissions.ask). Without --guard-profile an installed entry keeps its
+instead of letting the call through. The --director-worktree always gets the director profile. In block mode each
+rule's "permissions" go into permissions.deny or permissions.ask, by the profile's decision for that rule (second
+layer: deny and ask rules hold in every permission mode); a rule permission sitting in the other list is moved. In
+ask mode they all go into permissions.ask. In remind mode none is written, and the ones an earlier install wrote are
+taken out of both lists (a permission rule would stop the call the hook only reminds of). The exception: a "secret"
+rule (G50) the profile denies keeps its permissions.deny in every mode, as hook_guard denies it in every mode. Missing or stray ones show
+MISSING (permissions.deny / permissions.ask). Without --guard-profile an installed entry keeps its
 --profile, like --protect. The hook test then also asks for an empty stdout on the allowed call and runs one MCP
 call every profile denies (G30), which shows the rules file loaded.
 --session-map FILE (config session_map; implies --guard-profile worker as the fallback) is for one settings file that
@@ -81,17 +90,19 @@ POST_EVENTS = ("PostToolUse", "PostToolUseFailure")
 HOOK = {"matcher": "Bash|PowerShell", "hooks": [{"type": "command", "command":
         f'"{pathlib.Path(sys.executable).as_posix()}" -I -X utf8 "{GUARD.as_posix()}"'}]}
 PROFILES = ("worker", "director", "cleaner")
+MODES = ("remind", "ask", "block")
 STRICTNESS = {"none": 0, "ask": 1, "deny": 2}
 
 
-def hook_entry(protect, profile=None, pause=None, audit=None, review=False, sessions=None):
+def hook_entry(protect, profile=None, pause=None, audit=None, review=False, sessions=None, mode="remind"):
     """The PreToolUse entry wanted: the plain HOOK, one that also covers Write / Edit for a protected DIRECTOR,
     or, with a guard profile, one that checks every tool call against the rules file and blocks when it fails.
-    With audit, hook_guard also logs its decisions there."""
+    With audit, hook_guard also logs its decisions there. A mode other than remind adds --mode."""
     log = f' --audit "{audit.as_posix()}"' if audit else ""
+    base = HOOK["hooks"][0]["command"] + (f" --mode {mode}" if mode and mode != "remind" else "")
     if not protect and not profile:
-        return {"matcher": HOOK["matcher"], "hooks": [{"type": "command", "command": HOOK["hooks"][0]["command"] + log}]} if log else HOOK
-    command = HOOK["hooks"][0]["command"] + (f' --protect "{protect.as_posix()}"' if protect else "")
+        return {"matcher": HOOK["matcher"], "hooks": [{"type": "command", "command": base + log}]} if base + log != HOOK["hooks"][0]["command"] else HOOK
+    command = base + (f' --protect "{protect.as_posix()}"' if protect else "")
     if not profile:
         return {"matcher": "Bash|PowerShell|Write|Edit", "hooks": [{"type": "command", "command": command + log}]}
     command += f' --rules "{RULES.as_posix()}" --profile {profile}' + (f' --pause-flag "{pause.as_posix()}"' if pause else "")
@@ -162,26 +173,38 @@ def session_profiles(path, fallback):
     return sorted(set(named) | {data.get("default", fallback)})
 
 
-def wanted_permissions(rules, profile):
+def rule_permissions(rules):
+    """Every permission any rule names: the ones this tool writes, moves and takes out."""
+    return {item for rule in rules["rules"] for item in rule.get("permissions", [])}
+
+
+def wanted_permissions(rules, profile, mode="block"):
     """{"deny": [...], "ask": [...]}: each rule's permissions under the list its decision for this profile names.
     For a list of profiles (one settings file for several sessions, --session-map) the mildest decision of them
     counts: a permission rule holds for every session of the folder, so it may not be stricter than the hook is for
-    any of them."""
+    any of them. Ask mode puts every deny under ask; remind mode wants none (the hook only reminds). A denied rule of
+    a hook_guard.HARD_DENY category (secret) stays under deny in every mode."""
     lists = {"deny": [], "ask": []}
     guard = load_guard()
     profiles = [profile] if isinstance(profile, str) else list(profile)
     for rule in rules["rules"]:
         decision = min((guard.rule_decision(rule, p) for p in profiles), key=STRICTNESS.get)
+        if decision == "deny" and rule.get("category") in guard.HARD_DENY:
+            pass
+        elif mode == "remind":
+            continue
+        elif mode == "ask" and decision == "deny":
+            decision = "ask"
         for item in rule.get("permissions", []):
             if decision in lists and item not in lists[decision]:
                 lists[decision].append(item)
     return lists
 
 
-def permission_problems(data, perms):
-    """Lists that miss a wanted rule permission, or hold one that belongs in the other list."""
+def permission_problems(data, perms, ours=None):
+    """Lists that miss a wanted rule permission, or hold one of ours (rule_permissions) that does not belong there."""
     have = data.get("permissions") if isinstance(data.get("permissions"), dict) else {}
-    ours = {p for items in perms.values() for p in items}
+    ours = {p for items in perms.values() for p in items} if ours is None else set(ours)
     miss = []
     for name, items in perms.items():
         current = have.get(name) if isinstance(have.get(name), list) else []
@@ -191,13 +214,15 @@ def permission_problems(data, perms):
     return miss
 
 
-def install_permissions(data, perms):
-    """Append missing rule permissions; move a rule permission out of the list its decision does not name."""
+def install_permissions(data, perms, ours=None):
+    """Append missing rule permissions; take one of ours out of a list that does not name it."""
     if not isinstance(data.get("permissions"), dict):
         data["permissions"] = {}
     have = data["permissions"]
-    ours = {p for items in perms.values() for p in items}
+    ours = {p for items in perms.values() for p in items} if ours is None else set(ours)
     for name, items in perms.items():
+        if name not in have and not items:
+            continue
         current = have.get(name) if isinstance(have.get(name), list) else []
         current = [p for p in current if p not in ours or p in items]
         have[name] = current + [p for p in items if p not in current]
@@ -260,6 +285,12 @@ def profile_arg(command):
     return found.group(1) if found else None
 
 
+def mode_arg(command):
+    """The --mode of a hook_guard command; remind when it has none (the hook's default)."""
+    found = re.search(r"--mode (\w+)", command)
+    return found.group(1) if found else "remind"
+
+
 def sessions_arg(command):
     found = re.search(r'--sessions "([^"]*)"', command)
     return found.group(1) if found else None
@@ -288,12 +319,32 @@ def hook_entry_matches(entry, want, exact=True):
             and protect_arg(command) == protect_arg(wanted) and profile_arg(command) == profile_arg(wanted)
             and pause_arg(command) == pause_arg(wanted) and audit_arg(command) == audit_arg(wanted)
             and review_arg(command) == review_arg(wanted) and sessions_arg(command) == sessions_arg(wanted)
+            and mode_arg(command) == mode_arg(wanted)
             and hook.get("onFailure") == want["hooks"][0].get("onFailure") and (not exact or command == wanted))
 
 
+def answer(done):
+    """What one hook run gave: 2, 0 (nothing on stdout), "ask", "remind", "0+stdout" or another exit code."""
+    if done.returncode != 0 or not done.stdout.strip():
+        return done.returncode
+    try:
+        out = json.loads(done.stdout)
+        hso = out.get("hookSpecificOutput") or {}
+    except (ValueError, AttributeError):
+        return "0+stdout"
+    if hso.get("permissionDecision") == "ask":
+        return "ask"
+    if str(hso.get("additionalContext", "")).startswith("hook_guard reminder") and "permissionDecision" not in hso:
+        return "remind"
+    return "0+stdout"
+
+
+FLAGGED = {"block": 2, "ask": "ask", "remind": "remind"}
+
+
 def hook_works(command, protect):
-    """Run an installed hook_guard command on calls it must allow (exit 0, nothing on stdout) and block (exit 2):
-    (ok, detail) (H04)."""
+    """Run an installed hook_guard command on calls it must allow (exit 0, nothing on stdout) and flag (its mode's
+    answer: exit 2, the ask JSON or the reminder JSON): (ok, detail) (H04)."""
     try:
         argv = shlex.split(command)
     except ValueError as error:
@@ -303,17 +354,18 @@ def hook_works(command, protect):
             at = argv.index(option)
             del argv[at:at + 2]
     argv = [w for w in argv if w != "--review"]  # a test call never starts a second-model review
+    flag = FLAGGED.get(mode_arg(command), 2)
     calls = [("allow", {"tool_name": "Bash", "tool_input": {"command": "git status"}}, 0),
-             ("block", {"tool_name": "Bash", "tool_input": {"command": "git push"}}, 2)]
+             ("block", {"tool_name": "Bash", "tool_input": {"command": "git push"}}, flag)]
     if protect:
-        calls.append(("block-write", {"tool_name": "Write", "tool_input": {"file_path": str(pathlib.Path(protect) / "orders" / "hook-test.md")}}, 2))
+        calls.append(("block-write", {"tool_name": "Write", "tool_input": {"file_path": str(pathlib.Path(protect) / "orders" / "hook-test.md")}}, flag))
     if profile_arg(command):
-        calls.append(("block-rule", {"tool_name": "mcp__hook_test__buy_item", "tool_input": {}}, 2))
+        calls.append(("block-rule", {"tool_name": "mcp__hook_test__buy_item", "tool_input": {}}, flag))
     results, ok = [], True
     for name, call, code in calls:
         try:
             done = subprocess.run(argv, input=json.dumps(call), capture_output=True, text=True, encoding="utf-8", timeout=60)
-            got = done.returncode if code != 0 or not done.stdout.strip() else "0+stdout"
+            got = answer(done)
         except (OSError, subprocess.TimeoutExpired) as error:
             got = type(error).__name__
         results.append(f"{name}={got}")
@@ -344,11 +396,12 @@ def tested(wt, label, want):
         return 0
     command = want["hooks"][0]["command"]
     ok, detail = hook_works(command, protect_arg(command))
-    print(f"{label:11} {wt} (hook test: {detail})" if ok else f"HOOK_FAIL   {wt} (hook test: {detail}; expected allow=0 block=2)")
+    print(f"{label:11} {wt} (hook test: {detail})" if ok else
+          f"HOOK_FAIL   {wt} (hook test: {detail}; expected allow=0 block={FLAGGED.get(mode_arg(command), 2)})")
     return 0 if ok else 1
 
 
-def wanted_missing(data, window, plugins_off, hooks=False, want=None, perms=None, audit=None, scrub=False):
+def wanted_missing(data, window, plugins_off, hooks=False, want=None, perms=None, audit=None, scrub=False, ours=None):
     miss = []
     if data.get("autoCompactWindow") != window:
         miss.append("autoCompactWindow")
@@ -367,7 +420,7 @@ def wanted_missing(data, window, plugins_off, hooks=False, want=None, perms=None
     if audit:
         miss += [f"hooks.{event}" for event in POST_EVENTS if post_entry(audit) not in audit_entries(data, event)]
     if perms:
-        miss += permission_problems(data, perms)
+        miss += permission_problems(data, perms, ours)
     return miss
 
 
@@ -390,6 +443,9 @@ def main():
                     "as the fallback; config: session_map)")
     ap.add_argument("--pause-flag", help="pause flag file for the worker hook (default DIR/PAUSE of --protect-director; "
                     "config: pause_flag)")
+    ap.add_argument("--guard-mode", choices=MODES, help="what a flagged call gets: remind (default: it runs, with a "
+                    "one-line reminder), ask (the user decides) or block (exit 2; explicit opt-in strict mode; config: "
+                    "guard_mode)")
     ap.add_argument("--guard-review", action="store_true", help="give guarded hooks --review: asks of the rules' review "
                     "categories go to a second model first, which uses claude -p quota (config: guard_review)")
     ap.add_argument("--audit-log", help="action log for audit_log.py hooks; {worktree} becomes the worktree folder "
@@ -447,6 +503,9 @@ def main():
         except ValueError as error:
             sys.exit(f"audit_log: {error}")
     review = a.guard_review or cfg.get("guard_review") is True
+    mode = a.guard_mode or cfg.get("guard_mode")
+    if mode is not None and mode not in MODES:
+        sys.exit(f"guard_mode {mode!r} is not one of {', '.join(MODES)}")
     hooks = a.hooks or cfg.get("hooks") is True or protect is not None or profile is not None or bool(audit)
 
     if a.backup_dir or cfg.get("backup_dir"):
@@ -458,7 +517,7 @@ def main():
           f"hooks={'on' if hooks else 'off'}{f' protect={protect.as_posix()}' if protect else ''}"
           f"{f' guard_profile={profile}' if profile else ''}"
           f"{f' session_map={smap.as_posix()} ({chr(44).join(map_profiles)})' if smap else ''}{f' pause_flag={pause.as_posix()}' if pause else ''}"
-          f"{f' audit_log={audit}' if audit else ''}{' guard_review=on' if review else ''}{' runtime_guard=on' if runtime else ''} "
+          f"{f' audit_log={audit}' if audit else ''}{f' guard_mode={mode}' if mode else ''}{' guard_review=on' if review else ''}{' runtime_guard=on' if runtime else ''} "
           f"mode={'APPLY' if a.apply else 'REPORT'}")
     home = pathlib.Path.home().resolve()
     targets = [repo] if a.only_this else list(worktrees(repo))
@@ -496,6 +555,7 @@ def main():
         wt_audit = pathlib.Path(audit.replace("{worktree}", wt.name)).resolve() if audit else None
         kept_audit = audit_arg(installed) if installed else None
         wt_audit_arg = wt_audit or (pathlib.Path(kept_audit) if kept_audit else None)
+        wt_mode = mode or (mode_arg(installed) if installed else "remind")
         want = None
         if protect is not None or wt_profile:
             wt_protect = None if is_director else protect
@@ -503,16 +563,18 @@ def main():
                 wt_protect = pathlib.Path(protect_arg(installed))
             wt_pause = pause or (wt_protect / "PAUSE" if wt_protect else None) if wt_profile == "worker" else None
             want = hook_entry(wt_protect, wt_profile, wt_pause, wt_audit_arg, review or bool(installed and review_arg(installed)),
-                              smap)
+                              smap, wt_mode)
         if hooks and want is None:  # without --protect-director / --guard-profile the installed entry keeps both
             kept = protect_arg(installed) if installed else None
             kept_profile = profile_arg(installed) if installed else None
             kept_pause = pause_arg(installed) if installed else None
             want = hook_entry(pathlib.Path(kept) if kept else None, kept_profile if kept_profile in PROFILES else None,
                               pathlib.Path(kept_pause) if kept_pause else None, wt_audit_arg,
-                              review or bool(installed and review_arg(installed)))
-        perms = wanted_permissions(rules, sorted(set(map_profiles) | {wt_profile}) if smap else wt_profile) if wt_profile else None
-        miss = wanted_missing(data, window, plugins_off, hooks, want, perms, wt_audit, runtime)
+                              review or bool(installed and review_arg(installed)), mode=wt_mode)
+        perms = (wanted_permissions(rules, sorted(set(map_profiles) | {wt_profile}) if smap else wt_profile, wt_mode)
+                 if wt_profile else None)
+        ours = rule_permissions(rules) if rules else None
+        miss = wanted_missing(data, window, plugins_off, hooks, want, perms, wt_audit, runtime, ours)
         if not miss:
             problems += tested(wt, "OK", want if hooks else None)
             continue
@@ -536,14 +598,14 @@ def main():
             if f"hooks.{event}" in miss:
                 install_post(data, event, post_entry(wt_audit))
         if perms and any(m.startswith("permissions.") for m in miss):
-            install_permissions(data, perms)
+            install_permissions(data, perms, ours)
         path.parent.mkdir(exist_ok=True)
         tmp = path.with_name(path.name + ".tmp")
         with open(tmp, "w", encoding="utf-8", newline="\n") as fh:  # Path.write_text(newline=) needs 3.10
             fh.write(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
         os.replace(tmp, path)
         again = wanted_missing(json.loads(path.read_text(encoding="utf-8")), window, plugins_off, hooks, want, perms, wt_audit,
-                               runtime)
+                               runtime, ours)
         if again:
             print(f"FAIL        {wt} (still missing: {', '.join(again)})")
             problems += 1

@@ -228,16 +228,24 @@ ANSWER:
 | `director_work.example.json` | 工具設定範例 | 建置時 |
 | `VERSION`、`CHANGELOG.md` | 版本號、各版改了什麼、升級怎麼遷移 | 建置時記版本；升級時 |
 
+## 防護是安全帶，不是剎車（1.3.1）
+
+- **使用者在對話裡核准了，就執行。** 推送、合併、打 tag、刪除這類事先問 PO（`docs/08`）；PO 說可以，AI 直接做，不拆設定、不請 PO 自己跑。
+- **已核准的事不重問。** 同一件事 PO 已經說可以，就不再開確認卡、不換個說法再問一次。核准仍是一次一件，不推廣到別的動作。
+- **阻擋只留給明確 opt-in。** `tools/hook_guard.py` 預設 `--mode remind`：標出的指令照跑，附一行提醒；`--mode ask` 交給使用者當場決定；只有 `--mode block` 才 exit 2 擋下。不要預設把 block 裝到工作線，工作線的 AI 會因此不敢動手（`docs/10` L-045）。例外：讀機密（G50–G52：`.env`、`~/.ssh`、token）和暫停旗標在每個模式都擋，核准也不放行。
+- 引號裡的字和 here-document 的內容是資料，不是指令，不會被標出（L-044）。
+- 1.3.0 以前裝的 hook 是擋下模式；改成提醒：`setup_project_settings.py --hooks --guard-mode remind --apply`（`CHANGELOG.md` 1.3.1 的遷移）。
+
 ## 執行期防護（1.1.0）：哪些真的擋、哪些只是提醒
 
 `tools/hook_guard.py`、`audit_log.py`、`pause_ctl.py`、`doctor.py` 和 `templates/settings.runtime-guard.json` 是一組防手滑的機制，**不是安全邊界**，不要當成和 VM、容器或平台級 agent 一樣安全。裝好後在 worker 的資料夾跑 `tools/doctor.py`，它會逐項標 ENFORCED / CONFIGURED_NOT_VERIFIED / NOT_ENFORCED / MISSING（見 `tools/README.md`）。
 
 | 項目 | 等級 | 理由 |
 |---|---|---|
-| deny 規則（hook exit 2 ＋ `permissions.deny`） | **擋**，但不是安全邊界 | Claude Code 執行工具前一定先跑 hook；但指令文字可以繞：`eval`、先寫腳本再跑、變數拼字、編碼 |
-| ask 規則（只有總監的 profile 有） | **擋到有人點頭** | `permissions.ask` 在 bypass 模式也會問；hook 回 ask 在 bypass 模式下的行為 NOT_VERIFIED |
+| hook 標出的指令 | 預設 **只提醒**（`--mode remind`，照跑）；`--mode ask` **擋到有人點頭**；`--mode block` **擋**（exit 2 ＋ `permissions.deny`），但不是安全邊界 | Claude Code 執行工具前一定先跑 hook；但指令文字可以繞：`eval`、先寫腳本再跑、變數拼字、編碼 |
+| ask 規則（block 模式下只有總監的 profile 有） | **擋到有人點頭** | `permissions.ask` 在 bypass 模式也會問；hook 回 ask 在 bypass 模式下的行為 NOT_VERIFIED |
 | 暫停開關 | **擋 Claude 發起的新動作** | 已經在跑的程序不會停，要另外依 PID 停整棵程序樹 |
-| 自動暫停（worker 600 秒內 5 次 deny） | **擋之後的新動作** | 只算 hook 的 deny；總監不開 |
+| 自動暫停（worker 600 秒內 5 次 deny，只在 block 模式） | **擋之後的新動作** | 只算 hook 的 deny；總監不開 |
 | 動作紀錄 | **可驗證、不能防竄改** | 能寫檔的人可以整條重寫；有錨點才抓得到；不含使用者自己打的 `!` 指令和 hook 以外的行為 |
 | 機密讀取 | **擋常見寫法** | 清單以外的檔名、間接讀法擋不到 |
 | 機密遮罩 | **擋常見格式** | 沒見過的 token 格式遮不到 |

@@ -11,17 +11,26 @@ on `text_reply` (lesson L-035). A message.id seen in an earlier file (a forked o
 
 Each tool call gets a fine category, and the fine categories add up to five groups:
 
-    讀和查       shell_other log_check list_files git search read_code read_md read_data disk web
+    讀和查       shell_other file_ops shell_search sys_query log_check list_files git search read_code read_md
+                 read_data disk web
     協調         coord_msg plan_ui po_page subagent_spawn text_reply write_resume write_md other
     看圖與審查   view_image review_read review_tools
-    實際動手     edit_code edit_py write_other render engine_run engine_mcp python_other
+    實際動手     edit_code edit_py write_other render engine_run engine_mcp python_other build
     等待         wait wait_board
+
+A Bash / PowerShell command takes the first of: wait_board render engine_run log_check git disk, then a python run
+(python_other, or review_tools when it names a review tool), build (compile / build / package tools), list_files,
+shell_search (grep, rg, findstr, Select-String), file_ops (cat, sed, cp, mv, mkdir, rm, echo, Copy-Item, Set-Content
+...), sys_query (processes, versions, environment, network); what is left is shell_other (1.3.1).
 
 The targets (DD-049) are 讀和查 <= 30% and 實際動手 >= 30%. With --check the exit is 1 when either is missed.
 
 RESTART lines measure whether opening a new session saves anything (docs/04): the context of a new session's first
 call, how many calls and how much quota pass from a new session (or a compaction) until the first 實際動手 call, the
 cost per call by context size, and the break-even point that follows from them.
+
+--by-session prints one line per session (a session's subagents count with it): its share of the total, calls,
+quota, its five group shares and its costliest fine categories (1.3.1).
 
 --patterns FILE adds project words to the shell and file patterns (a game's exe, its review tool), so the defaults
 stay generic:  {"schema_version": 1, "patterns": {"engine_run": "mygame\\\\.exe"}, "groups": {"write_md": "實際動手"}}
@@ -44,16 +53,17 @@ WEIGHTS = {"input_tokens": 1.0, "cache_creation_input_tokens": 1.25, "cache_read
 GROUPS = ("讀和查", "協調", "看圖與審查", "實際動手", "等待")
 GROUP_OF = {}
 for _group, _names in (
-        ("讀和查", "shell_other log_check list_files git search read_code read_md read_data disk web"),
+        ("讀和查", "shell_other file_ops shell_search sys_query log_check list_files git search read_code read_md "
+                   "read_data disk web"),
         ("協調", "coord_msg plan_ui po_page subagent_spawn text_reply write_resume write_md other"),
         ("看圖與審查", "view_image review_read review_tools"),
-        ("實際動手", "edit_code edit_py write_other render engine_run engine_mcp python_other"),
+        ("實際動手", "edit_code edit_py write_other render engine_run engine_mcp python_other build"),
         ("等待", "wait wait_board")):
     for _name in _names.split():
         GROUP_OF[_name] = _group
 TARGETS = {"讀和查": ("<=", 0.30), "實際動手": (">=", 0.30)}
 PATTERN_KEYS = ("wait_board", "render", "engine_run", "log_check", "git", "disk", "review_tools", "list_files",
-                "review_read", "engine_mcp")
+                "review_read", "engine_mcp", "python", "build", "shell_search", "file_ops", "sys_query")
 DEFAULT_PATTERNS = {
     "wait_board": r"board\.py|gpu_queue|quietwait|start-sleep|\bsleep\b|wait_go|idle_watch",
     "render": r"blender",
@@ -65,6 +75,20 @@ DEFAULT_PATTERNS = {
     "list_files": r"\bls\b|get-childitem|\bfind\b|test-path|\bdir\b",
     "review_read": r"review|pack|blind|answer_key",
     "engine_mcp": r"^mcp__(blender|unity|godot|unreal)",
+    # 1.3.1: what used to be shell_other
+    "python": r"python|\bpy(\.exe)?\s+-|\bpytest\b|\buv\s+run\b|(^|[;&|(]\s*)[\w./\\:-]*\.py\b",
+    "build": r"\b(make|cmake|msbuild|dotnet|cargo|gradlew?|mvn|tsc|gcc|clang|ninja|npm|npx|pnpm|yarn|node|rustc|javac"
+             r"|xcodebuild|pip3?|bazel|meson|webpack|vite|esbuild)\b|\bg\+\+|\bgo\s+(build|test|run|vet)\b"
+             r"|\bswift\s+(build|test)\b|\buv\s+(pip|sync|build|lock)\b",
+    "shell_search": r"\b(grep|egrep|fgrep|rg|findstr|ack)\b|select-string|\bsls\b",
+    "file_ops": r"\b(cat|head|sed|awk|cp|mv|mkdir|rm|rmdir|touch|wc|echo|printf|tee|ln|chmod|stat|sort|uniq|cut|tr"
+                r"|xargs|diff|cmp|tar|zip|unzip|7z|sha256sum|md5sum|type|copy|move|del|ren|robocopy|xcopy)\b"
+                r"|copy-item|move-item|new-item|remove-item|rename-item|set-content|add-content|out-file|get-filehash"
+                r"|get-item|expand-archive|compress-archive|resolve-path|split-path|join-path|write-output",
+    "sys_query": r"get-process|tasklist|\bps\b|nvidia-smi|get-ciminstance|get-wmiobject|\bwmic\b|\bwhere(\.exe)?\b"
+                 r"|\bwhich\b|get-command|\$env:|\bprintenv\b|\bwhoami\b|\bhostname\b|\bdate\b|get-date|\buname\b"
+                 r"|systeminfo|--version|\$psversiontable|get-itemproperty|\breg\s+query\b|\bnetstat\b"
+                 r"|get-nettcpconnection|test-netconnection|\bcurl\b|invoke-webrequest|\bping\b",
 }
 IMAGE = re.compile(r"\.(png|jpe?g|webp|gif|bmp)$", re.I)
 CODE_EXT = (".cs", ".shader", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs", ".java", ".kt", ".swift", ".c", ".cc",
@@ -124,9 +148,12 @@ def classify(name, inp, pats):
         for key in ("wait_board", "render", "engine_run", "log_check", "git", "disk"):
             if pats[key].search(cmd):
                 return key
-        if "python" in cmd:
+        if pats["python"].search(cmd):
             return "review_tools" if pats["review_tools"].search(cmd) else "python_other"
-        return "list_files" if pats["list_files"].search(cmd) else "shell_other"
+        for key in ("build", "list_files", "shell_search", "file_ops", "sys_query"):
+            if pats[key].search(cmd):
+                return key
+        return "shell_other"
     path = str(inp.get("file_path") or inp.get("notebook_path") or "").replace("\\", "/").lower()
     if name == "Read":
         if IMAGE.search(path):
@@ -305,9 +332,10 @@ def restart_numbers(sessions, groups):
     return res
 
 
-def summarize(sessions, groups, top=0):
+def summarize(sessions, groups, top=0, by_session=False):
     paid, calls, fine_paid = C.Counter(), C.Counter(), C.Counter()
     per_session, titles = C.defaultdict(C.Counter), {}
+    session_fine, session_calls = C.defaultdict(C.Counter), C.Counter()
     total = 0.0
     n_calls = 0
     for s in sessions:
@@ -315,6 +343,7 @@ def summarize(sessions, groups, top=0):
             titles[s["sid"]] = s["title"]
         for c in s["calls"]:
             n_calls += 1
+            session_calls[s["sid"]] += 1
             total += c["eq"]
             share = c["eq"] / len(c["cats"])
             for k in c["cats"]:
@@ -323,6 +352,7 @@ def summarize(sessions, groups, top=0):
                 calls[g] += 1
                 fine_paid[k] += share
                 per_session[s["sid"]][g] += share
+                session_fine[s["sid"]][k] += share
     shares = {g: (paid[g] / total if total else 0.0) for g in GROUPS}
     targets = {}
     for g, (op, limit) in TARGETS.items():
@@ -338,6 +368,18 @@ def summarize(sessions, groups, top=0):
                             "share_of_total": round(sum(cnt.values()) / total, 4),
                             "groups": {g: round(cnt[g] / sum(cnt.values()), 3) for g in GROUPS if cnt[g]}}
                            for sid, cnt in ranked]
+    if by_session:
+        ranked = sorted(per_session.items(), key=lambda kv: -sum(kv[1].values()))
+        res["by_session"] = []
+        for sid, cnt in ranked:
+            own = sum(cnt.values())
+            if not own:
+                continue
+            res["by_session"].append({
+                "session": sid[:8], "title": (titles.get(sid) or "")[:30], "calls": session_calls[sid],
+                "eq": round(own), "share_of_total": round(own / total, 4),
+                "groups": {g: round(cnt[g] / own, 3) for g in GROUPS if cnt[g]},
+                "fine": {k: round(v / own, 3) for k, v in session_fine[sid].most_common(5)}})
     return res
 
 
@@ -379,6 +421,11 @@ def render(res):
     for s in res.get("sessions", []):
         lines.append(f"  session {s['session']} {s['title']}: {pct(s['share_of_total'])} of total | "
                      + ", ".join(f"{g} {v * 100:.0f}%" for g, v in s["groups"].items()))
+    for s in res.get("by_session", []):
+        lines.append(f"  by-session {s['session']} {s['title'] or '-'}: {pct(s['share_of_total']).strip()} of total, "
+                     f"calls {s['calls']}, eq {kfmt(s['eq'])} | "
+                     + ", ".join(f"{g} {v * 100:.0f}%" for g, v in s["groups"].items())
+                     + " | top: " + ", ".join(f"{k} {v * 100:.0f}%" for k, v in s["fine"].items()))
     r = res["restart"]
     lines.append(f"RESTART new main sessions {r['main_sessions_started']}, first-call context median "
                  f"{kfmt(r['first_call_ctx_median'])}; compactions {r['compactions']}, after it "
@@ -418,6 +465,8 @@ def main(argv=None):
     ap.add_argument("--session", help="only sessions whose id starts with this, or whose title holds it")
     ap.add_argument("--patterns", metavar="FILE", help="project words added to the default patterns (JSON)")
     ap.add_argument("--top", type=int, default=0, metavar="N", help="also show the N costliest sessions")
+    ap.add_argument("--by-session", action="store_true",
+                    help="one line per session: share, calls, quota, group shares, costliest fine categories")
     ap.add_argument("--json", action="store_true", help="print JSON instead of text")
     ap.add_argument("--check", action="store_true", help="exit 1 when a DD-049 target is missed")
     a = ap.parse_args(argv)
@@ -433,7 +482,7 @@ def main(argv=None):
         return 2
     dirs = None if a.all else (a.project_dir or [project_dir_name(os.getcwd())])
     sessions, files = collect(a.root, dirs, pats, since, until, a.session)
-    res = summarize(sessions, groups, a.top)
+    res = summarize(sessions, groups, a.top, a.by_session)
     if not res["calls"]:
         print(f"NO_DATA: no model calls found (files read: {files}); this is not a measured 0")
         return 1
