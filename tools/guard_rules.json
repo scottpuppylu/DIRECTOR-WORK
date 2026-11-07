@@ -21,8 +21,8 @@
     "allow_mcp_read_only": true,
     "allow_write": ["**/RESUME_STATE.md", "**/TASK_REPORT*.md"],
     "allow_shell": {
-      "worker": ["git(?-i: -C \\S+| --no-pager)* (?:status|log|diff|show|rev-parse)(?!.*--output)(?: .*)?", "(?:tasklist|get-process|gps|ps)(?: .*)?", "(?:select-object|sort-object|format-table|format-list|measure-object|head|tail|wc|grep|findstr)(?: .*)?", "(?:py|python[0-9.]*)(?-i: -[IuBEsS]+| -X \\S+)* \\S*pause_ctl\\.py (?:status|procs)(?: .*)?"],
-      "director": ["git(?-i: -C \\S+| --no-pager)* (?:status|log|diff|show|rev-parse)(?!.*--output)(?: .*)?", "(?:tasklist|get-process|gps|ps)(?: .*)?", "(?:select-object|sort-object|format-table|format-list|measure-object|head|tail|wc|grep|findstr)(?: .*)?", "(?:py|python[0-9.]*)(?-i: -[IuBEsS]+| -X \\S+)* \\S*pause_ctl\\.py (?:status|procs)(?: .*)?", "(?:py|python[0-9.]*)(?-i: -[IuBEsS]+| -X \\S+)* \\S*pause_ctl\\.py off(?: .*)?"]
+      "worker": ["git(?-i: -C \\S+| --no-pager)* (?:status|log|diff|show|rev-parse)(?!.*--output)(?: .*)?", "(?:tasklist|get-process|gps|ps)(?: .*)?", "(?:select-object|sort-object|format-table|format-list|measure-object|head|tail|wc|grep|findstr)(?: .*)?", "(?:py|python[0-9.]*)(?-i: -[IuBEsS]+| -X \\S+)* (?:\\S*pause_ctl\\.py|\"(?:[^\"]*[\\\\/])?pause_ctl\\.py\"|'(?:[^']*[\\\\/])?pause_ctl\\.py') (?:status|procs)(?: .*)?"],
+      "director": ["git(?-i: -C \\S+| --no-pager)* (?:status|log|diff|show|rev-parse)(?!.*--output)(?: .*)?", "(?:tasklist|get-process|gps|ps)(?: .*)?", "(?:select-object|sort-object|format-table|format-list|measure-object|head|tail|wc|grep|findstr)(?: .*)?", "(?:py|python[0-9.]*)(?-i: -[IuBEsS]+| -X \\S+)* (?:\\S*pause_ctl\\.py|\"(?:[^\"]*[\\\\/])?pause_ctl\\.py\"|'(?:[^']*[\\\\/])?pause_ctl\\.py') (?:status|procs)(?: .*)?", "(?:py|python[0-9.]*)(?-i: -[IuBEsS]+| -X \\S+)* (?:\\S*pause_ctl\\.py|\"(?:[^\"]*[\\\\/])?pause_ctl\\.py\"|'(?:[^']*[\\\\/])?pause_ctl\\.py') off(?: .*)?"]
     }
   },
   "rules": [

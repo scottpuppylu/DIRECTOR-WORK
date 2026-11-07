@@ -950,8 +950,17 @@ def pause_allows(data, profile, call):
         return False  # git log > a.py writes a file; 2>&1 is not a redirect to a file
     commands = list(simple_commands(FD_DUP.sub(" ", command), "powershell" if tool == "PowerShell" else "bash"))
     allowed = pause["allow_shell"][base_profile(profile)]
-    return bool(commands) and all(any(re.fullmatch(r, " ".join([n] + list(rest)), re.I | re.S) for r in allowed)
+    return bool(commands) and all(any(re.fullmatch(r, " ".join([n] + [quote_blank(a) for a in rest]), re.I | re.S) for r in allowed)
                                   for n, rest in commands)
+
+
+def quote_blank(word):
+    """parse() took the quotes off; put them back round a word that holds blanks, so a path with spaces stays one word."""
+    if not re.search(r"\s", word):
+        return word
+    if '"' not in word:
+        return '"' + word + '"'
+    return "'" + word + "'" if "'" not in word else word
 
 
 def load_rules(path):

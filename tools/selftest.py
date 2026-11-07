@@ -2942,7 +2942,7 @@ def test_pause(tmp):
     shell = lambda command: {"tool_name": "PowerShell", "tool_input": {"command": command}}
     tool = lambda name, **kw: {"tool_name": name, "tool_input": kw}
     script = (TOOLS / "pause_ctl.py").as_posix()
-    ctl = f"python -I -X utf8 {script}"
+    ctl = f'python -I -X utf8 "{script}"'
     check("flag off: a build runs", bash("python -m build"), "silent")
     expect("pause on", "pause_ctl.py", 0, "on", "--director", director, "--reason", "CPU <full> for the batch",
            says="PAUSE: on by Director at ")
@@ -2983,6 +2983,11 @@ def test_pause(tmp):
                        ("tasklist 2>&1 | findstr", bash("tasklist 2>&1 | findstr python"))]:
         check(f"{name} runs while paused", call, "silent")
     check("the Director's pause_ctl off runs", bash(f"{ctl} off --director {director.as_posix()}"), "silent", "director")
+    spaced = "/work/dw 專案 路徑/tools/pause_ctl.py"  # a checkout whose folder has blanks and non-ASCII (CI runs in one)
+    check("pause_ctl status in a quoted path with blanks runs while paused", bash(f'python -I -X utf8 "{spaced}" status'), "silent")
+    check("pause_ctl off in a quoted path with blanks is still paused for a worker", bash(f'python -I -X utf8 "{spaced}" off --director x'), "paused")
+    check("a quoted script that is not pause_ctl.py is paused", bash('python -I -X utf8 "/work/dw x/evil_pause_ctl.py" status'), "paused")
+    check("another script in front of pause_ctl.py is paused", bash('python -I -X utf8 /work/evil.py "/work/dw x/pause_ctl.py" status'), "paused")
     check("a read the pause lets through still meets G50", tool("Read", file_path=".env"), "deny:G50")
     expect("pause off", "pause_ctl.py", 0, "off", "--director", director, says="PAUSE: off by Director at ")
     total += 1
@@ -3095,7 +3100,7 @@ def test_auto_pause(tmp):
           and not re.search(r"<[^>]*>", fifth.stderr), fifth.stderr + text)
     check("state file cleared after the pause", state.exists() and state.read_text(encoding="utf-8") == "")
     expect("auto-paused flag reads as a pause", "pause_ctl.py", 0, "status", "--director", folder, says="PAUSE: on by hook_guard at")
-    ctl = f"python -I -X utf8 {(TOOLS / 'pause_ctl.py').as_posix()}"
+    ctl = f'python -I -X utf8 "{(TOOLS / "pause_ctl.py").as_posix()}"'
     status = hook({"tool_name": "Bash", "tool_input": {"command": f"{ctl} status --director {folder.as_posix()}"}})
     off = hook({"tool_name": "Bash", "tool_input": {"command": f"{ctl} off --director {folder.as_posix()}"}})
     check("auto-paused worker: pause_ctl status runs, off does not", status.returncode == 0 and off.returncode == 2

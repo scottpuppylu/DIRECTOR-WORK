@@ -52,6 +52,7 @@ MINOR：GPT 對 v2.1.0 的獨立審查（`DIRECTOR-WORK-v2.1.0-review.md`，21 �
 - F17：`--git-common` 是**仍支援的舊模式**（WARN K1、doctor 報 NOT_ENFORCED），只在 major 版移除，最早 3.0；不再說「2.0 拿掉」。要遷移就用 `worker_clone.sh create` + `run_worker.sh --clone`。
 - F18：文件寫清楚實際擋了什麼：443 只放行開容器時白名單名稱解析到的 **IPv4 目的 IP:443**（不看 TLS 名稱或 HTTP Host）；IPv6 在開容器時用 docker `--sysctl` 關掉（映像 `dw-worker:1.2.0` 不變）；所有容器 worker 共用同一個可寫登入 volume `dw-claude-home`（clone 隔離不等於登入隔離），要分開就給每個 worker 設不同的 `DW_CLAUDE_HOME_VOLUME`（名稱有格式檢查）。`README.md`、`docs/11`、`tools/README.md` 同步。
 - F21：`.github/workflows/selftest.yml` 三個 job：Windows（原有）、Linux（Python 3.9／3.11／3.12，含非 ASCII 與有空格的路徑、沒有 git 的一輪、SKIP 摘要）、browser（runner 內建的 Chrome 跑 `tools/browser_check.py`，`DW_REQUIRE_BROWSER=1`）。actions 都鎖到 commit SHA；不加付費服務。
+- 整合時修的（第一次 Linux CI 才抓到）：(a) 暫停中的 `pause_ctl.py status|procs|off` 放行名單在路徑有空格時對不上（`hook_guard` 剖析後去掉引號再比對，空格路徑就拆成好幾個字）。現在比對前把含空白的字重新加回引號，`guard_rules.json` 的三條樣式多認一種「加引號、檔名剛好是 `pause_ctl.py`」；沒加引號的舊寫法照舊，檔名不是 `pause_ctl.py` 或前面多一支別的腳本照樣被擋。selftest 的 `ctl` 也改成加引號，並新增四個反例。(b) Linux 與 browser 兩個 job 的 runner 從 `ubuntu-latest` 固定成 `ubuntu-24.04`：latest 已變成 26.04，沒有 Python 3.9，浮動映像會讓矩陣悄悄少一格。
 
 ### 誰會從成功變成待處理，怎麼回到成功
 
@@ -71,6 +72,7 @@ MINOR：GPT 對 v2.1.0 的獨立審查（`DIRECTOR-WORK-v2.1.0-review.md`，21 �
 | `metrics_report --compare`：沒有 `sampling` 的 run | 出數字 | UNKNOWN | `run.json` 補 `sampling` |
 | `metrics_report`：「已回覆」數 | 有 `answer_received` 就算 | 要有同一個 `decision_id + ask_id`、時間更早的 `asked` | 補對應的 `asked` 事件，或修正 ask_id 和時間；對不到的列在「回覆對不到發問」 |
 | 五支工具讀到非 UTF-8 檔（`metrics_report` 的 `--run` 資料夾也算） | traceback（exit 1）或略過該檔照算（exit 0） | 一行 NOT_RUN、exit 2 | 把該檔另存成 UTF-8；看 exit 1 判斷的腳本改看 2 |
+| `audit_log verify`：`recover` 留下的 `.damaged-` 副本不在日誌旁邊，而且有 `--anchor-log`／`--anchor-rev` | 副本遺失只算 GAP、OK | 判 BROKEN（切掉的行無從核對），exit 1；沒有錨點時只印 `~ warning`，仍 OK | 把 `.damaged-<時間>` 副本放回日誌旁邊（sha256 要和復原行記的一樣）；副本真的沒了就重新設錨點（`audit_log head` 取新的 `AUDIT_HEAD`，記進 DIRECTOR_LOG） |
 
 ### 遷移（已在用的專案，照順序做）
 
@@ -96,7 +98,7 @@ MINOR：GPT 對 v2.1.0 的獨立審查（`DIRECTOR-WORK-v2.1.0-review.md`，21 �
 
 ### 數字
 
-- 每輪必讀（`docs/01`、`03`、`06`、`08`）：2.1.0 的 9,532 → 本版 9,549 bytes（上限 9,550，`MUST_READ_LIMIT` 不變；增加的是 W1 的待決頁與三層指示句）。
+- 每輪必讀（`docs/01`、`03`、`06`、`08`）：2.1.0 的 9,532 → 本版 9,549 bytes（上限 9,550，`MUST_READ_LIMIT` 不變；增加的是 W1 的待決頁與三層指示句）。量法是先把 CRLF 換成 LF 再數（selftest 的 `test_must_read_size` 就這樣量）；Windows checkout 的檔案是 CRLF，用 `wc -c` 直接量會顯示約 9,698。
 - `selftest.py`：2.1.0 的 1,946 項 → 本版 2,287 項（W1–W5 新增 341 項）。整合樹（commit 21cfa93 加上本段）本機 Python 3.11、3.9 各 2,287/2,287 全過；PATH 上沒有 git 時 1,129/1,129 全過，22 組依賴 git 的照名稱 skip。Python 3.12 與 Linux 兩個新 CI job 本機沒跑，要等第一次 GitHub 執行（見已知問題）。
 - 外部審查重現器（`repro_dw210.py`，改版本字串後對整合樹跑）：19 個案例，13 個「不再重現」、2 個仍顯示重現、4 個本機跳過（`rerun_symlink`、`container_mount`、`container_legacy` 要 Linux／WSL／Docker；`browser` 要 `--chrome`，由 CI browser job 跑）。仍顯示重現的兩個：`audit_cut_line`（斷行後 `audit_log` 仍拒寫並印 BROKEN，這是設計；2.2.0 多了 `recover` 出口，重現器的判斷不認得它）、`selected_snapshot`（帳本端還沒有用已註冊的選項內容去核對回覆附帶的 `selectedOptionSnapshot`；頁面端那一半 W3 已修）。逐項狀態在 PR 說明。
 
