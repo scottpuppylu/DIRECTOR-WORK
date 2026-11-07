@@ -1035,6 +1035,12 @@ def test_onboarding_v210(tmp):
               ("tools/README.md", two)]
     for state in ("LOCK_ONLY", "NO_START", "LOCK_AND_USER_ASKED"):
         wanted.append(("docs/12_chat_to_product.md", f"`{state}`"))
+    # tools/ does not exist on the quick path before the card is locked: the order check runs after locking
+    wanted += [("docs/12_chat_to_product.md", "貼卡前只備好首批工單草稿；鎖卡後、開第一位 worker 前，才跑 `gate_check --order` 和追溯核對"),
+               ("docs/12_chat_to_product.md", "建 `tools/`，跑 `gate_check --order` 和追溯核對"),
+               ("BOOTSTRAP.md", "貼卡前只備好首批工單草稿，`gate_check --order` 和追溯核對留到鎖卡後、開第一位 worker 前"),
+               ("BOOTSTRAP.md", "表中標「延後」的步驟到那時才做"),
+               ("README.md", "小白模式先讀 01、03、06、08、12，其餘最晚在派第一張工單前讀完；一般模式不變")]
     for path, needle in wanted:
         total += 1
         if needle not in docs[path]:

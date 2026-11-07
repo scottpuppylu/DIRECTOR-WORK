@@ -24,15 +24,17 @@
 | 0 | 第 1～3 點，不改任何檔 | 語言衝突詳查等到相關時 |
 | 1 | 讀 README、PURPOSE、本檔、`docs/12`，和每輪必讀的 `docs/01、03、06、08` | 其餘 docs 要用到時讀，最晚在派第一張工單前讀完；規則包版本在這時記下 |
 | 2 | 只記產品目標、階段、已知 PO 決定 | build、測試、磁碟、重資源、成品怎麼看：首版範圍明確後 |
-| 3 | 只建上面的最少狀態 | 完整資料夾與 `tools/`：鎖卡後、開第一位 worker 前 |
+| 3 | 只建上面的最少狀態 | 完整資料夾與 `tools/`：鎖卡後、開第一位 worker 前（`gate_check --order` 和追溯核對也在這時跑） |
 | 4、10 | 不做 | 開第一位 worker 前 |
 | 5 | 登記模式和已知 PO 指示 | 其餘隨盤點補 |
 | 6 | 只用 `PO_PENDING.md` 和聊天 | 選擇頁見第 6 步（一定先問） |
 | 7.1～7.4、11 | 不做 | 開第一位 worker 前，只設定那位 worker 的資料夾（第 7 步），並寫進 `GUARDS.md` |
 | 7.5～7.6、8 | 不做 | 開線後用 `get_usage` 看；完整探測與基準等首個預覽之後 |
 | 7.7、9 | 小白模式本來就不做 | — |
-| 12、13 | 不做 | 12 在草擬首批工單時；13 的三句白話併進第 14 步那一則 |
+| 12、13 | 不做 | 12 在草擬首批工單時，貼卡前只備好首批工單草稿，`gate_check --order` 和追溯核對留到鎖卡後、開第一位 worker 前；13 的三句白話併進第 14 步那一則 |
 | 14 | 同一輪開始 | 鎖卡仍在派工前 |
+
+談完需求、鎖卡之後回到下面步驟 0～14，表中標「延後」的步驟到那時才做。
 
 ## 0. 先確認環境（唯讀）
 
@@ -47,7 +49,7 @@
 1. 把本規則包放到專案外的位置：`git clone https://github.com/scottpuppylu/DIRECTOR-WORK <RULES>`（PO 給了本機路徑就直接用）。第 3 步再把整個 `tools/` 複製到 `DIRECTOR/tools/`。
    PO 給了連結，就算同意下載這一個專案。跑工具前先讀過它的程式碼；第一輪會跑 `setup_project_settings.py`、`context_probe.py`、`usage_report.py`、`memory_size_check.py`、`gate_check.py`，其他的等要用時再讀。
    記下規則包的版本（`<RULES>/VERSION` 加上 `git -C <RULES> rev-parse --short HEAD`），第 3 步寫進 `DIRECTOR_OPERATING_RULES.md`。
-2. 讀 `README.md`、`PURPOSE.md`、本檔、`docs/01` 到 `docs/10`（含 `06b`）和 `docs/12`。在 Claude Desktop 上另讀 `docs/11`。
+2. 讀 `README.md`、`PURPOSE.md`、本檔、`docs/01` 到 `docs/10`（含 `06b`）和 `docs/12`（小白快速路徑先讀 `docs/01、03、06、08、12`，其餘最晚在派第一張工單前讀完）。在 Claude Desktop 上另讀 `docs/11`。
 3. 之後每輪只讀 README 標「每輪必讀」的檔。
 
 ## 2. 盤點專案（唯讀，結論寫檔）
