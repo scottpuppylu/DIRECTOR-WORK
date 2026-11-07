@@ -93,7 +93,7 @@
    - 舊題：照 2.0 改 `decisions/<編號>` 為 `answered`，`answer` 多一個 `submissionId`。
    - 留言：新增 `notes`：`{"kind": "note", "submissionId", "text", "at", "status": "new"}`。
    - 頁面保證：重畫不會吃掉打到一半的字、游標和選取範圍；輸入法選字時不重畫；送出中同一題按不了第二次；送出前用最新資料確認題目還開著、選項還在；存好後只有字沒被改過才清空。這些由 `selftest.py` 的 `test_choice_page` 檢查。
-4. **讀回覆**：每一輪第一個動作，用 `ArtifactData` 讀 `choiceReplies`、`decisions`（舊題看 `status == "answered"`）和 `notes`（`status == "new"`），存成一份 JSON，跑 `choice_reconcile.py ingest`，照第六節處理。
+4. **讀回覆**：照 `docs/06` 每輪第一步，在唯讀收集時用 `ArtifactData` 讀 `choiceReplies`、`decisions`（舊題看 `status == "answered"`）和 `notes`（`status == "new"`），存成一份 JSON，跑 `choice_reconcile.py ingest`，照第六節處理。
 5. 聊天裡只說一句「選擇頁新增了 CH-01」，不在聊天裡重複整題。
 
 ### 五、不做歪的檢查

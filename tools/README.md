@@ -208,6 +208,7 @@ python -I -X utf8 secret_mask.py --check [FILE]  # 每種找到的機密印一�
 - 不遮：40 碼 git SHA、sha256、`max_tokens=4096`、`author=...`、`PWD=...`、已經遮過的值。已知會多遮：`"token_type": "Bearer"`。
 - 只認得常見格式，沒見過的 token 格式會原樣通過。也可當模組用：`mask(text)` 回傳 `(遮罩後文字, 種類清單)`。
 - `mask_tree(value)`（2.2.0）：遮罩 JSON 結構，序列化之前用。每個字串（含鍵名）都過 `mask()`；鍵名像機密（password、api_key、github_token、auth…）的整個值換成 `[MASKED:field]`，值是 null、true / false 或空字串時保留。先序列化再遮會漏掉 `password="a b"`：JSON 把引號跳脫成 `\"`，遮罩只遮到第一個空白。
+- 2.2.0 另外遮：指令字串裡跳脫的 JSON（`{\"password\": \"...\"}`）、單獨的 `Bearer <token>`（8 字以上）、`--password X` 這類空白分隔的旗標、`mysql` / `mysqldump` / `mysqladmin` / `mysqlsh` / `mariadb` / `sshpass` 的 `-p X` 和 `-pX`、`--user bob:X` 和 `curl -u bob:X`、`passw0rd`、`p@ssword` 這類鍵名；`mask_tree` 的 `Authorization`、`Proxy-Authorization`、`Cookie`、`Set-Cookie` 欄位整欄遮。還遮不到的寫法見 CHANGELOG 2.2.0 的已知問題。
 
 ### audit_log.py（1.1.0）
 
@@ -230,7 +231,7 @@ python -I -X utf8 audit_log.py recover --log <檔案>                    # 2.2.0
 - **沒有錨點就抓不到整條重寫**：把整條鏈連同每個 hash 重算一次，`verify` 單獨跑會過，只有錨點抓得到。最後一個錨點之後的行被截掉，也要等下一個錨點才抓得到。
 - `--cite`：TASK REPORT 的 `AUDIT_RANGE` 那一段的第一行和最後一行 hash 要和現在的紀錄相同，整條鏈也要完整。
 - **`recover`（2.2.0）**：`verify` 說 BROKEN（當機截斷最後一行、某行不是 JSON、某行不在鏈上）後用。在鎖內把整份原檔原封不動複製成 `<檔案>.damaged-<UTC 時間>`，保留第一個壞行之前的每一行（最後一個好 hash 和之前的 `AUDIT_HEAD` 錨點都還有效），再接一行 `kind=recovery`：`damage` 記拿掉部分的起始行、行數、位元組、sha256，以及複本的檔名和 sha256。印 `AUDIT_RECOVER ...` 和新的 `AUDIT_HEAD`，之後 `append` 照常接著寫。壞行之後的行只留在複本裡。沒壞的紀錄不動（`nothing broken`，exit 0）；檔案不存在 exit 2。
-- `verify` 對每個 recovery 行印 `GAP seq=n: from line a (k lines, b bytes, sha256=...) kept in <複本>, copy checked`，結尾加 `gaps=n`。GAP 本身不算壞；複本找不到只標 `copy not found`，複本內容被改過（sha256 對不上）才 BROKEN。整條鏈壞掉時多印一行 `~ to go on writing: audit_log.py recover --log ...`。
+- `verify` 對每個 recovery 行印 `GAP seq=n: from line a (k lines, b bytes, sha256=...) kept in <複本>, copy checked`，結尾加 `gaps=n`。GAP 本身不算壞；複本找不到時標 `copy not found`，並多印一行 `~ warning seq=n: ...`；有給錨點（`--anchor-log` / `--anchor-rev`）時算 BROKEN（錨定的紀錄少了證據）。複本內容被改過（sha256 對不上）也是 BROKEN。整條鏈壞掉時多印一行 `~ to go on writing: audit_log.py recover --log ...`。
 
 ## doctor.py（1.1.0）
 
@@ -344,6 +345,7 @@ python -I -X utf8 setup_check.py <WS>/DIRECTOR [更多資料夾或檔案]   # �
 - 讀資料夾裡的 `DIRECTOR_STATE.md`（也可直接給檔案）。每個對象印 `OK   setup <檔案>` 或 `FAIL setup <檔案>`，問題一行一個 `  - ...`，提示 `  ~ ...`。
 - 合法的只有三種：`PO_PAGE_URL: https://claude.ai/artifact/<id>`（或 `https://claude.ai/code/artifact/<id>`）加 `PO_PAGE_PINNED: yes`；同樣的網址加 `PO_PAGE_PINNED: no reason=<原因>`（另印提示：請 PO 自己置頂）；`PO_PAGE_URL: NONE reason=<原因>`（沒有頁面，`PO_PAGE_PINNED` 可省略或寫 `no reason=...`，不能寫 yes）。
 - 缺行、同一行寫兩次、不是 claude.ai 的 Artifact 網址、`<...>` 佔位、`NONE` / `no` 沒寫原因、檔案不存在，都 exit 1。全部合法 exit 0。
+- 只驗格式，不驗頁面真的存在或真的置頂：偽造的 Artifact 網址、`NONE reason=x` 都會 exit 0。所以總監回報時要貼出發布工具回傳的結果原文（BOOTSTRAP 第 6 步第 7 點、第 13 步）。
 - `BOOTSTRAP` 第 6、11、13 步要它 exit 0 才送第一份回報。只用在建置流程；舊專案不跑它，`status.py` 只印 shadow 提示 `PO_PAGE_MISSING`（`status_gen.py`）。
 
 ## trace_report.py

@@ -8,7 +8,7 @@
 
 讀完啟動提示詞，**第一則回覆之前、同一輪**先做完下面四件事。兩種模式都做；啟動提示詞的「建置時就把待決頁做成我的 Claude 私人頁面並置頂」就是授權，不另外問。
 
-1. 唯讀確認第 0 步第 1～3 點（repo、既有規則與記憶、時鐘），並照第 1 步把規則包放到 `<RULES>`。第 0 步要停下問的情況（不是 git repo、既有規則禁止在 repo 外寫檔……），第 2、3 點照做，第 4 點不寫檔，網址只放在回覆裡。
+1. 唯讀確認第 0 步第 1～3 點（repo、既有規則與記憶、時鐘），並照第 1 步把規則包放到 `<RULES>`。第 0 步要停下問的情況（不是 git repo、既有規則禁止在 repo 外寫檔……），第 2、3 點照做，第 4 點不寫檔，網址只放在回覆裡；之後第一次寫 `<WS>/DIRECTOR/DIRECTOR_STATE.md` 時（小白快速路徑第 2 點或第 6 步第 3 點，先到的那一步），用那則回覆裡的網址補寫兩行，第 13 步前的 `setup_check` 會擋下沒補的。
 2. 發布待決頁並置頂：第 6 步第 1 點（`pin: true`）。
 3. 開第一題「一般模式還是小白模式？」：第 6 步第 2 點，題號 `CH-00`、`brief: []`、status `open`，兩個選項各附一句說明（`docs/12` 第一節）。啟動提示詞已寫明模式就不開這題。
 4. 寫 `<WS>/DIRECTOR/DIRECTOR_STATE.md` 的 `PO_PAGE_URL`、`PO_PAGE_PINNED` 兩行（第 6 步第 3 點）；`<WS>` 照第 3 步的預設。
@@ -122,8 +122,8 @@ DIRECTOR/
    - 發布成功但置頂失敗：寫 `PO_PAGE_PINNED: no reason=<原因>`，請使用者自己在側邊欄置頂。
    - 網頁斷線、讀不到回覆：照 `docs/11`「待決頁網頁的授權與備援」的 4 步，在聊天做完、總監存進 `PO_PENDING.md`。
 5. 格式照 `templates/PO_PENDING.md`。任何一步產生的問題都放這裡（網頁加本機帳）。
-6. 從這一步起，總監每一輪的第一個動作都是讀待決頁（網頁和 `PO_PENDING.md`）上 PO 已回覆的項目，和聊天裡還沒處理的回答（`docs/03`）。對外分享另循 `docs/08`。
-7. 檢查：`python -I -X utf8 <RULES>/tools/setup_check.py <WS>/DIRECTOR` 要 exit 0。兩行缺了、格式不對，exit 1。
+6. 從這一步起，照 `docs/06` 每輪第一步，在唯讀收集時讀待決頁（網頁和 `PO_PENDING.md`）上 PO 已回覆的項目，和聊天裡還沒處理的回答（`docs/03`）。對外分享另循 `docs/08`。
+7. 檢查：`python -I -X utf8 <RULES>/tools/setup_check.py <WS>/DIRECTOR` 要 exit 0。兩行缺了、格式不對，exit 1。它只驗格式：偽造的 Artifact 網址、`NONE reason=x` 也會過，所以第一份回報（第 13 步）要貼出發布和置頂時工具回傳的結果原文。
 
 ## 7. 壓縮門檻（25 萬）
 
@@ -171,7 +171,7 @@ DIRECTOR/
 
 ## 13. 第一份回報給 PO
 
-回報前一定先跑 `python -I -X utf8 <RULES>/tools/setup_check.py <WS>/DIRECTOR`，要 exit 0；沒過就先修 `DIRECTOR_STATE.md` 的兩行（第 6 步），不送回報。小白模式和快速路徑也一樣。
+回報前一定先跑 `python -I -X utf8 <RULES>/tools/setup_check.py <WS>/DIRECTOR`，要 exit 0；沒過就先修 `DIRECTOR_STATE.md` 的兩行（第 6 步），不送回報。小白模式和快速路徑也一樣。`setup_check` 只驗格式，回報裡要貼出第 6 步發布和置頂時工具回傳的結果原文（網址、置頂成功或失敗的訊息）。
 
 用第 0 步決定的語言（PO 都沒指定就用繁體中文），先寫結論，20 行左右，細節放檔案：
 

@@ -25,7 +25,8 @@ the chain). Under the lock it copies the whole file, untouched, to FILE.damaged-
 first bad one (so the last good hash and every AUDIT_HEAD anchor before it stay valid) and adds one kind=recovery line
 on the chain: damage = first_line, lines, bytes and sha256 of the part taken out, the copy's name and its sha256. Then
 append goes on as usual. verify prints `GAP seq=n: ...` for each recovery line (not a break), counts gaps=n, and is
-BROKEN only when the copy next to the log no longer has that sha256. Lines after the first bad one stay in the copy
+BROKEN when the copy next to the log no longer has that sha256, or is missing while an anchor is checked (2.2.0; without
+an anchor a missing copy prints a `~ warning` line). Lines after the first bad one stay in the copy
 only. A log with nothing broken is left as it is (exit 0); a missing log gives exit 2.
 
 verify recomputes the chain and prints the first break (BROKEN seq=n / BROKEN line=n) with exit 1; a missing log,
@@ -414,10 +415,6 @@ def cmd_verify(a):
         raise CannotRun("--anchor-rev and --anchor-path go together")
     entries, bad = load(log)
     problems = [bad or chain_problem(entries, a.from_seq, a.to_seq)]
-    found_gaps = gaps(entries, log)
-    for line, problem in found_gaps:
-        print(line)
-        problems.append(problem)
     texts = []
     if a.anchor_log:
         if not os.path.isfile(a.anchor_log):
@@ -425,6 +422,17 @@ def cmd_verify(a):
         texts.append(pathlib.Path(a.anchor_log).read_text(encoding="utf-8", errors="replace"))
     if a.anchor_rev:
         texts.append(committed_text(a.repo, a.anchor_rev, a.anchor_path))
+    found_gaps = gaps(entries, log)
+    for line, problem in found_gaps:
+        print(line)
+        problems.append(problem)
+        if line.endswith(", copy not found"):
+            seq = line.split(":", 1)[0].split()[1]
+            if texts:
+                problems.append(f"{seq}: the copy is missing, so the cut lines of an anchored log cannot be checked")
+            else:
+                print(f"  ~ warning {seq}: the copy is not beside the log; keep it with the log, without it the cut lines"
+                      " cannot be checked")
     anchors = 0
     for text in texts:
         found, count = anchor_problems(entries, text, log)

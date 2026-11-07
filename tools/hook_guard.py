@@ -719,7 +719,9 @@ def review(conf, call, rule, reason):
         spec = importlib.util.spec_from_file_location("secret_mask", pathlib.Path(__file__).with_name("secret_mask.py"))
         mask = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mask)
-        action = mask.mask(json.dumps(call.get("tool_input"), ensure_ascii=False))[0][:1000]
+        # mask each string before serializing (2.2.0, same as audit_log F12): masking the JSON text misses a value
+        # JSON escapes or a secret-named field holding a list or an object
+        action = json.dumps(mask.mask_tree(call.get("tool_input")), ensure_ascii=False)[:1000]
     except Exception:
         return "unavailable", "secret_mask.py could not be loaded", "none"
     prompt = REVIEW_PROMPT.format(tool=call.get("tool_name"), action=action, rule=rule, reason=reason)
