@@ -87,6 +87,16 @@ evidence and the product is still the Director's job (docs/02, docs/07).
              the PO's acceptance records (schema po-acceptance-v1: candidate_id, commit, entry, entry_sha256,
              manifest_sha256, offered_message_ref, reply_ref, outcome seen / changes / accepted / null, replied_at,
              excerpt); a record missing a binding is `~ UNBOUND_PO_REPLY`. With --candidate the commit must be it.
+             2.2 (F09): the product is checked too, from --artifact-root (default: the record file's folder): the
+             entry must be a file inside it, with entry_sha256 when the record has it; an optional `manifest` path
+             must hash to manifest_sha256. A missing or changed file, an entry outside the root, or one reply_ref used
+             for two different products is UNBOUND_PO_REPLY. A record whose entry or manifest could not be hashed is
+             `PO 回覆 <outcome>，成品待核對` (what was not checked), never 已驗收.
+  EVIDENCE_RERUN (2.2, F08): `evidence_record.py verify --rerun` prints, after an OK rerun, the whole line
+             `EVIDENCE_RERUN <WO-ID> <AC> candidate=<40 hex> result=ok record=<file>` for the Director to log
+             (with --brief / --order-history it ends ` brief=ok|stale|unconfirmed`; stale and unconfirmed lines are
+             not counted as a Director rerun);
+             trace_report reads it as 總監重跑過.
   A verdict may carry `ORDER_SHA256:` and `REPORT_SHA256:` (gate_check.py --hash of each file); with --match a
              mismatch is `~ VERDICT_RECORD`.
 
@@ -396,6 +406,8 @@ PO_REVIEW = re.compile(LOG_DATE + r"PO_PRODUCT_REVIEW[ \t]+([A-Za-z]+-\d+)((?:[ 
 PO_OUTCOMES = {"seen": "seen", "changes": "changes", "accepted": "accepted", "看過": "seen", "要求修改": "changes",
                "接受": "accepted"}
 PO_ACCEPTANCE_SCHEMA = "po-acceptance-v1"
+RERUN = re.compile(LOG_DATE + r"EVIDENCE_RERUN[ \t]+([A-Za-z]+-\d+)[ \t]+(AC-\d+)[ \t]+candidate=([0-9a-fA-F]{40})[ \t]+"
+                   r"result=ok(?:[ \t]+record=[^\s|`]+)?(?:[ \t]+brief=(ok|stale|unconfirmed))?[ \t]*(?:\|[^`]*)?")
 HEX64 = re.compile(r"[0-9a-f]{64}")
 
 
@@ -468,6 +480,7 @@ def load_brief(path, log_text=None, log_path=None, notes=None):
     data = pathlib.Path(path).read_bytes()
     text, label, sha = data.decode("utf-8-sig", errors="replace"), str(path), order_hash(data)
     locks = brief_locks(log_text) if log_text else []
+    trusted = bool(locks) and locks[-1][1] == sha
     if locks and locks[-1][1] != sha:
         rev, locked, snap = locks[-1]
         snap_path = pathlib.Path(log_path).parent / snap if snap and log_path else None
@@ -475,6 +488,7 @@ def load_brief(path, log_text=None, log_path=None, notes=None):
             notes.append(f"BRIEF: {path} is not the latest BRIEF_LOCKED (rev={rev} sha={locked[:12]}); a draft is not the "
                          f"basis: compared with the locked snapshot {snap}")
             text, label, sha = snap_path.read_bytes().decode("utf-8-sig", errors="replace"), snap, locked
+            trusted = True
         else:
             notes.append(f"BRIEF_UNCONFIRMED: {path} is not the latest BRIEF_LOCKED (rev={rev} sha={locked[:12]}) and its "
                          f"snapshot {snap or '(none named)'} is missing or changed: 依據待確認")
@@ -483,9 +497,11 @@ def load_brief(path, log_text=None, log_path=None, notes=None):
                      "(`gate_check.py --brief BRIEF.md --snapshot DIRECTOR/brief-history` prints it)")
     if not brief_is_locked(text):
         notes.append(f"BRIEF: {label} does not say 狀態：LOCKED; a draft is 依據待確認")
+        trusted = False
     rows, ambiguous, problem = brief_table(text)
+    # trusted (2.2, F08): the rows read are the latest BRIEF_LOCKED brief and say LOCKED; anything else is unconfirmed
     return {"rows": rows, "ambiguous": ambiguous, "problem": problem, "revision": brief_revision(text), "label": label,
-            "sha": sha}
+            "sha": sha, "trusted": trusted}
 
 
 def order_brief(text, notes=None):
@@ -683,6 +699,66 @@ def po_reviews(text):
     return found
 
 
+def rerun_records(text, held=None):
+    """2.2 (F08): {(WO-ID, AC): [candidate, ...]} from whole `EVIDENCE_RERUN` lines: the Director reran the approved
+    check of that AC on that candidate (evidence_record.py verify --rerun) and it passed. A line with brief=stale or
+    brief=unconfirmed (the rerun's brief comparison, same as --match's) is not counted; held, when given, gets
+    {(WO-ID, AC): [(candidate, state), ...]} for those lines."""
+    found = {}
+    for m in (RERUN.fullmatch(line) for line in log_lines(text)):
+        if m and m.group(4) in (None, "ok"):
+            found.setdefault((m.group(1), m.group(2)), []).append(m.group(3).lower())
+        elif m and held is not None:
+            held.setdefault((m.group(1), m.group(2)), []).append((m.group(3).lower(), m.group(4)))
+    return found
+
+
+def acceptance_identity(record):
+    """The product a PO_ACCEPTANCE record is about: (candidate_id, commit, entry, entry_sha256, manifest_sha256).
+    Any value that is not text is kept as its JSON text, so a malformed record never raises here."""
+    def get(key):
+        value = record.get(key)
+        if not isinstance(value, str):
+            return None if value is None else json.dumps(value, sort_keys=True, ensure_ascii=False)
+        return value if key in ("candidate_id", "entry") else value.lower()
+    return tuple(get(key) for key in ("candidate_id", "commit", "entry", "entry_sha256", "manifest_sha256"))
+
+
+def acceptance_product(record, root):
+    """2.2 (F09): (problems, unchecked) of the product files a bound record names, from root. problems: the entry is
+    not a file inside root, or a file's hash is not the recorded one. unchecked: what could not be compared."""
+    problems, unchecked = [], []
+    root = pathlib.Path(root).resolve()
+    for key, digest_key, needed in (("entry", "entry_sha256", True), ("manifest", "manifest_sha256", False)):
+        name = record.get(key)
+        if name is None and not needed:
+            unchecked.append("manifest 沒列路徑（只有 manifest_sha256），沒核對")
+            continue
+        if not (isinstance(name, str) and name.strip()):
+            problems.append(f"{key} is not a path")
+            continue
+        path = (root / name).resolve()
+        if path != root and root not in path.parents:
+            problems.append(f"{key} {name} is outside the product folder {root}")
+        elif not path.is_file():
+            problems.append(f"{key} {name} not found under {root}")
+        elif record.get(digest_key) is None:
+            unchecked.append(f"{key} 沒有 {digest_key}，內容沒核對")
+        elif hashlib.sha256(path.read_bytes()).hexdigest() != str(record[digest_key]).lower():
+            problems.append(f"{key} {name} does not hash to {digest_key} {str(record[digest_key])[:12]}: the product changed")
+    return problems, unchecked
+
+
+def shared_replies(records):
+    """2.2 (F09): reply_ref -> the products that use it, for a reply used for two different products. Only records
+    that pass acceptance_problems() count: a malformed one is already UNBOUND_PO_REPLY on its own."""
+    used = {}
+    for record in records:
+        if isinstance(record, dict) and isinstance(record.get("reply_ref"), str) and record["reply_ref"].strip()                 and not acceptance_problems(record):
+            used.setdefault(record["reply_ref"], set()).add(acceptance_identity(record))
+    return {ref: ids for ref, ids in used.items() if len(ids) > 1}
+
+
 def acceptance_records(text):
     """(records, problem) of a PO_ACCEPTANCE.json: one object, a list of them, or {"records": [...]}."""
     try:
@@ -724,23 +800,35 @@ def acceptance_problems(record, candidate=None):
     return out
 
 
-def check_po_acceptance(text, notes, candidate=None):
-    """PO_ACCEPTANCE.json (題4 P-2), notes only: each record bound, or UNBOUND_PO_REPLY with what it lacks."""
+def check_po_acceptance(text, notes, candidate=None, root=None):
+    """PO_ACCEPTANCE.json (題4 P-2), notes only: each record bound, or UNBOUND_PO_REPLY with what it lacks.
+    root (2.2, F09): the folder the entry and manifest paths are read from; None skips the product check."""
     records, problem = acceptance_records(text)
     if problem:
         notes.append(f"UNBOUND_PO_REPLY file: {problem}; no record read")
         return []
     if not records:
         notes.append("PO_ACCEPTANCE: no record")
+    shared = shared_replies(records)
     for n, record in enumerate(records, 1):
         tag = record.get("candidate_id") if isinstance(record, dict) and isinstance(record.get("candidate_id"), str) \
             and record["candidate_id"].strip() else f"#{n}"
         bad = acceptance_problems(record, candidate)
+        unchecked = []
+        if not bad and root is not None:
+            more, unchecked = acceptance_product(record, root)
+            bad += more
+        if not bad and isinstance(record.get("reply_ref"), str) and record["reply_ref"] in shared:
+            bad.append(f"reply_ref {record['reply_ref']} is used for {len(shared[record['reply_ref']])} different products; "
+                       "one reply binds one product")
         if bad:
             notes.append(f"UNBOUND_PO_REPLY {tag}: {'; '.join(bad)}")
         else:
-            state = {"seen": "看過", "changes": "看過，要求再改", "accepted": "已驗收"}.get(
-                PO_OUTCOMES.get(record.get("outcome") or ""), "已送出，還沒回覆")
+            outcome = PO_OUTCOMES.get(record.get("outcome") or "")
+            state = {"seen": "看過", "changes": "看過，要求再改", "accepted": "已驗收"}.get(outcome, "已送出，還沒回覆")
+            if unchecked or root is None:
+                state = (f"PO 回覆 {outcome}，成品待核對（" + ("；".join(unchecked) or "沒核對入口檔") + "）") if outcome \
+                    else state + "（成品待核對）"
             notes.append(f"PO_ACCEPTANCE {tag}: {record['commit'][:12]} {record['entry']}: {state} "
                          f"({record.get('reply_ref') or record['offered_message_ref']})")
     return []
@@ -1084,6 +1172,10 @@ def check_evidence(ac, evidence, folder, head, problems, notes, strict=False, ca
             (problems if strict else notes).append(
                 f"{ac}: {name}: recorded with no git HEAD; " + ("Strict: record again inside the worktree" if strict
                                                                  else "not compared with the report's"))
+        if record.get("log_error"):  # 2.2 (F15): the full output log the run was asked to keep is incomplete
+            (problems if strict else notes).append(
+                f"{ac}: {name}: its --log was not written in full ({str(record['log_error'])[:80]}); the record is incomplete"
+                + ("; Strict: record again" if strict else ""))
         if git.get("dirty"):
             (problems if strict else notes).append(
                 f"{ac}: {name}: recorded with uncommitted changes" + ("; Strict: commit, then record again" if strict else ""))
@@ -1444,6 +1536,8 @@ def main():
                     "BRIEF_STALE notes (shadow)")
     ap.add_argument("--snapshot", metavar="DIR", help="with --brief or --hash: keep a snapshot in DIR (atomic write)")
     ap.add_argument("--order-history", metavar="DIR", help="with --match: old orders, found by hash, for carried-over evidence")
+    ap.add_argument("--artifact-root", metavar="DIR", help="with --po-acceptance: the folder the entry and manifest paths "
+                    "are read from (default: the record file's folder)")
     ap.add_argument("--warn", action="store_true", help="report problems as WARN and exit 0")
     ap.add_argument("--since", metavar="YYYY-MM-DD", help="skip files dated before this day")
     a = ap.parse_args()
@@ -1554,7 +1648,8 @@ def main():
             problems = check_match(text, files[1].read_bytes(), notes, a.evidence_dir, dispatch, files[1], a.dispatch_log,
                                    candidate, equivalent, brief, a.order_history)
         elif kind == "po-acceptance":
-            problems = check_po_acceptance(text, notes, candidate)
+            problems = check_po_acceptance(text, notes, candidate, pathlib.Path(a.artifact_root) if a.artifact_root
+                                           else files[0].resolve().parent)
         else:
             problems = CHECKS[kind](text, notes)
             if kind == "verdict" and (a.match or candidate):
@@ -1571,5 +1666,33 @@ def main():
     return 1 if failed and not a.warn else 0
 
 
+def not_utf8(error, argv=None):
+    """2.2 (v2.1.0 known issue): one line, never a traceback, for an input file that is not UTF-8 text. It names the
+    file when it is on the command line or in a folder there (text files only: .md .json .jsonl .txt .log)."""
+    import itertools
+    named = []
+    for arg in (sys.argv[1:] if argv is None else argv):
+        path = pathlib.Path(arg)
+        try:
+            files = [path] if path.is_file() else (list(itertools.islice(
+                (p for p in path.rglob("*") if p.suffix.lower() in (".md", ".json", ".jsonl", ".txt", ".log")
+                 and ".git" not in p.parts), 2000)) if path.is_dir() else [])
+        except (OSError, ValueError):
+            files = []
+        for file in files:
+            try:
+                file.read_bytes().decode("utf-8")
+            except UnicodeDecodeError:
+                named.append(str(file))
+            except OSError:
+                pass
+    where = f" ({', '.join(dict.fromkeys(named[:3]))})" if named else ""
+    return f"a file is not UTF-8 text{where}: {error.reason} at byte {error.start}; save it as UTF-8 and run again"
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except UnicodeDecodeError as error:  # 2.2: one line and NOT_RUN (exit 2), never a traceback
+        print(f"GATE_CHECK: NOT_RUN {not_utf8(error)}")
+        sys.exit(2)

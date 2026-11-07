@@ -14,6 +14,12 @@ REPORT_SHA256: <選用：gate_check.py --hash 報告；寫了之後報告再被�
 | 項目 | 證據路徑 | 證據等級（VERIFIED_LOCAL / REPORTED / …） | 依 worker 報告？ |
 |---|---|---|---|
 
+總監重跑過的 AUTO 條件（`evidence_record.py verify --rerun` 印的 `LOG_LINE:`，整行也貼進 DIRECTOR_LOG；2.2）：
+```text
+EVIDENCE_RERUN <WO-ID> <AC> candidate=<40 位> result=ok record=<檔名>
+```
+重跑時加了 `--brief` 的，行尾多 `brief=ok|stale|unconfirmed`，照印出的整行貼；`stale` / `unconfirmed` 不算總監重跑過。
+
 ## C. 問題
 - P0：
 - P1：

@@ -330,9 +330,14 @@ python -I -X utf8 gate_check.py --preflight <報告.md> <WO.md> --evidence-dir <
   - `--brief BRIEF.md` 單獨用：印 `BRIEF_REVISION = <版次>` 和 `BRIEF_FINGERPRINTS_V1 = {"B-2": "<64 位>"}` 兩行，貼進工單表頭。指紋是 sha256(`brief-row-v1\n` + `[ID, 類別, 內容, 怎麼算做到]` 的精簡 JSON)；同一編號兩列或欄數不是 4，印 `~ BRIEF_UNCONFIRMED`（依據未確認），不給指紋。
   - `--brief` 配 `--order` / `--match` / `--preflight`：工單記的列變了，印 `~ BRIEF_STALE <WO> <B> <AC-1,AC-2>`（舊條件驗過，新條件待重驗）；工單沒有追溯欄時寫 `WHOLE_ORDER`；版次沒升卻內容變了另註「同版內容有變」；列被刪掉寫「需求已取消，待調整範圍」。工單追溯了 B 卻沒記指紋，印 `~ BRIEF_UNCONFIRMED`。
   - `--brief BRIEF.md --snapshot <資料夾>`：只收狀態 LOCKED、有版次的初衷卡，否則 exit 2。快照原子寫入：同資料夾暫存檔、fsync、改名；同內容的舊檔保留。寫完印 `BRIEF_LOCKED rev=<n> sha=<雜湊> snapshot=<路徑>`，整行寫進 DIRECTOR_LOG。再加 `--dispatch-log` 時，以最新一行 BRIEF_LOCKED 為依據：現在的初衷卡不是它（例如定版後的草稿），就改拿快照比，並印 `compared with the locked snapshot`。
-  - `--hash <WO.md> --snapshot <資料夾>`：另存 `<WO-ID>-rev<n>-<雜湊>.md`。`--match ... --order-history <資料夾>`：用 EVIDENCE_EQUIVALENT 沿用的證據，拿舊工單記的指紋比；條件變了印 `BRIEF_STALE`，找不到舊工單印 `BRIEF_UNCONFIRMED`（沿用依據未確認）。`evidence_record.py verify --rerun` 還不做這項比對。
+  - `--hash <WO.md> --snapshot <資料夾>`：另存 `<WO-ID>-rev<n>-<雜湊>.md`。`--match ... --order-history <資料夾>`：用 EVIDENCE_EQUIVALENT 沿用的證據，拿舊工單記的指紋比；條件變了印 `BRIEF_STALE`，找不到舊工單印 `BRIEF_UNCONFIRMED`（沿用依據未確認）。2.2 起 `evidence_record.py verify --rerun` 加 `--brief` / `--order-history` 也用同一個函式做這項比對（見 evidence_record 第 10 點）。
   - `--po-acceptance PO_ACCEPTANCE.json [--candidate <40 位>]`：檢查 PO 驗收紀錄（schema `po-acceptance-v1`），必填 candidate_id、commit（40 位）、entry、manifest_sha256、offered_message_ref；outcome 是 seen / changes / accepted 時還要 reply_ref，還沒回覆寫 null。少綁一項、雜湊不是 64 位、commit 不是 `--candidate`，印 `~ UNBOUND_PO_REPLY`；綁好的印 `~ PO_ACCEPTANCE <候選 ID>: <commit 前 12 位> <入口>: 已驗收 (<訊息>)`。
   - 裁決可加 `ORDER_SHA256:`、`REPORT_SHA256:`（`--hash` 的值）。`--verdict ... --match` 時值不是現在的雜湊，印 `~ VERDICT_RECORD`。
+- **PO 驗收綁到成品本身（2.2，F09，shadow：只改 `~` 提示的內容，exit code 不變）**：
+  - `--po-acceptance` 另外核對成品檔：從 `--artifact-root <資料夾>`（預設：驗收紀錄檔所在的資料夾）讀 `entry`，要是這個資料夾裡的檔；紀錄有 `entry_sha256` 就要相同。選填的 `manifest` 欄寫 manifest 檔的路徑，要算得出 `manifest_sha256`。
+  - 檔不見、雜湊不同、入口在資料夾外、同一個 `reply_ref` 用在兩份不同成品（候選 ID、commit、入口、兩個雜湊任一不同），都印 `~ UNBOUND_PO_REPLY`，不再印已驗收。
+  - 沒有 `entry_sha256` 或沒列 `manifest` 路徑的舊紀錄照讀，印 `~ PO_ACCEPTANCE … PO 回覆 accepted，成品待核對（沒核對的項目）`，不算已驗收。要升成已驗收：補 `entry_sha256` 和 `manifest` 兩欄。
+- 證據紀錄有 `log_error`（2.2，F15：`run --log` 寫到一半失敗）：Standard 印提示「its --log was not written in full」，Strict 失敗。重新記一次就好。
 - 已有舊檔案的專案導入時：`--warn` 只警告、exit 0；`--since YYYY-MM-DD` 跳過較早的檔案（工單看 ISSUED_BY、RESUME_STATE 看 UPDATED、報告和裁決看第一個日期）；找不到日期的檔案無從比較，也跳過，印 `UNDATED` 並在最後一行另計，要查它就不加 `--since`。先用 `--warn` 看全貌，新工單再用 `--since` 嚴格檢查。舊檔案不追溯修改。
 
 ## setup_check.py（2.2.0）
@@ -364,6 +369,18 @@ python -I -X utf8 trace_report.py --orders <DIRECTOR>/orders --reports <報告�
   - 你看過：`--director-log` 讀 `PO_PRODUCT_REVIEW` 行，`--acceptance PO_ACCEPTANCE.json`（可重複）讀驗收紀錄，都要綁到報告的 HEAD。看的是別的成品，寫「看過別的成品」；看的是舊條件，寫「當時是舊條件」。
   - 另列 `BRIEF_STALE` / `BRIEF_UNCONFIRMED` 提示和綁不到成品的 PO 回覆（`UNBOUND_PO_REPLY`）。`--director-log` 有 BRIEF_LOCKED 時以它為依據，和 gate_check 相同。
   - `--director-log`、`--evidence-dir` 要配 `--brief`，否則 exit 2；`--acceptance` 可以單獨用。
+- **四種證明分開寫（2.2，F08，shadow：只多四欄、exit code 不變）**：初衷卡一節的表頭變成 `| 需求 | 內容 | 有人負責 | worker 自述 | 證據有效 | 綁鎖定依據 | 總監重跑 | 這版有驗證紀錄 | 你看過這個成品嗎 |`。
+  - worker 自述：報告的 AC 狀態。全部 PASS 寫 `自述全過（AC-1 PASS）`，**永遠不寫「有」**。
+  - 證據有效：加 `--evidence-dir` 時，每條 PASS 的證據檔都要是合格的 `evidence_record` 紀錄、HEAD 是報告的 HEAD（和 `gate_check --match --evidence-dir` 同一套檢查）；沒給寫「未知」。
+  - 綁鎖定依據：讀到的初衷卡是 `--director-log` 最新一行 BRIEF_LOCKED 的那份，而且狀態是 LOCKED。
+  - 總監重跑：`--director-log` 有這張工單每條 AC、這個報告 HEAD 的整行 `EVIDENCE_RERUN`（`evidence_record.py verify --rerun` 通過時印的 `LOG_LINE:`，總監貼進 LOG）。
+  - 這版有驗證紀錄：四欄都齊才寫 `有（AC-1：自述、證據、鎖定依據、總監重跑都齊）`；缺的寫 `部分（缺：…）`。只有 worker 自述的舊專案會從「有」變成「部分」，這是預期的：照上面四步補齊就會回到「有」。工單只有工單層 TRACES_TO（沒逐 AC 指定）時寫 `部分（工單層 TRACES_TO，沒逐 AC 指定；…）`。
+- **你看過哪一份成品（2.2，F09）**：
+  - 報告可加 `CANDIDATE_ID: <id>`，指定 PO_ACCEPTANCE 裡哪一份成品。同一 commit 有兩份以上成品、報告沒寫 CANDIDATE_ID，寫「分不出是哪一份」。
+  - 同一份成品有多筆紀錄時照 `replied_at` 取最新；沒有 `replied_at` 寫「分不出先後」。
+  - 報告 HEAD 認不出時，寫「報告 HEAD 認不出，對不到成品」，不拿別的成品充數。
+  - `PO_PRODUCT_REVIEW` 行沒寫 `manifest=` 的，寫「對該 commit 的歷史回覆：…，成品待核對」。
+  - 驗收紀錄的成品檔照 gate_check 的規則核對（入口和 manifest 從驗收紀錄檔所在的資料夾讀）；同一個 reply_ref 用在兩份不同成品，兩筆都列進綁不到。
 - 不悄悄略過檔案：三個資料夾裡不是該類檔案的 `.md`（工單沒有 `ISSUED_BY =`、報告沒有 `TASK_ID`、裁決沒有 `## A`）列在「沒計入的檔案」，寫數量和檔名。舊格式工單要算進來，補一行 `ISSUED_BY = <誰> <日期>`。
 - 只看檔案寫了什麼，不判斷做得對不對。資料夾或 `--decisions` / `--brief` / `--director-log` / `--acceptance` 檔不存在 exit 1，其他情況 exit 0。
 
@@ -404,6 +421,12 @@ python -I -X utf8 metrics_report.py --run <run 資料夾> [--compare <基準 run
 - 同一個 `event_id` 只算一次（照檔名順序取第一筆）；內容不同的會註明。缺欄位、不認得的 type、時間沒帶時區的事件不算，列出檔名和第幾筆。
 - 決策依 `decision_id` 去重：提出、已回覆、還在等（提出 − 已回覆 − 撤回）、撤回。重問：同一個 `topic_id` + `scope_id` 有幾個不同的 `ask_id`，減 1 再加總；同一個 `ask_id` 重送不算重問。
 - `--compare`：省下 = 基準 − 本次（正數表示本次比較少），PO 操作另印百分比，基準是 0 時百分比寫 UNKNOWN。沒有開始時間或沒有 `preview_ready` 時預覽時間寫 UNKNOWN，不寫 0。
+- **採樣完整度（2.2，F16）**：`run.json` 可加 `"sampling": {"version": 1, "complete": true, "scenario": "S-1", "counted": ["po_action", "asked"], "kinds": ["click", "type"]}`。
+  - `complete: true` 表示這一輪每一筆事件都記了；`counted` 寫有記的 type（省略＝全部）；`kinds` 寫認得的 po_action kind（省略＝任何短名稱）。
+  - 每個數字後面標完整度：確認／部分／未知。沒有標記的舊 run 照讀，標「未知」；沒有事件時印 UNKNOWN，不印 0。
+  - `--compare` 只在兩邊都「確認」、`scenario` 相同時才相減，否則寫 `UNKNOWN：採樣不完整（…）` 或 `UNKNOWN：劇本不同`。舊 run 要再比較：補上 sampling 標記。
+  - `kind` 不是短名稱（例如 `[]`、數字）或不在 `kinds` 裡的 po_action 隔離：列在「隔離」一行，不算、不中斷，exit 0。
+  - `answer_received` 要有同一個 `decision_id` + `ask_id`、時間更早的 `asked` 才算已回覆，否則列在「回覆對不到發問」。
 - 不加 `--run` 時輸出和以前完全相同；`--director` 和 `--run` 至少給一個。run 資料夾不存在：exit 1。
 
 ## scope_check.py
@@ -419,6 +442,7 @@ python -I -X utf8 scope_check.py --order <WO.md> --base <ref>        # 取代工
 - 看不到被 git 忽略的檔案和 repo 外的檔案。
 - 清單項目裡 ` #` 之後是註解。檔名本身有 ` #` 時，整個項目用反引號包起來：`` - `src/x #draft.txt` ``，反引號裡的字照原樣讀（檔名不能含反引號）。`gate_check.py --order` 看到沒包反引號、` #` 後面緊接著字（像 `a #1.txt`）而被切掉的項目會印提示；`# 說明`（`#` 後面有空格）當一般註解，不提示。
 - 工單有 `REQUIRED_CHANGES:` 清單時，每一條 glob 都要對到至少一個改動的檔案；沒對到的印 `MISSING   <glob>`，結果是 VIOLATION，最後一行多一個 ` missing=n`。沒有這個清單，輸出和以前一樣。`gate_check.py --order` 另外查每一條都在 SCOPE 裡、不在 FORBIDDEN 裡，否則這張工單做不到。
+- REQUIRED_CHANGES 看最後結果（2.2，F14）：比的是 merge base 和最後狀態（工作樹現在的檔案加未追蹤檔）的差，不是三段 diff 的聯集。暫存後又改回、或兩次 commit 改了又改回的檔，現在是 `MISSING`。加 `--candidate <commit>` 時改比 merge base 和那個 commit 的 tree，總監審查用這個。多印一行 `REQUIRED_BASIS: worktree-final|candidate=<12 位> final=<n>`。越界檢查（SCOPE / FORBIDDEN）照舊看聯集。
 - 最後一行貼進 TASK REPORT。exit 0 通過、1 越界或缺必要改動、2 沒辦法檢查（`NOT_RUN`，包括 SCOPE / FORBIDDEN 下一行不是 `- 項目`）。
 
 ## evidence_record.py
@@ -431,8 +455,10 @@ python -I -X utf8 evidence_record.py verify <紀錄.json> --rerun-recorded   # �
 ```
 
 - 紀錄放 repo 外的工作資料夾。只留最後 40 行（`--tail`）、每行最多 400 字；要完整輸出就加 `--log <檔案>`。
+- `--log` 的上層資料夾不存在時自動建立（2.2，v2.1.0 已知問題）。建不出來或開不了（例如上層是一個檔案、沒有寫入權限）：印 `EVIDENCE: NOT_RUN cannot open --log …`、exit 2，指令不跑、不寫紀錄（F15；以前會照跑並寫 exit 0 的紀錄）。跑到一半寫不進 log：指令照跑完，紀錄多一個 `log_error` 欄，結論行加 ` log=incomplete(…)`，指令 exit 0 時改 exit 4。
 - 沒有 git（2.1.0，例如從 ZIP 解開的規則包）：`run` 照樣跑指令、寫紀錄，`git` 欄是 `{"head": null, "dirty": null}`，stderr 印一行 `git metadata not available (git not found ...)`。這種紀錄在 `gate_check --match --evidence-dir` 算「沒有 git HEAD 的紀錄」（Strict 失敗、Standard 提示）。`verify` 不加 `--rerun` 照常可用；`--rerun` 要 git，沒有就 `NOT_RUN git not found ...`、exit 2，絕不算通過。
 - 螢幕只印一行結論，指令本身的 exit code 原樣傳回。
+- 讀到不是 UTF-8 的檔（2.2，v2.1.0 已知問題）：gate_check、scope_check、trace_report、metrics_report、evidence_record 都只印一行 `<工具>: NOT_RUN a file is not UTF-8 text (<檔名>) …`、exit 2，不再印 traceback。把檔案另存成 UTF-8 再跑。
 - 指令和輸出結尾會照原樣存檔，不要把密鑰放進指令。
 - `verify` 先查紀錄有沒有 `run` 寫的每個欄位（缺欄位或型別不對：`NOT_RUN not an evidence record`，exit 2；沒有 `schema` 的舊紀錄照讀，印提示），再比對產物雜湊。結論行把三件事分開印：`integrity=same|changed`（產物和紀錄時相同）、`test=not-rerun|passed|failed(...)`（只有 `--rerun` 跑核准的檢查而且 exit 0 才是 `passed`；不重跑就是 `not-rerun`，不算重跑過）、`artifacts=N missing=M`（紀錄時就缺的、現在不見的都算 missing）。有任何一項不對就是 `MISMATCH`，exit 1；產物缺了絕不會 OK。會變動的產物（含時間戳）重跑後一定不同，這種就只比 exit code 和人工看的部分。
 - `--rerun` 跑的是總監核准的檢查，不是紀錄裡寫的指令，四個參數都要給，少一個就 `NOT_RUN`、exit 2，什麼都不跑：
@@ -444,6 +470,9 @@ python -I -X utf8 evidence_record.py verify <紀錄.json> --rerun-recorded   # �
   6. 跑完再讀一次 `--repo`：HEAD、tree、狀態或旗標有變，就是 `MISMATCH`、exit 1。
   7. 紀錄的 `order` 欄（`run --order` 寫的工單 ID、REVISION、雜湊）照 `gate_check.py --match --evidence-dir` 的規則比對，LOG 裡的整行 `EVIDENCE_EQUIVALENT` 也照算：Strict 工單不符是 `MISMATCH`、exit 1，Standard 印 `~` 提示；沒綁的紀錄 REVISION 1 印 WARN。
   結論行最後加 `check=AC-1 source=order candidate=<12 位>`。
+  8. （2.2，F10）候選 commit 的 tree 有 symlink（mode 120000）或 submodule（160000）時，重建出來的就不是候選 commit，所以 `NOT_RUN unsupported tree mode …`、exit 2，什麼都不跑。這種 AC 改用別的方式驗，或把連結拿出候選 commit。
+  9. （2.2，F08）通過時多印一行 `LOG_LINE: EVIDENCE_RERUN <WO-ID> <AC> candidate=<40 位> result=ok record=<檔名>`，總監整行貼進 DIRECTOR_LOG，`trace_report --brief` 的「總監重跑」欄讀它。
+  10. （2.2，v2.1.0 已知問題）加 `--brief <BRIEF.md>`（初衷卡）和 / 或 `--order-history <資料夾>`：用 `gate_check --match` 的同一組函式比初衷卡。工單釘的指紋和鎖定的初衷卡比（`brief_notes`）；紀錄是用 EVIDENCE_EQUIVALENT 從舊工單沿用的，再拿舊工單釘的指紋比（`carried_notes`）。結果印 `~ BRIEF_STALE` / `~ BRIEF_UNCONFIRMED`，`LOG_LINE` 結尾多 ` brief=ok|stale|unconfirmed`（`ok` 要有 `--brief`，而且初衷卡是 `--dispatch-log` 裡最新的 BRIEF_LOCKED；只給 `--order-history` 沒給 `--brief` 時沒東西可比，印 `brief=unconfirmed`）。只是提示，exit code 不變；不加這兩個參數時 `LOG_LINE` 和以前一樣。`brief=stale` 或 `brief=unconfirmed` 的行，`trace_report` 的「總監重跑」欄不算，顯示「沒有：重跑時鎖定依據不符」。
 - 暫存資料夾只有已 commit 的檔，沒有 `.git`、未追蹤檔和被忽略的檔，跑完就刪。這證明「跑的是總監核准的檢查、在候選 commit 的 tree 上」，但檢查仍會執行候選 commit 裡 worker 寫的測試碼，不是沙箱。`--repo` 仍要乾淨，建議用 `git worktree add --detach <目錄> <候選 commit>` 新開（只新增 worktree，不刪別的）。
 - `--rerun-recorded` 是 v0.12 的 `--rerun`：在紀錄的 cwd 跑紀錄寫的指令。能改紀錄的人就能決定跑什麼，所以結論是 `test=recorded-command-passed source=record`，永遠不印 `test=passed`。v0.12 只寫 `--rerun` 的指令現在會 exit 2，改成上面的完整寫法。
 

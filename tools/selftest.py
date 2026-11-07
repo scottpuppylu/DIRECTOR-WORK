@@ -121,7 +121,7 @@ GIT_GROUPS = {
     "test_scope", "test_submodule_ignore", "test_hook", "test_hook_protect", "test_hook_rules", "test_session_profiles",
     "test_pause", "test_audit", "test_audit_names", "test_review", "test_guard_modes", "test_doctor",
     "test_doctor_launch", "test_worker_clone", "test_preflight", "test_trusted_rerun", "test_rerun_binding",
-    "test_trusted_isolation",
+    "test_trusted_isolation", "test_rerun_tree_modes_v220", "test_required_final_v220", "test_rerun_brief_v220",
 }
 
 
@@ -2542,13 +2542,17 @@ def test_po_acceptance(tmp):
     """2.1 (題4 P-2, shadow): PO_ACCEPTANCE.json binds the PO's reply to one product: candidate ID, commit, entry file,
     manifest SHA-256 and the message refs. A record that does not bind is `~ UNBOUND_PO_REPLY`; the exit code is 0."""
     base = tmp / "po_acceptance"
-    base.mkdir()
+    (base / "out").mkdir(parents=True)
+    # 2.2 (F09): the product files are checked too, so the fixture has them and their real hashes
+    (base / "out" / "index.html").write_bytes(b"<p>C-1</p>")
+    (base / "out" / "MANIFEST.txt").write_bytes(b"index.html\n")
     good = {"schema": "po-acceptance-v1", "candidate_id": "C-1", "commit": "a" * 40, "entry": "out/index.html",
-            "entry_sha256": "c" * 64, "manifest_sha256": "b" * 64, "offered_message_ref": "msg-10", "reply_ref": "msg-11",
+            "entry_sha256": hashlib.sha256(b"<p>C-1</p>").hexdigest(), "manifest": "out/MANIFEST.txt",
+            "manifest_sha256": hashlib.sha256(b"index.html\n").hexdigest(), "offered_message_ref": "msg-10", "reply_ref": "msg-11",
             "outcome": "accepted", "replied_at": "2026-11-08T10:00:00+08:00", "excerpt": "可以"}
 
     def case(name, data, says, lacks=None, *extra):
-        path = base / f"{len(list(base.iterdir()))}.json"
+        path = base / f"{len(list(base.glob('*.json')))}.json"
         path.write_text(data if isinstance(data, str) else json.dumps(data, ensure_ascii=False), encoding="utf-8")
         expect(f"po acceptance: {name}", "gate_check.py", 0, "--po-acceptance", path, *extra, says=says, lacks=lacks)
 
@@ -2598,22 +2602,23 @@ BRIEF_FINGERPRINTS_V1 = {json.dumps({"B-2": B2_V1})}
         "RESULT: PARTIAL\nACCEPTANCE:\n| ID | 實際 | 證據 | 狀態 |\n|---|---|---|---|\n| AC-1 | exit 0 | e.json | PASS |\n"
         "| AC-2 | waiting | — | PENDING_PO |\n")
     brief = put("BRIEF.md", BRIEF_V1)
-    review = f"PO_PRODUCT_REVIEW WO-001 candidate={head[:12]} outcome=seen ref=msg-3 brief=B-2:{B2_V1}"
+    review = f"PO_PRODUCT_REVIEW WO-001 candidate={head[:12]} outcome=seen ref=msg-3 manifest={'d' * 64} brief=B-2:{B2_V1}"
     log = put("LOG.md", "# DIRECTOR_LOG\n2026-11-08 11:00 +08:00 | " + review + " | PO 看過匯出\n"
               "PO_PRODUCT_REVIEW WO-001 candidate=zz outcome=maybe\n")
     base = ("--orders", root / "orders", "--reports", root / "reports")
     expect("trace brief: without --brief no brief section", "trace_report.py", 0, *base,
            lacks=["初衷卡三欄", "BRIEF_STALE", "UNBOUND_PO_REPLY"])
     expect("trace brief: three columns, brief as pinned", "trace_report.py", 0, *base, "--brief", brief, "--director-log", log,
-           says=["| 需求 | 內容 | 有人負責 | 這版有驗證紀錄 | 你看過這個成品嗎 |",
-                 "| B-1 | 給櫃台 | 沒有工單 | — | — |",
-                 "| B-2 | 匯出姓名 | WO-001 | WO-001：有（AC-1 PASS、AC-2 PENDING_PO） | WO-001：看過（msg-3） |",
+           says=["| 需求 | 內容 | 有人負責 | worker 自述 | 證據有效 | 綁鎖定依據 | 總監重跑 | 這版有驗證紀錄 | 你看過這個成品嗎 |",
+                 "| B-1 | 給櫃台 | 沒有工單 | — | — | — | — | — | — |",
+                 "| B-2 | 匯出姓名 | WO-001 | WO-001：部分（AC-1 PASS、AC-2 PENDING_PO） | ",
+                 "| WO-001：部分（缺：自述、證據、鎖定依據、總監重跑） | WO-001：看過（msg-3） |",
                  "## PO 回覆沒綁到成品（UNBOUND_PO_REPLY）\n- ", "candidate= is not a commit"], lacks="- BRIEF_STALE")
     put("BRIEF.md", BRIEF_V2)
     expect("trace brief: a changed row is not verified this version (F-1)", "trace_report.py", 0, *base, "--brief", brief,
            "--director-log", log,
-           says=["| B-2 | 匯出姓名與總額 | WO-001 | WO-001：沒有：工單是照舊條件寫的，新條件待重驗 | "
-                 "WO-001：看過（msg-3），但當時是舊條件，新條件還沒看 |",
+           says=["| B-2 | 匯出姓名與總額 | WO-001 | ", "| WO-001：沒有：工單是照舊條件寫的，新條件待重驗 | ",
+                 "| WO-001：看過（msg-3），但當時是舊條件，新條件還沒看 |",
                  "- BRIEF_STALE WO-001 B-2 AC-1,AC-2: "])
     put("BRIEF.md", BRIEF_V1)
     put("LOG2.md", review.replace(head[:12], "f" * 12) + "\n")
@@ -2623,13 +2628,15 @@ BRIEF_FINGERPRINTS_V1 = {json.dumps({"B-2": B2_V1})}
     record = {"schema": "po-acceptance-v1", "candidate_id": "C-1", "commit": head, "entry": "out.csv", "manifest_sha256": "b" * 64,
               "offered_message_ref": "msg-10", "reply_ref": "msg-11", "outcome": "accepted"}
     put("ACC.json", json.dumps([record, dict(record, manifest_sha256="short")]))
+    put("out.csv", "name\n")  # 2.2 (F09): the entry must be there; without entry_sha256 its content is not checked
     expect("trace brief: a bound PO_ACCEPTANCE record answers 你看過", "trace_report.py", 0, *base, "--brief", brief,
-           "--acceptance", root / "ACC.json", says=["| WO-001：已接受（msg-11） |", "ACC.json #2：manifest_sha256 is not 64 hex"])
+           "--acceptance", root / "ACC.json", says=["| WO-001：PO 回覆已接受（msg-11），成品待核對（entry 沒有 entry_sha256",
+                                                     "ACC.json #2：manifest_sha256 is not 64 hex"])
     expect("trace brief: --acceptance alone lists unbound records", "trace_report.py", 0, *base, "--acceptance", root / "ACC.json",
            says="## PO 回覆沒綁到成品（UNBOUND_PO_REPLY）\n- ", lacks="初衷卡三欄")
     (root / "evidence").mkdir()
     expect("trace brief: with --evidence-dir a PASS needs its evidence file", "trace_report.py", 0, *base, "--brief", brief,
-           "--evidence-dir", root / "evidence", says="WO-001：還沒有（AC-1 PASS 但證據檔找不到、AC-2 PENDING_PO）")
+           "--evidence-dir", root / "evidence", says="| WO-001：沒有：AC-1: e.json ")
     expect("trace brief: --director-log needs --brief", "trace_report.py", 2, *base, "--director-log", log)
     expect("trace brief: a missing --brief file", "trace_report.py", 1, *base, "--brief", root / "gone.md", says="FAIL file not found")
 
@@ -2652,7 +2659,8 @@ BRIEF_FINGERPRINTS_V1 = {json.dumps({"B-2": B2_V1})}
     put("LOG3.md", (line.group(1) if line else "BRIEF_LOCKED") + "\n")
     put("BRIEF.md", BRIEF_V2.replace("LOCKED", "DRAFT"))
     expect("trace brief: a draft after BRIEF_LOCKED is not the basis", "trace_report.py", 0, *base, "--brief", brief,
-           "--director-log", root / "LOG3.md", says=["compared with the locked snapshot", "| B-2 | 匯出姓名 | WO-001 | WO-001：有"],
+           "--director-log", root / "LOG3.md", says=["compared with the locked snapshot", "| B-2 | 匯出姓名 | WO-001 | WO-001：部分",
+                                                         "| WO-001：有 | WO-001：沒有：log 沒有這版的 EVIDENCE_RERUN |"],
            lacks="- BRIEF_STALE")
 
 
@@ -5891,7 +5899,10 @@ def test_metrics_run(tmp):
         (folder / "events").mkdir(parents=True)
     event = lambda eid, type_, at, **extra: {"v": 1, "event_id": eid, "type": type_, "at": at, **extra}
     ask = lambda eid, at, decision, topic, ask_id: event(eid, "asked", at, decision_id=decision, topic_id=topic, scope_id="S", ask_id=ask_id)
-    (run_dir / "run.json").write_text(json.dumps({"v": 1, "started_at": "2026-11-08T10:00:00+08:00"}), encoding="utf-8")
+    marker = {"version": 1, "complete": True, "scenario": "S-1"}  # 2.2 (F16): every event recorded, one scenario
+    (run_dir / "run.json").write_text(json.dumps({"v": 1, "started_at": "2026-11-08T10:00:00+08:00", "sampling": marker}),
+                                      encoding="utf-8")
+    (base / "run.json").write_text(json.dumps({"v": 1, "sampling": marker}), encoding="utf-8")
     first = ask("e1", "2026-11-08T10:01:00+08:00", "D1", "T1", "A1")
     (run_dir / "events" / "a.json").write_text(json.dumps([
         first, first,  # the same event written twice counts once
@@ -5909,17 +5920,19 @@ def test_metrics_run(tmp):
         ask("b4", "2026-11-07T09:01:00+08:00", "D1", "T1", "A1")]), encoding="utf-8")
     expect("metrics --run counts the run", "metrics_report.py", 0, "--run", run_dir,
            says=["事件 7 筆；重複 event_id 略過 1 筆；格式不對沒算 1 筆：a.json#9", "| 第一個可用預覽 | 12.5 分鐘 |",
-                 "| 決策 | 提出 2、已回覆 1、還在等 1、撤回 0 |", "| 重問 | 1 |", "| PO 操作 | 4（click 3、type 1） |"],
+                 "| 決策 | 提出 2、已回覆 1、還在等 1、撤回 0 |", "| 重問 | 1 |", "| PO 操作 | 4（click 3、type 1）；完整度確認 |"],
            lacks="# 成效數字")
     expect("metrics --compare subtracts from the baseline", "metrics_report.py", 0, "--run", run_dir, "--compare", base,
-           says=["| PO 操作 | 10 | 4 | 6（60%） |", "| 第一個可用預覽 | 30.0 分鐘 | 12.5 分鐘 | 17.5 分鐘 |", "| 重問 | 0 | 1 | -1 |"])
+           says=["| PO 操作 | 10（確認） | 4（確認） | 6（60%） |", "| 第一個可用預覽 | 30.0 分鐘 | 12.5 分鐘 | 17.5 分鐘 |", "| 重問 | 0 | 1 | -1 |"])
     expect("metrics --compare: more operations than the baseline is a negative saving", "metrics_report.py", 0,
-           "--run", base, "--compare", run_dir, says="| PO 操作 | 4 | 10 | -6（-150%） |")
+           "--run", base, "--compare", run_dir, says="| PO 操作 | 4（確認） | 10（確認） | -6（-150%） |")
     empty = tmp / "mrun" / "empty"
     (empty / "events").mkdir(parents=True)
+    (empty / "run.json").write_text(json.dumps({"v": 1, "sampling": marker}), encoding="utf-8")
     (empty / "events" / "x.json").write_text(json.dumps([ask("z1", "2026-11-08T10:01:00+08:00", "D1", "T1", "A1")]), encoding="utf-8")
     expect("metrics --run: no start, no preview, no PO action", "metrics_report.py", 0, "--run", empty, "--compare", empty,
-           says=["UNKNOWN：沒有開始時間", "| PO 操作 | 0 |", "| PO 操作 | 0 | 0 | 0（百分比 UNKNOWN：基準是 0） |"])
+           says=["UNKNOWN：沒有開始時間", "| PO 操作 | 0；完整度確認 |",
+                 "| PO 操作 | 0（確認） | 0（確認） | 0（百分比 UNKNOWN：基準是 0） |"])
     director = tmp / "mrun" / "DIRECTOR"
     director.mkdir()
     expect("metrics --run with --director prints both", "metrics_report.py", 0, "--director", director,
@@ -6420,6 +6433,508 @@ def test_first_step_docs():
         killed(f"first step docs: stale first step put back in {path}", first_step_problems(dict(docs, **{path: docs[path] + "\n" + line + "\n"})))
 
 
+def check_true(name, ok, detail=""):
+    """One plain assertion counted like an expect() case (2.2 W4 tests that call a tool's function directly)."""
+    global total
+    total += 1
+    if not ok:
+        failures.append(f"{name}: {detail}")
+
+
+def proof_fixture(root, head, traces="B-2", column=True, candidate_id=None, report_head=None):
+    """2.2 W4: one order, one report and the locked brief for trace_report's proof and PO columns."""
+    for name in ("orders", "reports", "evidence"):
+        (root / name).mkdir(parents=True, exist_ok=True)
+    table = ("| ID | 類型 | 要求 | 驗證方法 | 預期 | 追溯 |\n|---|---|---|---|---|---|\n| AC-1 | AUTO | CSV 有姓名 | 跑檢查 | name | B-2 |\n"
+             if column else "| ID | 類型 | 要求 | 驗證方法 | 預期 |\n|---|---|---|---|---|\n| AC-1 | AUTO | CSV 有姓名 | 跑檢查 | name |\n")
+    (root / "orders" / "WO-001.md").write_text(
+        f"# WO-001\nISSUED_BY = Director 2026-11-08\nREVISION = 1\nTRACES_TO = {traces}\nBRIEF_REVISION = 1\n"
+        f"BRIEF_FINGERPRINTS_V1 = {json.dumps({'B-2': B2_V1})}\n\n{table}", encoding="utf-8")
+    (root / "reports" / "report.md").write_text(
+        f"# TASK REPORT\nTASK_ID: WO-001\nHEAD: {report_head or head}\nORDER: WO-001.md REVISION 1\n"
+        + (f"CANDIDATE_ID: {candidate_id}\n" if candidate_id else "")
+        + "RESULT: PASS\nACCEPTANCE:\n| ID | 實際 | 證據 | 狀態 |\n|---|---|---|---|\n| AC-1 | exit 0 | AC-1.json | PASS |\n",
+        encoding="utf-8")
+    brief = root / "BRIEF.md"
+    brief.write_text(BRIEF_V1, encoding="utf-8")
+    _, out = run("gate_check.py", "--brief", brief, "--snapshot", root / "brief-history")
+    lock = re.search(r"^  (BRIEF_LOCKED .*)$", out, re.M)
+    return brief, (lock.group(1) if lock else "BRIEF_LOCKED missing")
+
+
+def test_proof_columns_v220(tmp):
+    """2.2 (F08, shadow): 這版有驗證紀錄 says 有 only when the worker's PASS, a valid evidence record, the locked brief
+    and the Director's EVIDENCE_RERUN line all hold; a worker's own PASS alone is 自述全過, never 有."""
+    head = "0123456789abcdef0123456789abcdef01234567"
+    root = tmp / "proof220"
+    brief, lock = proof_fixture(root, head)
+    evidence_file(root / "evidence", "AC-1.json", head)
+    rerun = f"EVIDENCE_RERUN WO-001 AC-1 candidate={head} result=ok record=AC-1.json"
+    full = root / "LOG.md"
+    full.write_text(f"{lock}\n2026-11-08 12:00 +08:00 | {rerun} | 總監重跑\n", encoding="utf-8")
+    base = ("--orders", root / "orders", "--reports", root / "reports", "--brief", brief)
+    ev = ("--evidence-dir", root / "evidence")
+    expect("proof 2.2: all four kinds of proof say 有", "trace_report.py", 0, *base, *ev, "--director-log", full,
+           says=["| WO-001：自述全過（AC-1 PASS） | WO-001：有 | WO-001：有 | WO-001：有 | "
+                 "WO-001：有（AC-1：自述、證據、鎖定依據、總監重跑都齊） |"])
+    expect("proof 2.2: only the worker's PASS is never 有", "trace_report.py", 0, *base,
+           says=["WO-001：自述全過（AC-1 PASS）", "WO-001：部分（缺：證據、鎖定依據、總監重跑）"], lacks="WO-001：有（")
+    no_rerun = root / "LOG-norerun.md"
+    no_rerun.write_text(lock + "\n", encoding="utf-8")
+    expect("proof 2.2: no EVIDENCE_RERUN line", "trace_report.py", 0, *base, *ev, "--director-log", no_rerun,
+           says=["WO-001：沒有：log 沒有這版的 EVIDENCE_RERUN", "WO-001：部分（缺：總監重跑）"])
+    other = root / "LOG-other.md"
+    other.write_text(f"{lock}\n{rerun.replace(head, 'f' * 40)}\n", encoding="utf-8")
+    expect("proof 2.2: a rerun of another candidate is not this one", "trace_report.py", 0, *base, *ev, "--director-log", other,
+           says="WO-001：部分（缺：總監重跑）")
+    no_lock = root / "LOG-nolock.md"
+    no_lock.write_text(rerun + "\n", encoding="utf-8")
+    expect("proof 2.2: no BRIEF_LOCKED line, the brief is not the locked basis", "trace_report.py", 0, *base, *ev,
+           "--director-log", no_lock, says="WO-001：部分（缺：鎖定依據）")
+    expect("proof 2.2: a record that is not an evidence file", "trace_report.py", 0, *base, ev[0], root / "orders",
+           "--director-log", full, says=["WO-001：沒有：AC-1: ", "WO-001：部分（缺：證據）"])
+    evidence_file(root / "evidence", "AC-1.json", "f" * 40)
+    expect("proof 2.2: an evidence record of another HEAD", "trace_report.py", 0, *base, *ev, "--director-log", full,
+           says="WO-001：部分（缺：證據）")
+    whole = tmp / "proof220-whole"
+    brief2, _ = proof_fixture(whole, head, traces="B-1, B-2", column=False)
+    expect("proof 2.2: two TRACES_TO without a 追溯 column is order-level only", "trace_report.py", 0,
+           "--orders", whole / "orders", "--reports", whole / "reports", "--brief", brief2,
+           says="WO-001：部分（工單層 TRACES_TO，沒逐 AC 指定；AC-1 PASS）")
+
+
+def test_po_product_v220(tmp):
+    """2.2 (F09, shadow): a PO reply binds to one product (candidate ID, commit, entry and manifest hashes), the files
+    it names must be there as recorded, a reply_ref binds one product, and a report HEAD that is no commit binds nothing."""
+    head = "a" * 40
+    root = tmp / "po220"
+    (root / "out").mkdir(parents=True)
+    files = {"out/A.html": b"<p>A</p>", "out/B.html": b"<p>B</p>", "out/MANIFEST.txt": b"A.html\nB.html\n"}
+    for name, data in files.items():
+        (root / name).write_bytes(data)
+    sha = lambda name: hashlib.sha256(files[name]).hexdigest()
+    a = {"schema": "po-acceptance-v1", "candidate_id": "A-preview", "commit": head, "entry": "out/A.html",
+         "entry_sha256": sha("out/A.html"), "manifest": "out/MANIFEST.txt", "manifest_sha256": sha("out/MANIFEST.txt"),
+         "offered_message_ref": "msg-1", "reply_ref": "msg-2", "outcome": "accepted"}
+    b = dict(a, candidate_id="B-preview", entry="out/B.html", entry_sha256=sha("out/B.html"), offered_message_ref="msg-3",
+             reply_ref=None, outcome=None)
+
+    def acc(name, records):
+        path = root / f"{name}.json"
+        path.write_text(json.dumps(records), encoding="utf-8")
+        return path
+
+    def po(name, record, says, lacks=None, *extra):
+        expect(f"po 2.2: {name}", "gate_check.py", 0, "--po-acceptance", acc(name, [record]), *extra, says=says, lacks=lacks)
+
+    po("every file as recorded", a, "~ PO_ACCEPTANCE A-preview: aaaaaaaaaaaa out/A.html: 已驗收 (msg-2)", "UNBOUND_PO_REPLY")
+    po("entry missing", dict(a, entry="out/gone.html"), "~ UNBOUND_PO_REPLY A-preview: entry out/gone.html not found under", "已驗收")
+    po("entry outside the product folder", dict(a, entry="../A.html"), "is outside the product folder", "已驗收")
+    po("entry changed", dict(a, entry_sha256="0" * 64), "does not hash to entry_sha256 000000000000: the product changed", "已驗收")
+    po("manifest changed", dict(a, manifest_sha256="0" * 64), "manifest out/MANIFEST.txt does not hash to manifest_sha256", "已驗收")
+    po("no entry_sha256 is not checked", {k: v for k, v in a.items() if k != "entry_sha256"},
+       "PO 回覆 accepted，成品待核對（entry 沒有 entry_sha256，內容沒核對）", "已驗收")
+    po("manifest without its path", {k: v for k, v in a.items() if k != "manifest"},
+       "成品待核對（manifest 沒列路徑（只有 manifest_sha256），沒核對）", "已驗收")
+    po("--artifact-root is the product folder", a, "entry out/A.html not found under", "已驗收", "--artifact-root", root / "out")
+    expect("po 2.2: one reply_ref for two products", "gate_check.py", 0, "--po-acceptance",
+           acc("shared", [a, dict(b, reply_ref="msg-2", outcome="accepted")]),
+           says="reply_ref msg-2 is used for 2 different products; one reply binds one product", lacks="已驗收")
+
+    for name in ("orders", "reports", "evidence"):
+        (root / name).mkdir(exist_ok=True)
+
+    def trace(name, records, says, candidate_id=None, report_head=None, log=None, lacks=None):
+        brief, _ = proof_fixture(root, head, candidate_id=candidate_id, report_head=report_head)
+        extra = ("--director-log", log) if log else ()
+        expect(f"po 2.2 trace: {name}", "trace_report.py", 0, "--orders", root / "orders", "--reports", root / "reports",
+               "--brief", brief, "--acceptance", acc("t-" + name.split()[0], records), *extra, says=says, lacks=lacks)
+
+    trace("two products one commit, no CANDIDATE_ID", [b, a],
+          "WO-001：同一 commit 有 2 份成品（A-preview、B-preview），報告沒寫 CANDIDATE_ID，分不出是哪一份 |", lacks="已接受")
+    trace("CANDIDATE_ID A picks A", [b, a], "| WO-001：已接受（msg-2） |", candidate_id="A-preview")
+    trace("CANDIDATE_ID B picks B", [b, a], "| WO-001：已送出，還沒回覆（msg-3） |", candidate_id="B-preview", lacks="已接受")
+    later = dict(a, reply_ref="msg-4", outcome="changes")
+    trace("same product twice, no replied_at", [a, later], "A-preview 有 2 筆紀錄，沒有 replied_at，分不出先後", lacks="已接受")
+    trace("same product twice, by replied_at", [dict(later, replied_at="2026-11-08T11:00:00+08:00"),
+                                                 dict(a, replied_at="2026-11-08T10:00:00+08:00")],
+          "| WO-001：看過，要求修改（msg-4） |", lacks="已接受")
+    trace("one reply_ref for two products", [a, dict(b, reply_ref="msg-2", outcome="accepted")],
+          ["reply_ref msg-2 用在 2 份不同成品（A-preview、B-preview）", "| WO-001：還沒看 |"], lacks="已接受")
+    review = root / "REVIEW.md"
+    review.write_text(f"PO_PRODUCT_REVIEW WO-001 candidate={head} outcome=accepted ref=msg-2\n", encoding="utf-8")
+    trace("report HEAD is not a commit", [], "| WO-001：報告 HEAD 認不出，對不到成品 |", report_head="missing", log=review,
+          lacks="已接受")
+    trace("review without manifest= is history only", [], "WO-001：對該 commit 的歷史回覆：已接受（msg-2），成品待核對", log=review)
+
+
+def test_rerun_tree_modes_v220(tmp):
+    """2.2 (F10): `verify --rerun` refuses a candidate tree with a symlink (120000) or a submodule (160000): the
+    rebuilt checkout would not be the candidate, so the result is NOT_RUN, never OK."""
+    root = tmp / "modes220"
+    repo, out = root / "repo", root / "records"
+    repo.mkdir(parents=True)
+    py = sys.executable
+
+    def git(*args):
+        return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false",
+                               *args], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+
+    (repo / "check.py").write_text("print('checked')\n", encoding="utf-8")
+    git("init", "-q", "-b", "main")
+    git("add", "-A")
+    git("commit", "-q", "-m", "a")
+    first = git("rev-parse", "HEAD")
+    order = root / "WO-001-parser.md"
+    body = with_checks(TYPED_ORDER.format(base=first), f"AC-1: {json.dumps([py, 'check.py'])}")
+    order.write_text(body, encoding="utf-8")
+    log = root / "log.md"
+    log.write_text(f"DISPATCH WO-001 rev=1 sha={hashlib.sha256(body.encode('utf-8')).hexdigest()}\n", encoding="utf-8")
+    expect("modes 2.2: record the approved check", "evidence_record.py", 0, "run", "--out-dir", out, "--label", "AC-1",
+           "--cwd", repo, "--", py, "check.py", says="exit=0")
+    data = json.loads(next(out.glob("*-AC-1.json")).read_text(encoding="utf-8"))
+    blob = subprocess.run(["git", "hash-object", "-w", "--stdin"], cwd=repo, input=b"check.py", capture_output=True,
+                          check=True).stdout.decode().strip()
+    listing = git("ls-tree", "HEAD")
+    for mode, path, sha, what in (("120000", "link", blob, "symlink"), ("160000", "sub", first, "submodule")):
+        # the candidate commit is built from objects only, so the checkout stays clean (the rerun refuses a dirty one)
+        kind = "commit" if mode == "160000" else "blob"
+        tree = subprocess.run(["git", "mktree"], cwd=repo, input=f"{listing}\n{mode} {kind} {sha}\t{path}\n".encode(),
+                              capture_output=True, check=True).stdout.decode().strip()  # bytes: no CRLF on Windows
+        commit = git("commit-tree", tree, "-p", first, "-m", what)
+        git("checkout", "-q", "--detach", commit)  # the rerun runs in a clean checkout at the candidate
+        record = root / f"{what}.json"
+        record.write_text(json.dumps({**data, "git": {"head": commit, "dirty": False}}), encoding="utf-8")
+        expect(f"modes 2.2: a {what} in the candidate tree is NOT_RUN", "evidence_record.py", 2, "verify", record, "--rerun",
+               "--order", order, "--dispatch-log", log, "--repo", repo, "--candidate", commit,
+               says=["EVIDENCE_VERIFY: NOT_RUN", f"unsupported tree mode {mode}"], lacks=["EVIDENCE_VERIFY: OK", "LOG_LINE:"])
+        git("checkout", "-q", "main")
+    plain = first
+    record = root / "plain.json"
+    record.write_text(json.dumps({**data, "git": {"head": plain, "dirty": False}}), encoding="utf-8")
+    expect("modes 2.2: a plain tree reruns and prints its EVIDENCE_RERUN line", "evidence_record.py", 0, "verify", record,
+           "--rerun", "--order", order, "--dispatch-log", log, "--repo", repo, "--candidate", plain,
+           says=["EVIDENCE_VERIFY: OK", f"LOG_LINE: EVIDENCE_RERUN WO-001 AC-1 candidate={plain} result=ok record=plain.json"])
+
+
+def test_required_final_v220(tmp):
+    """2.2 (F14): REQUIRED_CHANGES is matched against the final result (the working files now, or --candidate's tree),
+    not the union of layers: a file staged and put back, or changed and reverted in two commits, is MISSING."""
+    repo = tmp / "req220"
+    repo.mkdir()
+
+    def git(*args):
+        return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false",
+                               *args], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+
+    src = repo / "required.txt"
+    src.write_text("base\n", encoding="utf-8")
+    git("init", "-q", "-b", "main")
+    git("add", "-A")
+    git("commit", "-q", "-m", "base")
+    base = git("rev-parse", "HEAD")
+    order = tmp / "req220-WO-001.md"
+    order.write_text(f"BASE_REF = {base}\nSCOPE:\n- required.txt\nFORBIDDEN:\n- NONE\nREQUIRED_CHANGES:\n- required.txt\n",
+                     encoding="utf-8")
+    src.write_text("staged\n", encoding="utf-8")
+    git("add", "required.txt")
+    src.write_text("base\n", encoding="utf-8")
+    expect("required 2.2: staged and put back is MISSING", "scope_check.py", 1, "--order", order, "--repo", repo,
+           says=["MISSING   required.txt", "REQUIRED_BASIS: worktree-final final=0", "missing=1"])
+    src.write_text("changed\n", encoding="utf-8")
+    expect("required 2.2: a real change in the working files", "scope_check.py", 0, "--order", order, "--repo", repo,
+           says=["REQUIRED_BASIS: worktree-final final=1", "missing=0"])
+    git("add", "-A")
+    git("commit", "-q", "-m", "change")
+    changed = git("rev-parse", "HEAD")
+    expect("required 2.2: --candidate with the change", "scope_check.py", 0, "--order", order, "--repo", repo,
+           "--candidate", changed, says=[f"REQUIRED_BASIS: candidate={changed[:12]} final=1", "missing=0"])
+    src.write_text("base\n", encoding="utf-8")
+    git("commit", "-q", "-am", "revert")
+    expect("required 2.2: --candidate changed then reverted is MISSING", "scope_check.py", 1, "--order", order, "--repo", repo,
+           "--candidate", "HEAD", says=["MISSING   required.txt", "final=0"])
+    expect("required 2.2: --candidate that is no commit", "scope_check.py", 2, "--order", order, "--repo", repo,
+           "--candidate", "nope")
+
+
+def test_evidence_log_v220(tmp):
+    """2.2 (F15): a --log that cannot be opened runs nothing, writes no record and exits 2 (NOT_RUN); a log that stops
+    being written mid-run is recorded as log_error, the run exits 4, and gate_check notes the record is incomplete."""
+    root = tmp / "elog220"
+    root.mkdir()
+    out = root / "records"
+    (root / "afile").write_text("not a folder\n", encoding="utf-8")
+    expect("evidence log 2.2: a --log whose folder cannot be made is NOT_RUN", "evidence_record.py", 2, "run", "--log",
+           root / "afile" / "check.log", "--out-dir", out, "--label", "AC-1", "--", sys.executable, "-c", "print(1)",
+           says="EVIDENCE: NOT_RUN cannot open --log", lacks="EVIDENCE: exit=0")
+    check_true("evidence log 2.2: NOT_RUN writes no record", not out.exists() or not list(out.glob("*.json")),
+               f"records: {list(out.glob('*.json')) if out.exists() else None}")
+    expect("evidence log 2.2: a --log that opens is written", "evidence_record.py", 0, "run", "--log", root / "check.log",
+           "--out-dir", out, "--label", "AC-1", "--", sys.executable, "-c", "print('fixture output')", says="EVIDENCE: exit=0 lines=1")
+    check_true("evidence log 2.2: the log holds the output", (root / "check.log").read_text(encoding="utf-8").strip() == "fixture output")
+    spec = importlib.util.spec_from_file_location("evidence_record_w4", TOOLS / "evidence_record.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    class Full:
+        def write(self, data):
+            raise OSError(28, "No space left on device")
+
+        def close(self):
+            pass
+
+    errors = []
+    code, timed_out, lines, tail = module.execute([sys.executable, "-c", "print('a'); print('b')"], str(root), 5, 30, Full(),
+                                                  log_errors=errors)
+    check_true("evidence log 2.2: a write error mid-run keeps the command's result", (code, lines) == (0, 2) and bool(errors),
+               f"code={code} lines={lines} errors={errors}")
+    spec = importlib.util.spec_from_file_location("gate_check_w4", TOOLS / "gate_check.py")
+    gate = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gate)
+    folder = root / "ev"
+    folder.mkdir()
+    head = "b" * 40
+    evidence_file(folder, "AC-1.json", head, log_error="No space left on device")
+    problems, notes = [], []
+    gate.check_evidence("AC-1", "AC-1.json", folder, head, problems, notes)
+    check_true("evidence log 2.2: gate_check notes an incomplete log", any("was not written in full" in n for n in notes) and not problems,
+               f"problems={problems} notes={notes}")
+    problems, notes = [], []
+    gate.check_evidence("AC-1", "AC-1.json", folder, head, problems, notes, strict=True)
+    check_true("evidence log 2.2: Strict fails an incomplete log", any("was not written in full" in p for p in problems), f"{problems}")
+
+
+def test_log_parent_v220(tmp):
+    """v2.1.0 known issue 1 (總監 W4 extra): `run --log` in a folder that does not exist yet creates the folder and
+    writes the log; one that cannot be made stays NOT_RUN (test_evidence_log_v220)."""
+    root = tmp / "lparent220"
+    root.mkdir()
+    log = root / "new" / "deeper" / "check.log"
+    expect("log parent 2.2: a missing --log folder is created", "evidence_record.py", 0, "run", "--log", log,
+           "--out-dir", root / "records", "--label", "AC-1", "--", sys.executable, "-c", "print('made')",
+           says="EVIDENCE: exit=0 lines=1", lacks="NOT_RUN")
+    check_true("log parent 2.2: the log is written there", log.is_file() and log.read_text(encoding="utf-8").strip() == "made",
+               f"exists={log.is_file()}")
+
+
+def test_rerun_brief_v220(tmp):
+    """v2.1.0 known issue 2 (總監 W4 extra): `verify --rerun --brief / --order-history` compares the brief with the same
+    gate_check functions --match uses (brief_notes for the order, carried_notes for a record carried over from an old
+    order), and its LOG_LINE ends brief=ok|stale|unconfirmed; trace_report does not count a stale rerun as 總監重跑.
+    Shadow: the exit code does not change. Without the two flags the line is as before."""
+    root = tmp / "rbrief220"
+    repo, out, hist = root / "repo", root / "records", root / "history"
+    repo.mkdir(parents=True)
+    hist.mkdir()
+    py = sys.executable
+
+    def git(*args):
+        return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false",
+                               *args], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+
+    (repo / "check.py").write_text("print('checked')\n", encoding="utf-8")
+    git("init", "-q", "-b", "main")
+    git("add", "-A")
+    git("commit", "-q", "-m", "a")
+    head = git("rev-parse", "HEAD")
+
+    def order(rev, pin):
+        body = TYPED_ORDER.format(base=head).replace("REVISION       = 1\n", f"REVISION       = {rev}\n").replace(
+            "TRACES_TO      = DD-1\n",
+            f"TRACES_TO      = B-2\nBRIEF_REVISION = 1\nBRIEF_FINGERPRINTS_V1 = {json.dumps({'B-2': pin})}\n")
+        body = with_checks(body, f"AC-1: {json.dumps([py, 'check.py'])}")
+        path = root / f"v{rev}" / "WO-001-parser.md"
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+        return path, f"DISPATCH WO-001 rev={rev} sha={hashlib.sha256(body.encode('utf-8')).hexdigest()}"
+
+    def brief(name, text):
+        path = root / name
+        path.write_text(text, encoding="utf-8")
+        _, said = run("gate_check.py", "--brief", path, "--snapshot", root / "brief-history")
+        lock = re.search(r"^  (BRIEF_LOCKED .*)$", said, re.M)
+        return path, (lock.group(1) if lock else "BRIEF_LOCKED missing")
+
+    def log(name, *lines):
+        path = root / name
+        path.write_text("".join(f"{line}\n" for line in lines), encoding="utf-8")
+        return path
+
+    order1, dispatch1 = order(1, B2_V1)
+    order2, dispatch2 = order(2, B2_V2)
+    brief1, lock1 = brief("BRIEF-1.md", BRIEF_V1)
+    expect("rerun brief 2.2: record for REVISION 1", "evidence_record.py", 0, "run", "--out-dir", out, "--label", "AC-1",
+           "--order", order1, "--cwd", repo, "--", py, "check.py", says="exit=0")
+    record = next(out.glob("*-AC-1.json"))
+    rerun = ("evidence_record.py", 0, "verify", record, "--rerun", "--repo", repo, "--candidate", head)
+    line = f"LOG_LINE: EVIDENCE_RERUN WO-001 AC-1 candidate={head} result=ok record={record.name}"
+    expect("rerun brief 2.2: without --brief the LOG_LINE is as before", *rerun, "--order", order1, "--dispatch-log",
+           log("L0.md", dispatch1), says=line + "\n", lacks="brief=")
+    expect("rerun brief 2.2: pins match the locked brief: brief=ok", *rerun, "--order", order1, "--dispatch-log",
+           log("L1.md", dispatch1, lock1), "--brief", brief1, says=line + " brief=ok", lacks="~ BRIEF_")
+    expect("rerun brief 2.2: no BRIEF_LOCKED line: brief=unconfirmed", *rerun, "--order", order1, "--dispatch-log",
+           log("L2.md", dispatch1), "--brief", brief1, says=[line + " brief=unconfirmed", "~ BRIEF: the log has no BRIEF_LOCKED"])
+    brief2, lock2 = brief("BRIEF-2.md", BRIEF_V2)
+    expect("rerun brief 2.2: the brief row changed since the order pinned it: brief=stale (exit unchanged)", *rerun,
+           "--order", order1, "--dispatch-log", log("L3.md", dispatch1, lock2), "--brief", brief2,
+           says=[line + " brief=stale", "~ BRIEF_STALE WO-001 B-2"])
+    shutil.copyfile(order1, hist / "WO-001-rev1.md")
+    sha1 = dispatch1.rsplit("sha=", 1)[1]
+    carried = log("L4.md", dispatch2, f"EVIDENCE_EQUIVALENT WO-001 rev=1 sha={sha1} to rev=2", lock2)
+    expect("rerun brief 2.2: carried record, the old order's pin is stale (carried_notes)", *rerun, "--order", order2,
+           "--dispatch-log", carried, "--brief", brief2, "--order-history", hist,
+           says=[line + " brief=stale", "~ BRIEF_STALE WO-001 B-2 AC-1", "carried over by EVIDENCE_EQUIVALENT"])
+    expect("rerun brief 2.2: carried record, old order not in history: brief=unconfirmed", *rerun, "--order", order2,
+           "--dispatch-log", carried, "--brief", brief2, says=[line + " brief=unconfirmed", "~ BRIEF_UNCONFIRMED WO-001 AC-1"])
+    expect("rerun brief 2.2 (review): --order-history without --brief compares nothing: brief=unconfirmed, never ok",
+           *rerun, "--order", order1, "--dispatch-log", log("L5.md", dispatch1, lock1), "--order-history", hist,
+           says=line + " brief=unconfirmed", lacks="brief=ok")
+    # trace_report: a stale rerun line is not a Director rerun; an ok one is
+    proof = root / "trace"
+    head0 = "0123456789abcdef0123456789abcdef01234567"
+    pbrief, plock = proof_fixture(proof, head0)
+    evidence_file(proof / "evidence", "AC-1.json", head0)
+    base = ("--orders", proof / "orders", "--reports", proof / "reports", "--brief", pbrief, "--evidence-dir", proof / "evidence")
+    for state, said, lacked in (("stale", "WO-001：沒有：重跑時鎖定依據不符（brief=stale），新條件待重驗", "WO-001：有（"),
+                                ("ok", "WO-001：有（AC-1：自述、證據、鎖定依據、總監重跑都齊）", "重跑時鎖定依據不符")):
+        plog = proof / f"LOG-{state}.md"
+        plog.write_text(f"{plock}\nEVIDENCE_RERUN WO-001 AC-1 candidate={head0} result=ok record=AC-1.json brief={state}\n",
+                        encoding="utf-8")
+        expect(f"rerun brief 2.2: trace_report with brief={state}", "trace_report.py", 0, *base, "--director-log", plog,
+               says=said, lacks=lacked)
+
+
+def test_not_utf8_v220(tmp):
+    """v2.1.0 known issue 3 (總監 W4 extra): an input file that is not UTF-8 is one NOT_RUN line naming the file and
+    exit 2 in gate_check, scope_check, trace_report, metrics_report and evidence_record, never a traceback (exit 1)."""
+    root = tmp / "nonutf8"
+    (root / "orders").mkdir(parents=True)
+    (root / "reports").mkdir()
+    (root / "director").mkdir()
+    big5 = "# WO-001\n驗收\n".encode("big5")
+    bad = root / "orders" / "WO-001.md"
+    bad.write_bytes(big5)
+    (root / "director" / "DIRECTOR_LOG.md").write_bytes(big5)
+    said = "NOT_RUN a file is not UTF-8 text ("
+    expect("not utf8 2.2: gate_check --order", "gate_check.py", 2, "--order", bad, says=["GATE_CHECK: " + said, "WO-001.md"])
+    expect("not utf8 2.2: scope_check --order", "scope_check.py", 2, "--order", bad, says="SCOPE_CHECK: " + said)
+    expect("not utf8 2.2: trace_report --orders", "trace_report.py", 2, "--orders", root / "orders", "--reports",
+           root / "reports", says="TRACE_REPORT: " + said)
+    expect("not utf8 2.2: metrics_report --director", "metrics_report.py", 2, "--director", root / "director",
+           says=["METRICS_REPORT: " + said, "DIRECTOR_LOG.md"])
+    good = root / "WO-001-parser.md"
+    good.write_text(TYPED_ORDER.format(base="0" * 40), encoding="utf-8")
+    expect("not utf8 2.2: a record to verify", "evidence_record.py", 0, "run", "--out-dir", root / "records", "--label",
+           "AC-1", "--", sys.executable, "-c", "print(1)", says="exit=0")
+    badlog = root / "director" / "DIRECTOR_LOG.md"
+    expect("not utf8 2.2: evidence_record verify --rerun with a non-UTF-8 log", "evidence_record.py", 2, "verify",
+           next((root / "records").glob("*.json")), "--rerun", "--order", good, "--dispatch-log", badlog, "--repo", root,
+           "--candidate", "0" * 40, says=["EVIDENCE: " + said, "DIRECTOR_LOG.md"])
+
+
+def test_review_fix_v220(tmp):
+    """總監 W4 review (MUST_FIX): a PO_ACCEPTANCE record of the wrong types is UNBOUND_PO_REPLY (exit 0) as in v2.1.0,
+    never a traceback; metrics_report with a non-UTF-8 run event or run.json is NOT_RUN (exit 2), never skipped."""
+    root = tmp / "reviewfix220"
+    root.mkdir(parents=True)
+    acc = root / "PO_ACCEPTANCE.json"
+    acc.write_text(json.dumps([{"schema": "po-acceptance-v1", "reply_ref": "m1", "commit": 5, "entry": ["a"]},
+                               {"schema": "po-acceptance-v1", "reply_ref": "m1", "commit": "x", "entry": {"b": 1}}]),
+                   encoding="utf-8")
+    expect("review fix 2.2: PO_ACCEPTANCE with wrong types is UNBOUND_PO_REPLY, not a traceback", "gate_check.py", 0,
+           "--po-acceptance", acc, says=["~ UNBOUND_PO_REPLY #1", "commit is not 40 hex digits", "~ UNBOUND_PO_REPLY #2"],
+           lacks="Traceback")
+    orders, reports = root / "orders", root / "reports"
+    orders.mkdir()
+    reports.mkdir()
+    expect("review fix 2.2: trace_report --acceptance with wrong types is not a traceback", "trace_report.py", 0,
+           "--orders", orders, "--reports", reports, "--acceptance", acc, lacks="Traceback")
+    big5 = "{\"v\": 1, \"note\": \"驗收\"}".encode("big5")
+    for name, where in (("events", "events/e.json"), ("runjson", "run.json")):
+        folder = root / name
+        (folder / "events").mkdir(parents=True)
+        (folder / "events" / "e.json").write_text("[]", encoding="utf-8")
+        (folder / where).write_bytes(big5)
+        expect(f"review fix 2.2: metrics_report --run with a non-UTF-8 {where} is NOT_RUN, not skipped",
+               "metrics_report.py", 2, "--run", folder, says=["METRICS_REPORT: NOT_RUN a file is not UTF-8 text (",
+                                                               where.split("/")[-1]])
+
+
+def test_po_review_whole_line_v220(tmp):
+    """v2.1.0 known issue 4 (總監 W4 extra), by design: a PO_PRODUCT_REVIEW is read only as a whole log line, like
+    DISPATCH and EVIDENCE_EQUIVALENT (an optional `date |` before it and `| note` after it). The same words quoted after
+    `>`, indented, inside a fence or inside another sentence are data, so a pasted or quoted reply cannot count as the
+    PO's review."""
+    head = "0123456789abcdef0123456789abcdef01234567"
+    root = tmp / "poline220"
+    brief, lock = proof_fixture(root, head)
+    review = f"PO_PRODUCT_REVIEW WO-001 candidate={head} outcome=accepted ref=msg-2"
+    base = ("--orders", root / "orders", "--reports", root / "reports", "--brief", brief)
+    counted = "對該 commit 的歷史回覆：已接受（msg-2）"
+    for name, text, counts in (("whole", review, True), ("dated", f"2026-11-08 12:00 +08:00 | {review} | PO 回覆", True),
+                               ("quoted", f"> {review}", False), ("indented", f"    {review}", False),
+                               ("fenced", f"```\n{review}\n```", False), ("inline", f"PO 說：{review}", False)):
+        log = root / f"LOG-{name}.md"
+        log.write_text(f"{lock}\n{text}\n", encoding="utf-8")
+        expect(f"po line 2.2: {name} {'counts' if counts else 'is data'}", "trace_report.py", 0, *base, "--director-log", log,
+               says=counted if counts else None, lacks=None if counts else counted)
+
+
+def test_metrics_sampling_v220(tmp):
+    """2.2 (F16): a number is only as good as what was recorded: no sampling marker is 完整度未知, a 0 that may be
+    unrecorded is UNKNOWN, --compare subtracts only complete runs of one scenario, a kind that is no short name (or not
+    in sampling.kinds) is quarantined instead of crashing, and an answer with no earlier asked is not counted."""
+    root = tmp / "msamp220"
+    event = lambda eid, type_, **extra: {"v": 1, "event_id": eid, "type": type_, "at": "2026-11-08T12:00:00+08:00", **extra}
+
+    def run_folder(name, events, sampling=None):
+        folder = root / name
+        (folder / "events").mkdir(parents=True)
+        (folder / "events" / "e.json").write_text(json.dumps(events), encoding="utf-8")
+        if sampling is not None:
+            (folder / "run.json").write_text(json.dumps({"v": 1, "sampling": sampling}), encoding="utf-8")
+        return folder
+
+    start = event("s", "run_started")
+    clicks = event("c", "po_action", kind="click", count=10)
+    done = {"version": 1, "complete": True, "scenario": "S-1"}
+    legacy_base, legacy = run_folder("legacy-base", [start, clicks]), run_folder("legacy", [start])
+    expect("metrics 2.2: no marker, nothing recorded is UNKNOWN, not 0", "metrics_report.py", 0, "--run", legacy,
+           "--compare", legacy_base, says=["採樣：沒有完整度標記", "| PO 操作 | UNKNOWN：沒有 po_action，採樣完整度未知",
+                                           "| PO 操作 | 10（未知） | 0（未知） | UNKNOWN：採樣不完整（基準 未知、本次 未知） |"],
+           lacks="10（100%）")
+    full_base, full = run_folder("full-base", [start, clicks], done), run_folder("full", [start, dict(clicks, count=4)], done)
+    expect("metrics 2.2: complete runs of one scenario subtract", "metrics_report.py", 0, "--run", full, "--compare", full_base,
+           says=["| PO 操作 | 4（click 4）；完整度確認 |", "| PO 操作 | 10（確認） | 4（確認） | 6（60%） |"])
+    other = run_folder("other", [start, dict(clicks, count=4)], dict(done, scenario="S-2"))
+    expect("metrics 2.2: another scenario is not compared", "metrics_report.py", 0, "--run", other, "--compare", full_base,
+           says="| PO 操作 | 10（確認） | 4（確認） | UNKNOWN：劇本不同 |")
+    part = run_folder("part", [start, dict(clicks, count=4)], dict(done, complete=False))
+    expect("metrics 2.2: an incomplete marker is 部分", "metrics_report.py", 0, "--run", part, "--compare", full_base,
+           says=["；完整度部分 |", "UNKNOWN：採樣不完整（基準 確認、本次 部分）"])
+    counted = run_folder("counted", [start, dict(clicks, count=4)], dict(done, counted=["asked"]))
+    expect("metrics 2.2: a type the marker does not count is 部分", "metrics_report.py", 0, "--run", counted,
+           says="；完整度部分 |")
+    zero = run_folder("zero", [start], done)
+    expect("metrics 2.2: a complete 0 is 0", "metrics_report.py", 0, "--run", zero, says="| PO 操作 | 0；完整度確認 |")
+    bad = run_folder("bad", [start, dict(clicks, event_id="k1", kind=[]), dict(clicks, event_id="k2", kind=7),
+                             dict(clicks, event_id="k3", kind="click", count=2), event("t", ["po_action"])])
+    expect("metrics 2.2: a kind that is no short name is quarantined", "metrics_report.py", 0, "--run", bad,
+           says=["隔離（kind 不認得，沒算）2 筆", "| PO 操作 | 2（click 2）"], lacks="Traceback")
+    kinds = run_folder("kinds", [start, clicks, dict(clicks, event_id="d", kind="drag", count=5)], dict(done, kinds=["click"]))
+    expect("metrics 2.2: a kind not in sampling.kinds is quarantined", "metrics_report.py", 0, "--run", kinds,
+           says=["d（kind drag 不在 sampling.kinds）", "| PO 操作 | 10（click 10）；完整度確認 |"])
+    ask = event("q", "asked", decision_id="D1", topic_id="T", scope_id="S", ask_id="A1", at="2026-11-08T12:05:00+08:00")
+    answers = run_folder("answers", [start, ask,
+                                     event("r1", "answer_received", decision_id="D1", ask_id="A1", at="2026-11-08T12:01:00+08:00"),
+                                     event("r2", "answer_received", decision_id="D1", ask_id="A9", at="2026-11-08T12:06:00+08:00")])
+    expect("metrics 2.2: an answer with no earlier asked of that ask_id is not counted", "metrics_report.py", 0, "--run", answers,
+           says=["回覆對不到發問（沒有同 decision_id + ask_id 且更早的 asked，沒算已回覆）2 筆：r1、r2", "已回覆 0"])
+    weird = run_folder("weird", [start], {"version": 9})
+    expect("metrics 2.2: an unreadable marker is no marker", "metrics_report.py", 0, "--run", weird,
+           says=["run.json sampling（需要 version 1", "採樣：沒有完整度標記"])
+
+
 def guarded(test, *args):
     """Run one test group. Without git on PATH, a group that dies on a missing git program is a named skip, not a crash."""
     global total
@@ -6510,6 +7025,17 @@ def main():
         guarded(test_status_po_page_missing, tmp)
         guarded(test_audit_mask_tree, tmp)
         guarded(test_audit_recover, tmp)
+        guarded(test_proof_columns_v220, tmp)
+        guarded(test_po_product_v220, tmp)
+        guarded(test_rerun_tree_modes_v220, tmp)
+        guarded(test_required_final_v220, tmp)
+        guarded(test_evidence_log_v220, tmp)
+        guarded(test_metrics_sampling_v220, tmp)
+        guarded(test_log_parent_v220, tmp)
+        guarded(test_rerun_brief_v220, tmp)
+        guarded(test_not_utf8_v220, tmp)
+        guarded(test_po_review_whole_line_v220, tmp)
+        guarded(test_review_fix_v220, tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     for failure in failures:
