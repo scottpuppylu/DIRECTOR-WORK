@@ -5293,6 +5293,89 @@ def test_choice_page():
         check(f"choice page check catches: {name}", old in text and any(want in p for p in problems), f"old found={old in text} problems={problems}")
 
 
+def choice_page_220_problems(text):
+    """2.2 choice page rules (F04 F05 F07 page side): identity pairing, snapshot gate, rebuilt option, stable submissionId."""
+    script, problems = page_script(text), []
+    fn = js_functions(script)
+    view = fn.get("viewOf", "")
+    if not ('"hash"' in view and '"nohash"' in view and "snap.snapshotHash!==reg" in view):
+        problems.append("viewOf does not gate the snapshot on the registered hash")
+    if 'options:state==="ok"?(snap.options||[]):[]' not in view:
+        problems.append("options are shown from an unverified snapshot")
+    if 'snapshotHash:reg' not in view:
+        problems.append("viewOf does not keep the registered hash")
+    rel = fn.get("relOf", "")
+    if not ('"legacy"' in rel and '"bad"' in rel and '"valid"' in rel and "r.snapshotHash!==v.snapshotHash" in rel and "!r.submissionId" in rel):
+        problems.append("relOf does not tell valid / bad hash / legacy replies apart")
+    if "r.snapshotHash&&" in rel:
+        problems.append("relOf lets a reply without a hash through (must be bad-hash, not valid)")
+    state = fn.get("stateOf", "")
+    if 'relOf(r,v)==="valid"' not in state or "mine[0]" in state:
+        problems.append("stateOf counts replies that are not valid, or still takes the first reply by time")
+    if "best.reply" not in state:
+        problems.append("stateOf does not show the adopted reply")
+    rc = fn.get("receiptsFor", "")
+    if not ("x.submissionId===r.submissionId" in rc and "stray++" in rc and "r.snapshotHash!==v.snapshotHash" in rc):
+        problems.append("receipt is not paired by submissionId and snapshotHash")
+    submit = fn.get("submitChoice", "")
+    if not ("reg.snapshotHash===v.snapshotHash" in submit and "reg.options" in submit):
+        problems.append("submit does not rebuild the option from the registered snapshot")
+    if "S.subIds[key].sig!==sig" not in submit or "JSON.stringify([choice,note])" not in submit:
+        problems.append("submissionId is reused for different content")
+    if "pageSource:PAGE_SOURCE,pageVersion:PAGE_VERSION" not in submit:
+        problems.append("reply lacks pageSource")
+    note = fn.get("sendNote", "")
+    if "S.noteSubs[raw]" not in note or "pageSource:PAGE_SOURCE,pageVersion:PAGE_VERSION" not in note:
+        problems.append("note retry does not reuse its submissionId or lacks pageSource")
+    if "rejectNote(st)" not in fn.get("renderOpen", ""):
+        problems.append("open card does not say a reply was rejected")
+    if "只當歷史紀錄" not in script:
+        problems.append("unmatched receipt is not marked as history")
+    # W3 follow-up (director review): no regression for old projects, prior before legacy, no "choose again" while blocked
+    if 'if(!v.snapshotHash)return"valid"' not in rel or (rel.find("!r.submissionId") >= 0 and rel.index('if(!v.snapshotHash)return"valid"') > rel.index("!r.submissionId")) or (rel.find("r.snapshotHash!==v.snapshotHash") >= 0 and rel.index('if(!v.snapshotHash)return"valid"') > rel.index("r.snapshotHash!==v.snapshotHash")):
+        problems.append("nohash: replies are judged against an empty hash, answered questions fall back to open")
+    if "r.revision!==v.revision" not in rel or any(k in rel and rel.index("r.revision!==v.revision") > rel.index(k) for k in ("!r.submissionId", "r.snapshotHash!==v.snapshotHash")):
+        problems.append("prior: another revision's reply is judged legacy before prior")
+    if "請總監重新登記" not in fn.get("snapNote", "") or "請總監重新登記" not in fn.get("renderAnswered", ""):
+        problems.append("nohash: cards do not say the registration lacks a hash")
+    if "v.snapshotHash&&r.snapshotHash&&r.snapshotHash!==v.snapshotHash" not in rc:
+        problems.append("nohash: receipt hash is compared against an empty registered hash")
+    ro = fn.get("renderOpen", "")
+    if 'const can=!d.v2||d.snap==="ok"' not in ro or 'can?"題目還開著，請再選一次。"' not in ro or 'can?"，請照現在的選項再選一次。"' not in ro:
+        problems.append("blocked: open card still says choose again while sending is blocked")
+    return problems
+
+
+def test_choice_page_220():
+    text = (TEMPLATES / "choice_page.html").read_text(encoding="utf-8")
+    problems = choice_page_220_problems(text)
+    check("choice page passes the 2.2 identity and snapshot rules", not problems, "; ".join(problems))
+    mutations = (
+        ("snapshot hash not compared", "snap.snapshotHash!==reg", "false", "registered hash"),
+        ("unverified options shown", 'options:state==="ok"?(snap.options||[]):[]', "options:(snap.options||[])", "unverified"),
+        ("legacy reply counts", 'if(!r.submissionId)return"legacy"', 'if(false)return"legacy"', "relOf"),
+        ("missing hash counts", 'if(r.snapshotHash!==v.snapshotHash)return"bad"', 'if(r.snapshotHash&&r.snapshotHash!==v.snapshotHash)return"bad"', "without a hash"),
+        ("wrong-hash reply counts", "r.snapshotHash!==v.snapshotHash)return\"bad\"", "false)return\"bad\"", "relOf"),
+        ("receipt ignores submissionId", "x.submissionId===r.submissionId", "true", "receipt"),
+        ("receipt ignores snapshotHash", "r.snapshotHash&&r.snapshotHash!==v.snapshotHash", "false", "receipt"),
+        ("nohash judged bad", 'if(!v.snapshotHash)return"valid";\n  ', "", "nohash: replies"),
+        ("legacy judged before prior", '  if(r.revision!==v.revision)return"prior";\n  if(!v.snapshotHash)return"valid";\n  if(r.snapshotHash!==v.snapshotHash)return"bad";\n  if(!r.submissionId)return"legacy";',
+         '  if(!v.snapshotHash)return"valid";\n  if(r.snapshotHash!==v.snapshotHash)return"bad";\n  if(!r.submissionId)return"legacy";\n  if(r.revision!==v.revision)return"prior";', "prior:"),
+        ("nohash card silent", "此題登記缺指紋，請總監重新登記。", "請在聊天告訴總監。", "registration lacks"),
+        ("nohash receipt compared to empty hash", "v.snapshotHash&&r.snapshotHash&&r.snapshotHash!==v.snapshotHash", "r.snapshotHash&&r.snapshotHash!==v.snapshotHash", "receipt hash"),
+        ("blocked card says choose again", '(can?"題目還開著，請再選一次。":"")', '"題目還開著，請再選一次。"', "choose again"),
+        ("first reply by time wins again", "const answer=(best&&best.reply)||valid[0]", "const answer=valid[0]", "adopted"),
+        ("option not rebuilt from registry", "reg.snapshotHash===v.snapshotHash?reg.options||[]:[]", "reg.options||[]", "rebuild"),
+        ("submissionId kept for other content", "S.subIds[key].sig!==sig", "false", "submissionId is reused"),
+        ("note retry gets a new id", "S.noteSubs[raw]||(S.noteSubs[raw]=newId())", "newId()", "note retry"),
+        ("reply without pageSource", "pageSource:PAGE_SOURCE,pageVersion:PAGE_VERSION", "pageVersion:PAGE_VERSION", "pageSource"),
+    )
+    for name, old, new_, want in mutations:
+        changed = text.replace(old, new_, 1)
+        problems = choice_page_220_problems(changed)
+        check(f"choice page 2.2 check catches: {name}", old in text and any(want in p for p in problems), f"old found={old in text} problems={problems}")
+
+
 def test_choice_reconcile(tmp):
     folder = tmp / "choice_reconcile"
     folder.mkdir()
@@ -6413,6 +6496,7 @@ def main():
         guarded(test_poll_hint, tmp)
         guarded(test_poll_report, tmp)
         guarded(test_choice_page)
+        guarded(test_choice_page_220)
         guarded(test_choice_reconcile, tmp)
         guarded(test_choice_reconcile_v22, tmp)
         guarded(test_no_git, tmp)

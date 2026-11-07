@@ -116,7 +116,10 @@ details .list{margin-top:10px}
 /* 2.1：每一區自己重畫（renderOpenList / renderAnsweredList / renderClosedList / renderNotesList / renderBrief），資料回呼只重畫自己那區。
    等你選的區重畫前後保留補充文字、選取範圍、方向、捲動和焦點；中文組字中先不重畫。送出時每題一把鎖（S.inFlight），用當下的選項再檢查一次。 */
 const S={db:null,comments:null,canWrite:true,decisions:[],revisions:{},revLoaded:false,revError:false,replies:[],receipts:[],notes:[],brief:null,loaded:false,
-  picks:{},drafts:{},subIds:{},inFlight:{},msgs:{},sent:{},firstSeen:{},composing:false,deferOpen:false,openSig:null,noteBusy:false,noteSub:null};
+  picks:{},drafts:{},subIds:{},inFlight:{},msgs:{},sent:{},firstSeen:{},composing:false,deferOpen:false,openSig:null,noteBusy:false,noteSubs:{}};
+/* 2.2：回覆和留言都帶 pageSource／pageVersion，只是隨資料存著當來源佐證，不參與比對。帳本的冪等鍵 = <匯出 JSON 的 source>|<kind>|<submissionId>（docs/12 第六節）。 */
+const PAGE_SOURCE=(function(){try{return String(location.origin)+String(location.pathname)}catch(e){return""}})()||"choice-page";
+const PAGE_VERSION="2.2.0";
 const LATE_MIN=10,STUCK_MIN=30;
 const STAGE={seen:1,claimed:1,handed:2,closed:3};
 const $=id=>document.getElementById(id);
@@ -131,25 +134,44 @@ function minsSince(iso){const t=Date.parse(iso||"");return isNaN(t)?null:Math.fl
 /* 題目的版本：有 revision 的是 2.1 新題，內容取 choiceRevisions 裡不會再改的那一版；舊題用題目內容的指紋，同編號改了內容就當新的一題，不沿用舊選擇。 */
 function fp(d){return JSON.stringify([d.title||"",d.question||"",(d.options||[]).map(o=>[o.key,o.label||"",o.desc||""])])}
 function hashStr(s){let h=5381;for(let i=0;i<s.length;i++)h=((h<<5)+h+s.charCodeAt(i))|0;return(h>>>0).toString(36)}
+/* 2.2：登記的指紋 = decisions 上的 snapshotHash。版本文件的指紋和它不同（或沒有登記）時，這一版的文字和選項一律不採用、不能送出。 */
 function viewOf(d){
-  if(d.revision!=null){const found=S.revisions[d.id+"@"+d.revision],snap=found||{};
-    const state=found?"ok":S.revError||S.revLoaded?"missing":"loading";
-    return{...d,...snap,id:d.id,status:d.status,revision:d.revision,snapshotHash:d.snapshotHash||snap.snapshotHash||"",v2:true,snap:state,key:d.id+"@r"+d.revision}}
+  if(d.revision!=null){const found=S.revisions[d.id+"@"+d.revision],snap=found||{},reg=d.snapshotHash||"";
+    const state=!found?(S.revError||S.revLoaded?"missing":"loading"):!reg?"nohash":snap.snapshotHash!==reg?"hash":"ok";
+    const base=state==="ok"?snap:{};
+    return{...d,...base,options:state==="ok"?(snap.options||[]):[],id:d.id,status:d.status,revision:d.revision,snapshotHash:reg,v2:true,snap:state,key:d.id+"@r"+d.revision}}
   return{...d,v2:false,key:d.id+"@"+hashStr(fp(d))}}
-function receiptOf(v){let best=null;
-  S.receipts.forEach(r=>{if(r.questionId===v.id&&r.revision===v.revision&&(!best||(STAGE[r.stage]||0)>(STAGE[best.stage]||0)))best=r});return best}
+/* 2.2：一筆回覆跟這一版的關係。沒寫版次的是 legacy；版次不同的先歸 prior（別版的舊回覆不算本版的 legacy）；
+   同版：登記沒有指紋（nohash）時無從核對，照 2.1 原樣算有效，已答的題不倒退；有登記指紋時，缺指紋或指紋不對是 bad（帳本判 bad-hash），指紋對但沒有 submissionId 是 legacy（沒有冪等鍵、回條配不上，總監要另外確認），其餘 valid。 */
+function relOf(r,v){
+  if(r.revision==null)return"legacy";
+  if(r.revision!==v.revision)return"prior";
+  if(!v.snapshotHash)return"valid";
+  if(r.snapshotHash!==v.snapshotHash)return"bad";
+  if(!r.submissionId)return"legacy";
+  return"valid"}
+/* 回條只配給「總監採用」的那一筆：questionId + revision + submissionId 都對得上（回條若有 snapshotHash 也要一樣）。沒有 submissionId 的舊回條，只有在有效回覆剛好一筆時才配；配不上的算 stray，只當歷史。 */
+function receiptsFor(v,valid){
+  let best=null,stray=0;
+  S.receipts.filter(r=>r.questionId===v.id&&r.revision===v.revision).forEach(r=>{
+    const target=r.submissionId?valid.find(x=>x.submissionId===r.submissionId):valid.length===1?valid[0]:null;
+    if(!target||(v.snapshotHash&&r.snapshotHash&&r.snapshotHash!==v.snapshotHash)){stray++;return}
+    if(!best||(STAGE[r.stage]||0)>(STAGE[best.rc.stage]||0))best={rc:r,reply:target}});
+  return{best,stray}}
 function stateOf(d){
   const v=viewOf(d);
   if(!v.v2){let state=d.status==="closed"?"closed":d.status==="answered"?"answered":d.status==="open"?"open":"other";
     const local=S.sent[v.key];if(state==="open"&&local)state="answered";
-    return{v,state,answer:d.answer||local||null,seenAt:d.seenAt||null,doneAt:d.status==="closed"?d.closedAt||null:null,resolution:d.resolution||"",receipt:null,extra:0,prior:[]}}
-  const reps=S.replies.filter(r=>r.kind!=="note"&&r.questionId===v.id).sort((a,b)=>String(a.clientAt).localeCompare(String(b.clientAt)));
-  const mine=reps.filter(r=>r.revision===v.revision),prior=reps.filter(r=>r.revision!==v.revision);
-  const rc=receiptOf(v),answer=mine[0]||S.sent[v.key]||null;
+    return{v,state,answer:d.answer||local||null,seenAt:d.seenAt||null,doneAt:d.status==="closed"?d.closedAt||null:null,resolution:d.resolution||"",receipt:null,extra:0,prior:[],adopted:false,rejected:{bad:0,legacy:0},stray:0}}
+  const reps=S.replies.filter(r=>r.kind!=="note"&&r.questionId===v.id).sort((a,b)=>String(a.clientAt).localeCompare(String(b.clientAt))||String(a.submissionId).localeCompare(String(b.submissionId)));
+  const valid=reps.filter(r=>relOf(r,v)==="valid"),prior=reps.filter(r=>relOf(r,v)==="prior");
+  const rejected={bad:reps.filter(r=>relOf(r,v)==="bad").length,legacy:reps.filter(r=>relOf(r,v)==="legacy").length};
+  const {best,stray}=receiptsFor(v,valid),rc=best&&best.rc;
+  const answer=(best&&best.reply)||valid[0]||S.sent[v.key]||null;
   const closed=d.status==="closed"||!!(rc&&rc.stage==="closed");
-  return{v,state:closed?"closed":answer?"answered":d.status==="open"?"open":"other",answer,
+  return{v,state:closed?"closed":answer?"answered":d.status==="open"?"open":"other",answer,adopted:!!best,rejected,stray,
     seenAt:rc&&(STAGE[rc.stage]||0)>=1?rc.at:null,doneAt:rc&&(STAGE[rc.stage]||0)>=2?rc.at:null,
-    resolution:d.resolution||(rc&&rc.resolution)||"",receipt:rc,extra:Math.max(0,mine.length-1),
+    resolution:d.resolution||(rc&&rc.resolution)||"",receipt:rc,extra:Math.max(0,valid.length-(valid.length?1:0)),
     prior:prior.map(r=>({revision:r.revision,label:r.selectedOptionSnapshot?r.selectedOptionSnapshot.label:r.choice}))}}
 /* 你當時選的字：新題用送出時存下的選項；舊題當時的選項沒有留下來，只能用現在的選項文字，並照實標出。 */
 function choiceText(st){const a=st.answer||{};if(a.choice==="done")return"已讀";
@@ -192,7 +214,12 @@ function safeUrl(u){const s=String(u||"").trim();if(!s||/[\u0000-\u001f\\]/.test
 function pickOk(v){const opts=v.options||[];return!opts.length||opts.some(o=>o.key===S.picks[v.key])}
 function sendBlocked(v){return!S.canWrite||!!S.inFlight[v.id]||(v.v2&&v.snap!=="ok")||!pickOk(v)}
 /* 2.1 新題的選項在 choiceRevisions；還沒讀到就不能送，免得送成空的「我知道了」。 */
-function snapNote(v){return!v.v2||v.snap==="ok"?"":v.snap==="loading"?"載入中…選項讀到後才能送出。":"這一版選項讀不到，請在聊天告訴總監。"}
+function snapNote(v){return!v.v2||v.snap==="ok"?"":v.snap==="loading"?"載入中…選項讀到後才能送出。":v.snap==="hash"||v.snap==="nohash"?"這一版的選項和總監登記的快照對不上（"+(v.snap==="nohash"?"沒有登記指紋":"指紋不同")+"），暫時不能送出，這一版的文字也不採用。"+(v.snap==="nohash"?"此題登記缺指紋，請總監重新登記。":"請在聊天告訴總監。"):"這一版選項讀不到，請在聊天告訴總監。"}
+/* 這一版有幾筆回覆不算數：同版但指紋對不上（bad），或缺指紋／回覆編號的舊格式（legacy）。題目仍開著，不會因此被藏起來。 */
+function rejectNote(st){const r=st.rejected,out=[];
+  if(r.bad)out.push(r.bad+" 筆這一版的回覆指紋缺少或和登記的不一樣，不算數");
+  if(r.legacy)out.push(r.legacy+" 筆回覆沒有回覆編號（舊格式），總監要另外確認才算數");
+  return out.length?"另有 "+out.join("；")+"。":""}
 /* 按選項、送出開始和結束都只更新這張卡的按鈕和訊息，不重畫整區。 */
 function refreshCard(v){
   const c=$("open").querySelector('article[data-key="'+CSS.escape(v.key)+'"]');if(!c)return;
@@ -208,7 +235,9 @@ function renderOpen(st){
   if(d.question)c.append(el("p","q",d.question));
   if(d.context)c.append(el("p","ctx",d.context));
   if(snapNote(d))c.append(el("p","late",snapNote(d)));
-  st.prior.forEach(p=>c.append(el("p","late","你在第 "+p.revision+" 版選過「"+p.label+"」，後來題目改版了，請照現在的選項再選一次。")));
+  const can=!d.v2||d.snap==="ok";  /* 禁送時不叫人再選，只顯示上面的禁送原因 */
+  if(rejectNote(st))c.append(el("p","late",rejectNote(st)+(can?"題目還開著，請再選一次。":"")));
+  st.prior.forEach(p=>c.append(el("p","late","你在第 "+p.revision+" 版選過「"+p.label+"」，後來題目改版了"+(can?"，請照現在的選項再選一次。":"。"))));
   Object.keys(S.drafts).forEach(k=>{if(k!==d.key&&k.startsWith(d.id+"@")&&S.drafts[k])c.append(el("p","late","題目更新了。你在舊版寫的補充（還沒送出）："+S.drafts[k]))});
   if(Array.isArray(d.images)&&d.images.length)c.append(media(d.images));
   const opts=el("div","opts");
@@ -247,7 +276,7 @@ function renderOpenList(){
   if(S.composing&&!$("open").contains(document.activeElement))S.composing=false;
   if(S.composing){S.deferOpen=true;return}
   const open=S.decisions.map(stateOf).filter(st=>st.state==="open").sort((a,b)=>(a.v.priority??9)-(b.v.priority??9));
-  const sig=JSON.stringify(open.map(st=>[st.v,st.prior]));
+  const sig=JSON.stringify(open.map(st=>[st.v,st.prior,st.rejected]));
   if(sig===S.openSig){open.forEach(st=>refreshCard(st.v));return}
   S.openSig=sig;
   const saved=captureDrafts();
@@ -266,7 +295,10 @@ function renderAnswered(st){
   else{c.append(el("p","seen","已儲存，等總監讀取"));
     const m=minsSince(at)??minsSince(S.firstSeen[d.key]);
     if(m!=null&&m>=LATE_MIN)c.append(el("p","late","已經 "+m+" 分鐘，總監還沒收到（沒收到）。可以在聊天裡跟總監說一聲。"))}
-  if(st.extra>0)c.append(el("p","msg","這題另外還有 "+st.extra+" 筆回覆（例如別的分頁送的），總監只會採用一筆。"));
+  if(st.extra>0)c.append(el("p","msg",st.adopted?"這題另外還有 "+st.extra+" 筆有效回覆（例如別的分頁送的），總監採用的是上面這一筆。":"這題另外還有 "+st.extra+" 筆有效回覆（例如別的分頁送的），總監只會採用一筆，採用前上面這一筆只是你最早送的。"));
+  if(rejectNote(st))c.append(el("p","msg",rejectNote(st)));
+  if(d.v2&&d.snap==="nohash")c.append(el("p","late","此題登記缺指紋，請總監重新登記；目前照舊的回覆顯示，沒有核對指紋。"));
+  if(st.stray>0)c.append(el("p","msg","另有 "+st.stray+" 筆回條對不到你送出的任何一筆，只當歷史紀錄，不代表上面這筆已處理。"));
   return c}
 
 function renderAnsweredList(){
@@ -293,19 +325,25 @@ async function submitChoice(id){
   if(S.inFlight[id])return;
   const d=S.decisions.find(x=>x.id===id);const st=d&&stateOf(d);
   if(!st||st.state!=="open"){renderDecisions();return}
-  const v=st.v,opts=v.options||[],key=v.key;
+  const v=st.v,key=v.key;
+  /* 2.2：新題的選項只從登記過、指紋對得上的快照重建，不用頁面上別處的文字。 */
+  const reg=v.v2?S.revisions[id+"@"+v.revision]||{}:null;
+  const opts=v.v2?(v.snap==="ok"&&reg.snapshotHash===v.snapshotHash?reg.options||[]:[]):v.options||[];
   if(v.v2&&v.snap!=="ok"){S.msgs[key]=snapNote(v);refreshCard(v);return}
   const choice=opts.length?S.picks[key]:"done";const opt=opts.find(o=>o.key===choice);
   if(opts.length&&!opt){S.msgs[key]="你選的選項已經不在了，請重新選";delete S.picks[key];refreshCard(v);return}
   const raw=S.drafts[key]||"",note=raw.trim(),at=new Date().toISOString();
-  const submissionId=S.subIds[key]||(S.subIds[key]=newId());
+  /* 同一次送出（網路重試）才沿用 submissionId；選項或補充變了就是新的一次，不能拿同一個編號送不同內容。 */
+  const sig=JSON.stringify([choice,note]);
+  if(!S.subIds[key]||S.subIds[key].sig!==sig)S.subIds[key]={sig,id:newId()};
+  const submissionId=S.subIds[key].id;
   S.inFlight[id]=submissionId;S.msgs[key]="儲存中…";refreshCard(v);
   const anchor=anchorOf($("h-open"));
   const snap=opt?{key:opt.key,label:opt.label||"",desc:opt.desc||""}:null;
   try{
     if(v.v2)await S.db.collection("choiceReplies").add({kind:"choice",submissionId,questionId:id,revision:v.revision,snapshotHash:v.snapshotHash,
-      choice,selectedOptionSnapshot:snap,note,clientAt:at});
-    else await S.db.doc("decisions/"+id).update({status:"answered",answer:{choice,note,at,submissionId}});
+      choice,selectedOptionSnapshot:snap,note,clientAt:at,pageSource:PAGE_SOURCE,pageVersion:PAGE_VERSION});
+    else await S.db.doc("decisions/"+id).update({status:"answered",answer:{choice,note,at,submissionId,pageSource:PAGE_SOURCE}});
     S.sent[key]=v.v2?{choice,note,clientAt:at,submissionId,revision:v.revision,selectedOptionSnapshot:snap}:{choice,note,at,submissionId};
     if(S.drafts[key]===raw)delete S.drafts[key];
     Object.keys(S.drafts).forEach(k=>{if(k!==key&&k.startsWith(id+"@"))delete S.drafts[k]});
@@ -321,9 +359,10 @@ async function sendNote(){
   if(S.noteBusy)return;const box=$("note-text");const raw=box.value;const t=raw.trim();if(!t)return;
   S.noteBusy=true;$("note-send").disabled=true;$("note-msg").textContent="儲存中…";
   const anchor=anchorOf($("h-note"));
-  const submissionId=S.noteSub&&S.noteSub.text===raw?S.noteSub.id:newId();S.noteSub={text:raw,id:submissionId};
-  try{await S.db.collection("notes").add({kind:"note",submissionId,text:t,at:new Date().toISOString(),status:"new"});
-    S.noteSub=null;if(box.value===raw)box.value="";$("note-msg").textContent="已儲存，等總監讀取";
+  /* 同樣的字重送就沿用同一個 submissionId（改了又改回來也一樣）；存好了才清掉。 */
+  const submissionId=S.noteSubs[raw]||(S.noteSubs[raw]=newId());
+  try{await S.db.collection("notes").add({kind:"note",submissionId,text:t,at:new Date().toISOString(),status:"new",pageSource:PAGE_SOURCE,pageVersion:PAGE_VERSION});
+    S.noteSubs={};if(box.value===raw)box.value="";$("note-msg").textContent="已儲存，等總監讀取";
     $("note-msg").textContent="已儲存，"+await notify(await anchor,"選擇頁有新留言。請照 docs/12 讀選擇頁處理。")}
   catch(e){$("note-msg").textContent="送出失敗，你寫的字還在，請稍後再試"}
   S.noteBusy=false;$("note-send").disabled=!S.canWrite}
