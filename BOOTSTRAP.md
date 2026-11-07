@@ -9,6 +9,31 @@
 讀完啟動提示詞，第一則回覆只問一題：**一般模式還是小白模式？** 各附一句說明（`docs/12` 第一節）。啟動提示詞已寫明模式就不問。使用者回答前不做下面任何一步。
 小白模式下，第 6、7.7、9、12、13 步照 `docs/12` 第二節改做：技術問題不問，總監照預設決定並登記 DD；安全的事照樣問，只是用白話。
 
+### 小白快速路徑（選完模式的同一輪就開始談需求）
+
+使用者選了小白模式（或啟動提示詞已寫明），**同一輪**就開始談需求，不先做完整建置。一般模式不走快速路徑，照第 0 步起的順序。
+
+1. 唯讀確認：第 0 步第 1～3 點（repo、既有規則與記憶、時鐘）。不是 git repo、認不出是哪個專案、既有規則禁止在 repo 外寫檔、指定的位置屬於另一個專案，就照第 0 步和該規則原本的處理（停下問，或只在聊天進行），不寫任何檔。
+2. 在 repo 外寫最少狀態（啟動提示詞已授權；不改 repo 裡任何檔、不跑會產生檔案的指令）：`<WS>/DIRECTOR/` 下的 `DIRECTOR_STATE.md`、`DECISION_REGISTER.md`（模式與已知的 PO 指示，`docs/12` 第一節第 2 點）、`PO_PENDING.md`、`RESUME_STATE.md`（頂部四行要填，`NEXT_STEP` 寫「談需求」）。`<WS>` 照第 3 步的預設；每個檔開頭註明「快速路徑，機制尚未建立」。
+3. 同一輪問第一個需求問題：「這是給誰用的？第一版讓他做成哪一件事就有用？」使用者已經說過的內容直接採用，不重問；之後照 `docs/12` 第三節。
+4. 中途中斷：新對話從 `<WS>/DIRECTOR/RESUME_STATE.md` 和 `PO_PENDING.md` 接回同一個問題。
+5. 其餘步驟延後：
+
+| 步驟 | 談需求前 | 延到 |
+|---|---|---|
+| 0 | 第 1～3 點，不改任何檔 | 語言衝突詳查等到相關時 |
+| 1 | 讀 README、PURPOSE、本檔、`docs/12`，和每輪必讀的 `docs/01、03、06、08` | 其餘 docs 要用到時讀，最晚在派第一張工單前讀完；規則包版本在這時記下 |
+| 2 | 只記產品目標、階段、已知 PO 決定 | build、測試、磁碟、重資源、成品怎麼看：首版範圍明確後 |
+| 3 | 只建上面的最少狀態 | 完整資料夾與 `tools/`：鎖卡後、開第一位 worker 前 |
+| 4、10 | 不做 | 開第一位 worker 前 |
+| 5 | 登記模式和已知 PO 指示 | 其餘隨盤點補 |
+| 6 | 只用 `PO_PENDING.md` 和聊天 | 選擇頁見第 6 步（一定先問） |
+| 7.1～7.4、11 | 不做 | 開第一位 worker 前，只設定那位 worker 的資料夾（第 7 步），並寫進 `GUARDS.md` |
+| 7.5～7.6、8 | 不做 | 開線後用 `get_usage` 看；完整探測與基準等首個預覽之後 |
+| 7.7、9 | 小白模式本來就不做 | — |
+| 12、13 | 不做 | 12 在草擬首批工單時；13 的三句白話併進第 14 步那一則 |
+| 14 | 同一輪開始 | 鎖卡仍在派工前 |
+
 ## 0. 先確認環境（唯讀）
 
 1. `git -C <REPO> rev-parse --show-toplevel`、`git -C <REPO> status`、`git -C <REPO> worktree list`。不是 git repo 就停下問 PO。
@@ -70,12 +95,17 @@ DIRECTOR/
 
 ## 6. PO 待決頁
 
-1. 預設用 `DIRECTOR/PO_PENDING.md`。要改用外部服務的頁面（可共享、可記錄回覆的那種），先問 PO：專案內容會因此放上外部服務。
+1. **兩種模式都**預設用 `DIRECTOR/PO_PENDING.md` 加聊天：題目登記在檔案，同時在聊天問。
 2. 格式照 `templates/PO_PENDING.md`。任何一步產生的問題都放這裡。
-3. 從這一步起，總監每一輪的第一個動作都是讀待決頁上 PO 已回覆的項目（`docs/03`）。
-4. 選擇頁（要使用者看圖選 A 或 B 的地方）在 Claude Desktop 上照 `docs/12` 第四節發布。小白模式直接用它當待決頁；一般模式要用，照第 1 點先問。
+3. 從這一步起，總監每一輪的第一個動作都是讀待決頁上 PO 已回覆的項目，和聊天裡還沒處理的回答（`docs/03`）。
+4. 選擇頁（Artifact，要使用者看圖選 A 或 B 的地方）**一定先問使用者**，同意了、而且工具目前可用，才照 `docs/12` 第四節發布；專案內容會因此放上 claude.ai，所以不能因為是小白模式就當成已同意。問法：
+   - 小白模式：「需要我把選擇題和圖片放在你自己的 Claude 頁面，讓你點選嗎？直接在這裡回答也可以。」
+   - 一般模式：「要把這個專案指定的選擇題和圖片放在你自己的 Claude 私人頁面讓你點選嗎？不用的話，直接在聊天回答，我存在 `PO_PENDING.md`。」
+5. 使用者沒回答、說不要、沒有 Artifact 工具（Claude Desktop 以外）或工具暫時不能用，就在聊天問、總監存進 `PO_PENDING.md`，同一件事照樣完成；經過 `PO_PENDING.md` 和聊天的 4 步備援見 `docs/11`「選擇頁的授權與備援」。同意要登記成 PO 指示（來源、範圍、日期、頁面 ID）。對外分享另循 `docs/08`。
 
 ## 7. 壓縮門檻（25 萬）
+
+**時點**：壓縮門檻只在開第一位 worker 前設定，而且只設定那位 worker 的資料夾：`setup_project_settings.py --repo <worker 的資料夾> --only-this` 報告模式 → 確認忽略規則（下面第 3 點）→ 加 `--apply` → 再跑報告模式要 `OK` → `git -C <worker 的資料夾> check-ignore -q .claude/settings.local.json`（exit 0）→ 開線 → 用 `get_usage` 讀該 worker 的 `contextWindow`（讀不到記 NOT_VERIFIED，不當成已生效）。設定完同步寫進 `GUARDS.md`（第 11 步）。小白快速路徑一定這樣做；一般模式也可以在建置時照下面 7.1～7.6 整批做，但那不是談需求的前提。
 
 1. 填好 `DIRECTOR/director_work.json`（`window`: 250000，`plugins_off` 先留空，`mode` 填一開始選的 `general` 或 `beginner`）。
 2. 報告模式：`python -I -X utf8 <WS>/DIRECTOR/tools/setup_project_settings.py --repo <REPO> --config <WS>/DIRECTOR/director_work.json`
@@ -111,11 +141,11 @@ DIRECTOR/
 
 ## 11. 機制清單（給續航用）
 
-把建好的每個機制（壓縮設定、背景計時器、排程任務、監看程序）寫成一張表：擁有者、中斷會怎樣、怎麼檢查、重建指令。放在 `DIRECTOR/GUARDS.md`（`templates/DIRECTOR_FILES.md`）。檢查腳本照 `docs/06b` 自己寫成 `DIRECTOR/tools/guard_check.py`，沒有通用版；第一輪至少查兩項：`setup_project_settings.py` 報告模式全部 `OK`、`git -C <REPO> check-ignore -q .claude/settings.local.json` exit 0。沒有寫進表的機制，不算建好。
+把建好的每個機制（壓縮設定、背景計時器、排程任務、監看程序）寫成一張表：擁有者、中斷會怎樣、怎麼檢查、重建指令。放在 `DIRECTOR/GUARDS.md`（`templates/DIRECTOR_FILES.md`）。檢查腳本照 `docs/06b` 自己寫成 `DIRECTOR/tools/guard_check.py`，沒有通用版；第一輪至少查兩項：`setup_project_settings.py` 報告模式全部 `OK`、`git -C <REPO> check-ignore -q .claude/settings.local.json` exit 0。沒有寫進表的機制，不算建好。壓縮設定一設完就寫進表：檢查是 `setup_project_settings.py --repo <worker> --only-this` 報告模式 `OK` 加 `check-ignore`，重建是同一個指令加 `--apply`。
 
 ## 12. 工作線編制草案（問 PO）
 
-在 `ACTIVE_WORKSTREAMS.md` 寫草案：要幾條 worker 線、各做什麼、要不要總管和清理員、各線的模型和 effort（`docs/05`）。第 2 步記下沒有產品方向時，草案寫成假設，等第 14 步初衷卡鎖定後再定。**開新 session 會花額度，第一批由 PO 同意後才開。** 小白模式由總監照 `docs/05` 定第一批並登記 DD，開線前用一句白話問使用者可不可以開始做。
+在 `ACTIVE_WORKSTREAMS.md` 寫草案：要幾條 worker 線、各做什麼、要不要總管和清理員、各線的模型和 effort（`docs/05`）。第 2 步記下沒有產品方向時，草案寫成假設，等第 14 步初衷卡鎖定後再定。**開新 session 會花額度，第一批由 PO 同意後才開。** 小白模式由總監照 `docs/05` 定第一批並登記 DD；開線的同意併進第 14 步那一則回覆（卡片對，請開助手），不另外問第二次。
 
 ## 13. 第一份回報給 PO
 
@@ -128,11 +158,22 @@ DIRECTOR/
 5. 待決頁上要 PO 處理的項目代號與一句話摘要（plugin 清單、工作線編制、git 身分……）。
 6. 下一步：PO 回覆後要做的第一件事。專案還沒有鎖定的初衷卡時，下一步就是第 14 步。
 
-小白模式只寫三句白話（`docs/12` 第二節），技術細節留在檔案。
+小白模式只寫三句白話（`docs/12` 第二節），技術細節留在檔案；快速路徑下這三句併進第 14 步那一則。
 
 ## 14. 談需求、寫專案初衷卡（開工前）
 
-照 `docs/12` 第三節：和使用者談到 `templates/BRIEF.md` 每一列都填得出來，寫成 `DIRECTOR/BRIEF.md`，整張貼給使用者確認。使用者說對才改成 `LOCKED`，之後只有使用者能改。之後每張工單的 `TRACES_TO` 都寫 B 編號，派工前跑 `trace_report.py --decisions DIRECTOR/BRIEF.md`（`docs/12` 第五節）。卡沒鎖定前不派工單。
+小白快速路徑下，選完模式的那一輪就開始（見「先問模式」）。
+
+1. 照 `docs/12` 第三節：和使用者談到 `templates/BRIEF.md` 每一列都填得出來，寫成 `DIRECTOR/BRIEF.md`，整張貼給使用者確認。使用者說對才改成 `LOCKED`，之後只有使用者能改。卡可以只鎖「第一階段」；看過真實畫面才能選的事（配色、字型這類）放卡上的「待預覽」，不編 B 號。
+2. **一句回覆同時確認卡和授權開工**：把卡和開工說明（交付與停點、開幾位助手、額度與費用、會動哪些檔）放在同一則貼出。使用者回「卡片對，請開一位 AI 助手做這一批」這類明確包含兩件事的話，才同時鎖卡並開線；只說「對」只鎖卡。範本和狀態（`LOCK_ONLY`、`NO_START`、`LOCK_AND_USER_ASKED`……）見 `docs/12` 第三節。
+3. 之後每張工單的 `TRACES_TO` 都寫 B 編號，派工前跑：
+
+   ```text
+   python -I -X utf8 <WS>/DIRECTOR/tools/trace_report.py --orders <WS>/DIRECTOR/orders --reports <報告資料夾> --decisions <WS>/DIRECTOR/BRIEF.md --decisions <WS>/DIRECTOR/DECISION_REGISTER.md
+   ```
+
+   舊專案還沒有 `DECISION_REGISTER.md` 才只給 `BRIEF.md` 一個。只有 B 開頭的列算待做項目；DD、PO、OD 列出現在「沒有工單的需求」不代表缺工單（`docs/12` 第三節）。
+4. 卡沒鎖定前不派工單。
 
 ## 一定要先問 PO 的事
 
