@@ -11,7 +11,9 @@ each thing by hand (lesson L-042). The generated script only reads, uses only th
 Director sections (any of them, all optional; "Director" status in docs/06b):
   PO       counts on the PO page: per "counts" item a regex (lines that match) or, for a JSON page, a "list" (dotted
            key; "extract" = a regex whose group 1 is the JSON inside an HTML page) counted where "field" == "value";
-           a text page also gets a "PO hint" line for items still STATUS open with an ANSWER filled in (2.1.0 shadow)
+           a text page also gets a "PO hint" line for items still STATUS open with an ANSWER filled in (2.1.0 shadow);
+           `~ PO_PAGE_MISSING` when DIRECTOR_STATE.md (beside the page, or "state") has no PO_PAGE_URL line: the PO
+           page was not published and pinned (BOOTSTRAP step 6). 2.2.0 shadow: the exit code does not change
   ORDERS   order files (glob, default WO-*.md) in "dir" without a "closed" match: the open ones, newest first
   SENDS    lines of the pending-sends file that match "unsent" (default an unticked "- [ ]"); a folder: its files
   AUDIT    per action log (audit_log.py) of "globs": lines, blocked (hook_guard deny / pause) and log reads (the
@@ -304,6 +306,10 @@ def director():
                 if filled:
                     say(f"PO hint: {len(filled)} item(s) still STATUS open with an ANSWER filled in "
                         f"({', '.join(filled[:5])}); read them on the page, the counts above may miss them")
+        # 2.2.0 shadow: a project set up before 2.2.0 has no PO page link in DIRECTOR_STATE.md; say so, never fail
+        state = page.get("state") or os.path.join(os.path.dirname(page["path"]), "DIRECTOR_STATE.md")
+        if not (os.path.isfile(state) and re.search(r"(?m)^PO_PAGE_URL[ \t]*:", read_text(state))):
+            say(f"~ PO_PAGE_MISSING: {state} has no PO_PAGE_URL line; publish and pin the PO page (BOOTSTRAP step 6)")
     orders = CONFIG["orders"]
     if orders:
         if not os.path.isdir(orders["dir"]):
@@ -402,8 +408,10 @@ def director_settings(conf, base):
 
     page = conf["po_page"]
     if page is not None:
-        only(page, "po_page", ("path", "counts", "extract"))
+        only(page, "po_page", ("path", "counts", "extract", "state"))
         page["path"] = absolute(text(page.get("path"), "po_page.path"))
+        if page.get("state") is not None:
+            page["state"] = absolute(text(page["state"], "po_page.state"))
         if page.get("extract") is not None:
             regex(page["extract"], "po_page.extract")
         counts = page.get("counts")

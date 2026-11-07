@@ -16,6 +16,11 @@ Not seen: ignored files, files outside the repo. Only reads.
 An optional `REQUIRED_CHANGES:` list in the order names globs the work must change: each one that no changed path
 matches prints `MISSING <glob>` and makes it a VIOLATION, and the last line ends with ` missing=n`. An order without
 the list gets the same output as before.
+2.2 (F14): REQUIRED_CHANGES is no longer met by a change that only ever showed in one layer. The four-state union
+above still catches out-of-scope work; the required globs are matched against the final result instead: the working
+files as they are now (tracked files that differ from the merge base, untracked files, flagged files that differ)
+or, with `--candidate SHA`, the candidate commit's tree against its merge base with BASE_REF (use it on the commit you
+hand in). A `REQUIRED_BASIS:` line says which. A file staged and then put back as it was is MISSING.
 
 The last line is the one to paste into the TASK REPORT. Exit 0 pass, 1 violation, 2 could not check.
 """
@@ -111,6 +116,7 @@ def main():
     ap.add_argument("--repo", default=".", help="any folder inside the worktree to check (default: current folder)")
     ap.add_argument("--base", help="base ref (default: BASE_REF of the work order)")
     ap.add_argument("--max-lines", type=int, default=20, help="how many violating paths to print (default 20)")
+    ap.add_argument("--candidate", help="2.2: the commit handed in; REQUIRED_CHANGES is matched against its tree")
     a = ap.parse_args()
     sys.stdout.reconfigure(encoding="utf-8")
 
@@ -145,6 +151,16 @@ def main():
                   "unstaged": git(root, *names),
                   "untracked": git(root, "ls-files", "--others", "--exclude-standard", "-z")}
         marked, hidden = hidden_changes(root)
+        final, basis = None, None
+        if required is not None:  # 2.2 (F14): the final result, not the union of layers
+            if a.candidate:
+                commit = git(root, "rev-parse", "--verify", a.candidate + "^{commit}").strip()
+                since = git(root, "merge-base", base, commit).strip()
+                final = git(root, *names, since, commit)
+                basis = f"candidate={commit[:12]}"
+            else:
+                final = git(root, *names, merge_base) + "\0" + states["untracked"]
+                basis = "worktree-final"
     except (RuntimeError, OSError) as error:
         return cannot(str(error))
 
@@ -161,7 +177,8 @@ def main():
         elif not matches(path, scope_rx):
             hits.append(("OUTSIDE", path, ""))
     count = sum(1 for hit in hits if hit[0] == "FORBIDDEN")
-    missing = [g for g in required or [] if g != "NONE" and not any(glob_regex(g).fullmatch(path) for path in changed)]
+    final = {path for path in (final or "").split("\0") if path} | (hidden if basis == "worktree-final" else set())
+    missing = [g for g in required or [] if g != "NONE" and not any(glob_regex(g).fullmatch(path) for path in final)]
     hits += [("MISSING", glob, "") for glob in missing]
     for kind, path, rule in hits[:a.max_lines]:
         print(f"{kind:9} {path}" + (f"  ({rule})" if rule else ""))
@@ -170,10 +187,40 @@ def main():
     if marked:
         print(f"FLAGGED: {len(marked)} file(s) marked assume-unchanged or skip-worktree; {len(hidden)} differ from the index")
     print("STATES: " + " ".join(f"{state}={len(paths)}" for state, paths in states.items()))
+    if basis:
+        print(f"REQUIRED_BASIS: {basis} final={len(final)}")
     print(f"SCOPE_CHECK: {'VIOLATION' if hits else 'PASS'} base={merge_base[:10]} changed={len(changed)} "
           f"forbidden={count} outside={len(hits) - count - len(missing)}" + ("" if required is None else f" missing={len(missing)}"))
     return 1 if hits else 0
 
 
+def not_utf8(error, argv=None):
+    """2.2 (v2.1.0 known issue): one line, never a traceback, for an input file that is not UTF-8 text. It names the
+    file when it is on the command line or in a folder there (text files only: .md .json .jsonl .txt .log)."""
+    import itertools
+    named = []
+    for arg in (sys.argv[1:] if argv is None else argv):
+        path = pathlib.Path(arg)
+        try:
+            files = [path] if path.is_file() else (list(itertools.islice(
+                (p for p in path.rglob("*") if p.suffix.lower() in (".md", ".json", ".jsonl", ".txt", ".log")
+                 and ".git" not in p.parts), 2000)) if path.is_dir() else [])
+        except (OSError, ValueError):
+            files = []
+        for file in files:
+            try:
+                file.read_bytes().decode("utf-8")
+            except UnicodeDecodeError:
+                named.append(str(file))
+            except OSError:
+                pass
+    where = f" ({', '.join(dict.fromkeys(named[:3]))})" if named else ""
+    return f"a file is not UTF-8 text{where}: {error.reason} at byte {error.start}; save it as UTF-8 and run again"
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except UnicodeDecodeError as error:  # 2.2: one line and NOT_RUN (exit 2), never a traceback
+        print(f"SCOPE_CHECK: NOT_RUN {not_utf8(error)}")
+        sys.exit(2)

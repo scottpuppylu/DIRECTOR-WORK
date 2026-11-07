@@ -51,10 +51,12 @@
 - 要看「哪個需求做到哪裡」時，用 `tools/trace_report.py` 從工單、報告和裁決產生追溯表（需求 → 工單 → AC → 證據 → 裁決），不另外人工維護。
   - 加 `--brief BRIEF.md` 時，每條 B 多一列三欄：有人負責／這版有驗證紀錄／你看過這個成品嗎。
   - `--director-log` 讀 PO 看過哪個成品，`--acceptance PO_ACCEPTANCE.json` 讀 PO 的驗收紀錄。
+  - 2.2 起「這版有驗證紀錄」拆成四欄：worker 自述、證據有效、綁鎖定依據、總監重跑。四欄都齊才寫「有」；只有 worker 自述的寫「部分」，不會再顯示成已驗證。總監重跑過 `evidence_record.py verify --rerun` 後，把它印的 `LOG_LINE: EVIDENCE_RERUN …` 整行貼進 DIRECTOR_LOG。
   - 只給 `--decisions BRIEF.md` 時，初衷卡裡用清單列出的 DD 編號也算找得到；PO 編號再加 `--decisions DECISION_REGISTER.md`。
 - PO 看過成品要留下看的是哪一版（2.1，shadow）：
   - 總監在 `DIRECTOR_LOG` 寫整行 `PO_PRODUCT_REVIEW <WO-ID> candidate=<commit> outcome=seen|changes|accepted ref=<訊息> [manifest=<64 位>] [brief=B-2:<指紋>]`。
   - 要正式綁定時，寫 `PO_ACCEPTANCE.json`（schema `po-acceptance-v1`：candidate_id、commit、entry、manifest_sha256、offered_message_ref；有回覆時再加 reply_ref 和 outcome）。用 `gate_check.py --po-acceptance 檔 [--candidate <40 位>]` 檢查，少綁一項就印 `~ UNBOUND_PO_REPLY`。
+  - 2.2 起還要能核對成品本身：再寫 `entry_sha256` 和 `manifest`（manifest 檔的路徑），檔案放在驗收紀錄檔旁邊（或用 `--artifact-root` 指定）。檔不見、內容變了、一則回覆用在兩份成品，都算綁不到；沒寫這兩欄的舊紀錄顯示「成品待核對」。同一 commit 有多份成品時，報告寫 `CANDIDATE_ID:` 指定是哪一份。
   - 裁決可以選填 `ORDER_SHA256:` 和 `REPORT_SHA256:`。之後檔案被改，`--match` 會印 `~ VERDICT_RECORD`。
 
 ### 重資源排程（有總管時）

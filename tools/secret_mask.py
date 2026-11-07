@@ -6,6 +6,14 @@ and passwords in URLs. Each one becomes [MASKED:<kind>], with no part of the sec
 
 Used as a module by the action log (mask before writing). It masks common formats only: a token in a format it has
 not seen goes through. A 40-character git SHA or a sha256 on its own is never masked.
+
+mask_tree(value) masks a JSON-like structure before it is serialized (2.2.0, F12): every string (keys too) goes through
+mask(), and the whole value of a key named like a secret (password, api_key, github_token ...) becomes
+[MASKED:field]. Masking the serialized text instead misses `password="a b"`, whose quotes JSON escapes.
+2.2.0 (review of W1): also an escaped JSON string inside a command (curl -d "{\"password\": \"a b\"}"), a bare
+`Bearer <token>`, a space-separated flag (--password X), `mysql -p X` / `-pX` (also mysqldump, mysqladmin, mysqlsh,
+mariadb, sshpass), `--user bob:X` and `curl -u bob:X`, key names like passw0rd / p@ssword, and in mask_tree the
+whole value of an Authorization or Cookie header field.
 """
 import argparse
 import pathlib
@@ -14,8 +22,14 @@ import sys
 
 # a key name that holds a secret: the secret word, then nothing or a suffix after a separator (github_token, api_key.prod),
 # so max_tokens, author and authorization (the header has its own pattern) are not key names
-SECRET_NAME = (r"[\w.-]*?(?:password|passwd|passphrase|token|secret|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|auth)"
+SECRET_NAME = (r"[\w.-]*?(?:p[a@4]ssw[o0]?r?d|passphrase|token|secret|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|auth)"
                r"(?:[_.-][\w.-]*)?")
+# the quote that closes a key name, maybe escaped: `password\": \"x\"` is a JSON string inside a command
+NAME_END = r"""(?:\\?["'])?"""
+# a secret value: an escaped quoted string (to the closing escaped quote, else to the line end), a quoted string (to the
+# closing quote, else to the line end) or a bare word
+ESCAPED = r"""\\"[^\n]*?\\"|\\'[^\n]*?\\'|\\["'][^\n]*|"""
+VALUE = "(" + ESCAPED + r"""(?!\\)"[^"\n]*"?|'[^'\n]*'?|[^\s"',;]+)"""
 PATTERNS = [
     ("private_key", re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)", re.S)),
     ("aws_access_key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
@@ -30,11 +44,17 @@ PATTERNS = [
 ]
 # these keep the part before the secret (the header name, the key name, the scheme and user) and mask the rest
 KEEP_PREFIX = [
-    ("bearer", re.compile(r"(?i)(\bauthorization\s*[:=]\s*[\"']?(?:bearer|basic|token)\s+)([^\s\"']+)")),
+    ("bearer", re.compile(r"(?i)(\bauthorization" + NAME_END + r"""\s*[:=]\s*(?:\\?["'])?(?:bearer|basic|token)\s+)([^\s"'\\]+)""")),
+    ("bearer", re.compile(r"(\bBearer\s+)([A-Za-z0-9._~+/-]{8,}=*)")),
     ("url_password", re.compile(r"(?i)(\b[a-z][a-z0-9+.-]*://[^/\s:@]+:)([^/\s@]+)(?=@)")),
-    ("assignment", re.compile(r"(?i)(\b" + SECRET_NAME + r"[\"']?\s*[:=]\s*)(\"[^\"\n]*\"|'[^'\n]*'|[^\s\"',;]+)")),
+    ("cli_flag", re.compile(r"(?i)((?<![\w-])--?" + SECRET_NAME + r"\s+)(?!-)" + VALUE)),
+    ("p_flag", re.compile(r"(\b(?:mysql|mysqldump|mysqladmin|mysqlsh|mariadb|sshpass)\b[^\n|;&]*?\s-p\s*)(?!-)" + VALUE)),
+    ("user_password", re.compile(r"""((?:--user|--proxy-user)(?:\s+|=)["']?[^\s:"'@/]+:|\bcurl\b[^\n|;&]*?\s-[uU]\s*["']?[^\s:"'@/]+:)([^\s"'@\\]+)""")),
+    ("assignment", re.compile(r"(?i)(\b" + SECRET_NAME + NAME_END + r"\s*[:=]\s*)" + VALUE)),
 ]
 MASK = re.compile(r"\[MASKED:\w+\]")
+# a field whose whole value is masked: a secret name, or a header that carries credentials
+FIELD = re.compile(SECRET_NAME + r"|(?:proxy[_-])?authorization|(?:set[_-])?cookie", re.I)
 
 
 def mask(text):
@@ -50,7 +70,7 @@ def mask(text):
     def tail(kind):
         def swap(match):
             value = match.group(2)
-            if MASK.fullmatch(value.strip("\"'")) or not value.strip("\"'"):
+            if MASK.fullmatch(value.strip("\"'\\")) or not value.strip("\"'\\"):
                 return match.group(0)
             found.add(kind)
             return f"{match.group(1)}[MASKED:{kind}]"
@@ -61,6 +81,20 @@ def mask(text):
     for kind, pattern in KEEP_PREFIX:
         text = pattern.sub(tail(kind), text)
     return text, sorted(found)
+
+
+def mask_tree(value, key=None):
+    """A copy of a JSON-like value with each string masked; a secret-named key's whole value becomes [MASKED:field].
+    None, booleans and an empty string under such a key stay as they are (nothing to hide)."""
+    if isinstance(key, str) and FIELD.fullmatch(key) and value not in (None, "") and not isinstance(value, bool):
+        return "[MASKED:field]"
+    if isinstance(value, str):
+        return mask(value)[0]
+    if isinstance(value, dict):
+        return {(mask(k)[0] if isinstance(k, str) else k): mask_tree(v, k) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [mask_tree(v) for v in value]
+    return value
 
 
 def main():

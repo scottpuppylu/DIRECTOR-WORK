@@ -23,6 +23,12 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: ${{ matrix.python }}
+      - name: environment
+        shell: pwsh
+        run: |
+          python -VV
+          git --version
+          $PSVersionTable.PSVersion.ToString()
       - run: python -I -X utf8 tools/selftest.py
       # 2.1.0 (report 5): the rules pack must also verify where git is missing (a ZIP on a bare machine).
       # Take every PATH folder holding git off PATH; the git test groups are then skipped by name, the rest must pass.
@@ -32,3 +38,85 @@ jobs:
           $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -and -not (Test-Path (Join-Path $_ 'git.exe')) -and -not (Test-Path (Join-Path $_ 'git.cmd')) }) -join ';'
           if (Get-Command git -ErrorAction SilentlyContinue) { throw 'git is still on PATH' }
           python -I -X utf8 tools/selftest.py
+
+  # 2.2.0 (F21): Linux. The same suite on the platform the container tools and the bash tests really run on,
+  # from a checkout path with spaces and non-ASCII characters (a fixed fixture for path and UTF-8 handling),
+  # with the environment and the skipped groups printed so a green run says what it did not run.
+  selftest-linux:
+    # pinned, not ubuntu-latest: on 2026-11-07 latest became 26.04, which has no Python 3.9 build for setup-python; a moving image would
+    # silently drop a version of the matrix, so this job moves to a new image only when someone edits this line.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.11", "3.12"]
+    env:
+      LANG: C.UTF-8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          path: "dw 專案 路徑"
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: environment
+        shell: bash
+        run: |
+          uname -a
+          python -VV
+          git --version
+          bash --version | head -1
+          echo "checkout path: $PWD/dw 專案 路徑"
+      - name: selftest (path with spaces and non-ASCII)
+        shell: bash
+        working-directory: "dw 專案 路徑"
+        run: |
+          python -I -X utf8 tools/selftest.py 2>&1 | tee "$RUNNER_TEMP/selftest.log"
+          { echo "### selftest Linux, Python ${{ matrix.python }}"; echo '```'; grep -E '^(SKIP|selftest|[0-9]+/[0-9]+)' "$RUNNER_TEMP/selftest.log" || true; tail -n 3 "$RUNNER_TEMP/selftest.log"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      # Same as the Windows no-git run: take every PATH folder holding git off PATH.
+      - name: selftest without git on PATH
+        shell: bash
+        working-directory: "dw 專案 路徑"
+        run: |
+          # Taking every PATH folder that holds git off PATH also drops ps, bash, sed ... on Linux (they share /usr/bin), and
+          # status.py's process probe needs ps. So: link everything from those folders except git into a private folder.
+          shim="$RUNNER_TEMP/nogit-bin"
+          rm -rf "$shim"; mkdir -p "$shim"
+          clean=""
+          IFS=: read -ra dirs <<< "$PATH"
+          for d in "${dirs[@]}"; do
+            if [ -x "$d/git" ]; then
+              for f in "$d"/*; do
+                b="${f##*/}"
+                case "$b" in git|git-*) continue ;; esac
+                [ -e "$shim/$b" ] || ln -s "$f" "$shim/$b" 2>/dev/null || true
+              done
+            else
+              clean="${clean:+$clean:}$d"
+            fi
+          done
+          PATH="$shim${clean:+:$clean}"
+          if command -v git >/dev/null 2>&1; then echo "git is still on PATH"; exit 1; fi
+          command -v ps >/dev/null 2>&1 || { echo "ps is gone from PATH"; exit 1; }
+          python -I -X utf8 tools/selftest.py
+
+  # 2.2.0 (F21): the choice page is checked in a real browser (the Chrome the runner already has; no paid service).
+  # DW_REQUIRE_BROWSER=1: a missing browser or test file fails the job instead of skipping it.
+  browser:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: browser version
+        run: google-chrome --version
+      - name: choice page behaviour in Chrome
+        env:
+          DW_REQUIRE_BROWSER: "1"
+        run: python -I -X utf8 tools/browser_check.py --chrome "$(command -v google-chrome)"

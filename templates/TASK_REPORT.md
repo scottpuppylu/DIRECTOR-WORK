@@ -6,6 +6,8 @@ TASK_ID / WORKER / MODEL / BRANCH / BASE / HEAD / WORKTREE_CLEAN(yes|no)
   HEAD 寫 git rev-parse HEAD 的完整 40 位（Strict 一定要 40 位，總監拿它和審查的 commit 比）
 ORDER: <WO-檔名.md> REVISION <n>（REVISION 要和工單現在的相同）
 ORDER_SHA256: <開工時跑 gate_check.py --hash 工單 的 64 位輸出>
+CANDIDATE_ID: <給 PO 看的成品 id，和 PO_ACCEPTANCE 紀錄的 candidate_id 相同；同一個 commit 有兩份以上成品時必填，只有一份可省>
+  成品的 commit、入口檔與其 SHA-256、manifest 的 SHA-256 以 PO_ACCEPTANCE 紀錄為準，報告不重抄；trace_report 靠這個 id 找到那筆紀錄（2.2.0）
 RESULT: PASS | PARTIAL | BLOCKED | FAIL
   ENGINEERING: ...
   PRODUCT（成品）: ...

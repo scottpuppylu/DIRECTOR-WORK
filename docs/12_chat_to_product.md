@@ -19,7 +19,7 @@
 | BOOTSTRAP 步驟 | 一般模式 | 小白模式 |
 |---|---|---|
 | 3、4、7、8、10 建置 | 照順序做完才談需求 | 快速路徑：談完需求、開第一位 worker 前才做（壓縮門檻只設定那位 worker 的資料夾） |
-| 6 待決頁 | `PO_PENDING.md` 加聊天；選擇頁先問，同意且可用才用 | 同左，問法用白話（「需要我把選擇題和圖片放在你自己的 Claude 頁面，讓你點選嗎？直接在這裡回答也可以。」）；沒同意或用不了，在聊天問、總監存進 `PO_PENDING.md`（`docs/11`「選擇頁的授權與備援」） |
+| 6 待決頁 | 第一則回覆之前發布網頁並置頂，題目同時記進 `PO_PENDING.md`、在聊天問 | 同左，問法用白話；用不了或使用者說不要，在聊天問、總監存進 `PO_PENDING.md`（`docs/11`「待決頁網頁的授權與備援」） |
 | 7.7 `hook_guard.py` | 問要不要裝 | 不問、不裝 |
 | 9 無關 plugin | 列清單問 | 不問；`plugins_off` 留空，什麼都不關 |
 | 12 工作線編制 | 草案問 PO | 總監照 `docs/05` 定第一批（通常一條 worker 線），登記 DD，寫進初衷卡「由總監決定的事」；開線的同意併進「卡片對，請開助手」那一句，不另外問 |
@@ -64,13 +64,13 @@
 
    舊專案還沒有 `DECISION_REGISTER.md` 才只給 `BRIEF.md` 一個，結果和以前相同。「沒有工單的需求」只有 B 開頭的列算待排項目；DD、PO、OD 的列只是決策紀錄，列出來不代表缺工單。「TRACES_TO 找不到的編號」有東西，是工單對到不存在的編號，改工單。
 
-### 四、選擇頁：要使用者選的放這裡
+### 四、待決頁網頁：要使用者選的放這裡
 
 適用：中途有兩個以上做法、使用者看了才能決定的事，例如 A 風格或 B 風格、版面、配色、角色長相。不適用：純技術選擇（總監自己決定）、要使用者動手的事（照 `docs/03` 待決頁）。
 
-前提：先問 PO，PO 同意且工具可用才發布；否則走聊天和本機 `PO_PENDING.md`（和 `BOOTSTRAP.md` 步驟 6、`docs/11`「選擇頁的授權與備援」一致）。
+前提：網頁在第一則回覆之前就發布並置頂（`BOOTSTRAP.md` 步驟 6；啟動提示詞已同意），網址看 `DIRECTOR_STATE.md` 的 `PO_PAGE_URL`。`PO_PAGE_URL: NONE` 時走聊天和本機 `PO_PENDING.md`（`docs/11`「待決頁網頁的授權與備援」）。選擇題和成品截圖放同一頁。
 
-1. **發布**：複製 `templates/choice_page.html`，用 Artifact 工具發布，`capabilities` 給 `{"db": {}, "user": {}, "assets": {}, "comments": {}}`（`comments` 用來叫醒總監，見第六節），`icon` 用 `checklist`。私人頁面，只有使用者看得到；網址寫進 `DIRECTOR_OPERATING_RULES.md`，第一份回報附上。
+1. **發布**：複製 `templates/choice_page.html`，用 Artifact 工具發布，`capabilities` 給 `{"db": {}, "user": {}, "assets": {}, "comments": {}}`（`comments` 用來叫醒總監，見第六節），`icon` 用 `checklist`，`pin: true`。私人頁面，只有使用者看得到；網址寫進 `DIRECTOR_STATE.md` 的 `PO_PAGE_URL`（置頂結果寫 `PO_PAGE_PINNED`，`BOOTSTRAP` 第 6 步第 3 點），第一份回報附上。
 2. **開題**（2.1 起）：題目內容和題目狀態分開放。先用 `ArtifactData` 寫一筆版本 `choiceRevisions/<編號>-r<版>`，寫了就不再改：
 
    ```json
@@ -84,7 +84,7 @@
    再寫 `decisions/<編號>`：`{"code": "CH-01", "status": "open", "priority": 1, "revision": 1, "snapshotHash": "sha256:…"}`。
    - `snapshotHash` 用 `choice_reconcile.py register --snapshot <這一版的 JSON>` 算，同一份也記進本機帳本（第六節）。
    - **改題就開新版**：寫 `CH-01-r2`，再把 `decisions/CH-01` 的 `revision`、`snapshotHash` 改成新版。不要改舊版的內容；使用者對舊版的回覆仍照舊版的選項讀。
-   - 每題都要有 `brief`（對到哪幾條 B）、`recommended` 和 `why`（總監建議和理由，用使用者的話）。對不到初衷卡的題目不要開，先回頭問要不要改卡。
+   - 每題都要有 `brief`（對到哪幾條 B）、`recommended` 和 `why`（總監建議和理由，用使用者的話）。對不到初衷卡的題目不要開，先回頭問要不要改卡。例外：第一輪的模式題 `CH-00` 在初衷卡之前，`brief` 寫 `[]`。
    - 圖：先截真實成品的圖，用 Artifact 工具 `asset: true` 上傳到這一頁，`url` 用上傳結果給的網址。不要用示意圖假裝是成品。
    - 一題只問一件事；選項最多四個。
    - 2.0 開的舊題（`decisions` 裡直接放題目、沒有 `revision`）照樣能看能答；頁面標「舊題，當時選項未留存」，因為那時沒有存下使用者當時看到的選項。
@@ -93,7 +93,7 @@
    - 舊題：照 2.0 改 `decisions/<編號>` 為 `answered`，`answer` 多一個 `submissionId`。
    - 留言：新增 `notes`：`{"kind": "note", "submissionId", "text", "at", "status": "new"}`。
    - 頁面保證：重畫不會吃掉打到一半的字、游標和選取範圍；輸入法選字時不重畫；送出中同一題按不了第二次；送出前用最新資料確認題目還開著、選項還在；存好後只有字沒被改過才清空。這些由 `selftest.py` 的 `test_choice_page` 檢查。
-4. **讀回覆**：每一輪第一個動作，用 `ArtifactData` 讀 `choiceReplies`、`decisions`（舊題看 `status == "answered"`）和 `notes`（`status == "new"`），存成一份 JSON，跑 `choice_reconcile.py ingest`，照第六節處理。
+4. **讀回覆**：照 `docs/06` 每輪第一步，在唯讀收集時用 `ArtifactData` 讀 `choiceReplies`、`decisions`（舊題看 `status == "answered"`）和 `notes`（`status == "new"`），存成一份 JSON，跑 `choice_reconcile.py ingest`，照第六節處理。
 5. 聊天裡只說一句「選擇頁新增了 CH-01」，不在聊天裡重複整題。
 
 ### 五、不做歪的檢查
@@ -119,6 +119,7 @@
 2. **先記帳再動手**：本機帳本 `<WS>/DIRECTOR/choice_inbox.sqlite3`，用 `tools/choice_reconcile.py`：
 
    ```text
+   python -I -X utf8 <WS>/DIRECTOR/tools/choice_reconcile.py publish --db <WS>/DIRECTOR/choice_inbox.sqlite3 --question CH-01 --revision 2
    python -I -X utf8 <WS>/DIRECTOR/tools/choice_reconcile.py ingest --db <WS>/DIRECTOR/choice_inbox.sqlite3 --export <讀回來的 JSON>
    python -I -X utf8 <WS>/DIRECTOR/tools/choice_reconcile.py plan --db <WS>/DIRECTOR/choice_inbox.sqlite3 --question CH-01 --revision 2 --orders <WS>/DIRECTOR/orders
    python -I -X utf8 <WS>/DIRECTOR/tools/choice_reconcile.py advance --db <WS>/DIRECTOR/choice_inbox.sqlite3 --question CH-01 --revision 2 --from QUEUED --to CLAIMED --session <你的名字>
@@ -127,15 +128,20 @@
    - `ingest` 把每筆回覆記一列，標出重複、同題不同答案、舊版、hash 不符、選項不存在。只有 `ok` 和 `legacy` 能派工；其他的照實回給使用者（寫回條 `resolution`），不要猜。
    - `plan` 給這一題這一版固定的工單編號；再跑一次還是同一張。工單照這個編號寫。
    - 狀態：`RECORDED → PLANNED → QUEUED → CLAIMED → RECEIPT_PENDING → CLOSED`。`advance` 只在狀態還是 `--from` 時才改；兩個總監同時接手，只有一個成功，另一個拿到 `LOST`，就不要再做。做到一半不知道有沒有做完的，改成 `RECONCILE`，先查證再決定。
+   - **領取與接手（2.2）**：動到 `CLAIMED` 或 `RECONCILE` 的 `advance` 都要帶 `--session <你的名字>`。領取時記下持有者，世代（`generation`）加 1。只有持有者能把 `CLAIMED` 交成 `RECEIPT_PENDING`；別人看到卡住的領取，用 `--from CLAIMED --to RECONCILE --session <自己> --generation <看到的世代>` 接手（一定要帶世代，沒帶 exit 2）：世代不對拿到 `LOST`，表示有人先動了。接手會記一筆事件，工具印出要去查的工單編號；查證做完了才往下走，沒做就從 `RECONCILE` 回 `QUEUED` 重派。2.1 留下、沒有持有者的領取，一律先走 `RECONCILE`。
+   - **版本與現行版（2.2）**：`register` 只存不可改的快照，「頁面上現在是哪一版」另外記。選擇頁真的換上新版後跑 `publish --revision N`；題目關掉跑 `publish --close`。新版登記了卻還沒 `publish`，舊版的 `plan` 回 `HOLD`，不派工。`plan` 和領取都會再查一次版本、hash、題目是否還開著；不符的回 `REFUSED`（exit 1），工單不要開；已排的 `plan` 印 `WARNING`，照提示 `advance --from <目前狀態> --to RECONCILE`（`PLANNED`、`QUEUED`、`CLAIMED` 都能這樣走）。匯出裡的 `decisions` 也會帶動現行版。
+   - **壞資料隔離（2.2）**：匯出逐筆讀。讀不懂的那一筆記進隔離區，印 `QUARANTINED <來源> reason=<原因>`，其他筆照常記帳；原因有 `not-a-list`、`not-an-object`、`missing-id`、`missing-question`、`bad-revision`、`bad-answer`、`snapshot_mismatch`。`snapshot_mismatch` 是使用者看到的選項（`selectedOptionSnapshot` 的 `key`，有 `label` 也比）跟登記快照裡 `choice` 指的選項不一樣：不記帳、不排工。沒附 `selectedOptionSnapshot` 的舊頁面回覆、或快照還沒登記的，照記並印 `WARNING`，不擋。下次匯出同一筆已修好，就自動離開隔離區；這只對有 `id` 的那筆有效，`missing-id` 和 `bad-answer` 的列要手動 `settle`。確認是垃圾的，`settle --key <來源> --to CLOSED` 結案，之後不再提起。先到的回覆因為快照還沒登記被標 `unknown-revision`，`register` 或 `publish` 之後會自動重判（選項對不上的改標 `snapshot_mismatch`，不排工）；要手動重判跑 `rescan`。
    - 沒被採用的那幾列用 `settle` 結案：留言讀過 `--to NOTED`；被新回覆取代 `--to SUPERSEDED`；重複、衝突、不合格的回覆照實回給使用者後 `--to CLOSED`。已關閉的 2.0 舊答案直接記成 `CLOSED`。
-   - 2.1 是 shadow：帳本只提示、不擋任何工具；資料壞了只印一行 `CHOICE_RECONCILE: SHADOW_ERROR <原因>`，exit 0。沒跑帳本不算違規，但重複派工要自己負責。
-3. **回條**：總監每走一步，新增一筆 `choiceReceipts`：`{"questionId", "revision", "submissionId", "stage", "at", "wo", "resolution"}`，`stage` 是 `seen`、`claimed`、`handed`、`closed`。舊題照 2.0 也寫 `decisions` 的 `seenAt`，處理完改 `closed` 並寫 `resolution`、`closedAt`；留言改成 `read`。
+   - 2.2 仍是 shadow：帳本只提示、不擋其他工具；帳本檔本身壞了只印一行 `CHOICE_RECONCILE: SHADOW_ERROR <原因>`，exit 0。帳本被另一個總監鎖住時印 `CHOICE_RECONCILE: BUSY <原因>`，exit 1，什麼都沒改，稍後重跑。單筆資料壞了改進隔離區，不再整批報錯。沒跑帳本不算違規，但重複派工要自己負責。2.1 的帳本第一次被 2.2 打開時自動升級，升級前在同一把鎖內先留一份驗過的 `<帳本>.v210.bak`（名字已被占用就加時間戳，不覆寫；備份失敗就不升級）。`status` 也會觸發升級。
+   - **回覆身分（2.2）**：一筆回覆由四個欄位認出來：`questionId + revision + snapshotHash + submissionId`。帳本、回條、頁面都用這四個一起配對，少一個就不算同一筆；只對上其中幾個的回條另列「配不上」，不拿來改任何一筆的狀態。2.0 舊題沒有版本，`revision` 記 0、`snapshotHash` 記空字串。
+   - **冪等鍵（2.2）**：同一筆送出重送幾次都只算一次，鍵是 `頁面來源 + 事件種類 + submissionId`，寫成 `<source>|<kind>|<submissionId>`；`source` 是匯出 JSON 的 `source`（頁面的 artifact id；匯出沒有這一欄時 `ingest` 加 `--source <artifact id>`，不然印 `WARNING` 並當成 `artifact`），`kind` 是 `choice` 或 `note`。同一個鍵、內容相同，記成重複（`duplicate`），不再算新的；同一個鍵、內容不同，兩份原件都留著，標 `conflict-same-submission`，照實回給使用者，不覆寫。頁面重試時沿用同一個 `submissionId`。
+3. **回條**：總監每走一步，新增一筆 `choiceReceipts`：`{"questionId", "revision", "snapshotHash", "submissionId", "stage", "at", "wo", "resolution"}`，`stage` 是 `seen`、`claimed`、`handed`、`closed`。舊題照 2.0 也寫 `decisions` 的 `seenAt`，處理完改 `closed` 並寫 `resolution`、`closedAt`；留言改成 `read`。
    - 2.1 新題的選項讀不到時（`choiceRevisions` 還沒載入或沒有這一版），頁面顯示「載入中」或「這一版選項讀不到，請在聊天告訴總監」，不能送出。圖片和影片的網址只接受 `https:`、`/_blob/` 和相對路徑。
    - 頁面上每一筆回覆顯示三種狀態：沒有回條是「已儲存，等總監讀取」；`seen` 或 `claimed` 是「總監已收件，處理中」；`handed`、`closed` 或題目已關是「已交接／處理完成」。
    - 逾時分兩種：存好超過 10 分鐘還沒有回條，標「（沒收到）」，是叫醒或讀取出了問題；收件超過 30 分鐘還沒交接，標「（收到但卡住）」，是處理出了問題。使用者看得到卡在哪一步，可以在聊天裡提醒。
    - 處理晚了照實寫在 `resolution`：幾點才讀到、晚了多久。
 4. 處理完，把叫醒用的留言串用 `ArtifactComments` resolve 掉。
-5. 每輪結束前自查：跑 `choice_reconcile.py status`，`not_handed`、`stuck`、`receipts_pending`、`notes` 都是 0；選擇頁沒有「已回覆卻沒關閉」的題目。有總管時，總管例行查的「已回覆超過 10 分鐘還沒關閉」也包含選擇頁。
+5. 每輪結束前自查：跑 `choice_reconcile.py status`，最後一行要是 `clear=yes`（`not_handed`、`stuck`、`receipts_pending`、`notes`、`reconcile`、`quarantined` 都是 0）；選擇頁沒有「已回覆卻沒關閉」的題目。給程式讀用 `status --json`，只印一份 JSON。有總管時，總管例行查的「已回覆超過 10 分鐘還沒關閉」也包含選擇頁。
 
 ## 為什麼
 

@@ -12,14 +12,21 @@
 #   the worker cannot change its refs, tags or objects; the Director takes
 #   back only the worker's branch with worker_clone.sh collect. NAME goes to
 #   DW_WORKER_NAME (the action log file name).
-# --worktree/--git-common (1.1.0): the repository's shared .git is mounted
-#   and writable, so the worker can change other branches and tags (K1). It
-#   prints a WARN, doctor reports it NOT_ENFORCED, and 2.0 removes it.
+# --worktree/--git-common (1.1.0, legacy mode, still supported in 2.2.0): the
+#   repository's shared .git is mounted and writable, so the worker can change
+#   other branches and tags (K1). It prints a WARN, doctor reports it
+#   NOT_ENFORCED. It is not scheduled for removal in a minor version; it can
+#   only go in a major release (3.0 at the earliest). Move to --clone: see the
+#   WARN text for the two commands.
 #   DW_WORKER_NAME is --name, else --worktree-name, else the folder name.
 #
 # What the container gets:
 #   /work       the clone or the worktree, the only project folder it can write
-#   /director   DIRECTOR, read-only
+#   /director   DIRECTOR, read-only. 2.2.0 (F11): DIRECTOR must not be the same
+#               folder as, inside, or an ancestor of a writable mount (--clone,
+#               --worktree, --git-common), by real path or by inode (symlink,
+#               Windows/WSL alias); otherwise the writable mount would show it
+#               under /work and the read-only promise would be void: exit 2.
 #   .git        --clone: /work/.git, with config and hooks/ read-only.
 #               main checkout (no --worktree-name): /work/.git itself.
 #               linked worktree: the repository's .git at /repo-git, and a
@@ -29,14 +36,24 @@
 #               Writable (see K1 in tools/README.md), except hooks/ and
 #               config, which are read-only: they run on the host later;
 #               and worktrees/, read-only except the worker's own record.
-#   /home/dw/.claude  docker volume dw-claude-home: Claude's own login only
+#   /home/dw/.claude  docker volume dw-claude-home: Claude's own login only,
+#               but ONE volume shared by every worker started on this host
+#               (F18): not isolated per worker or per account. For another
+#               trust scope set DW_CLAUDE_HOME_VOLUME to a different name.
 #   environment: only the variables listed below; nothing from the host.
 #               No GIT_DIR: it would send every git in the container, also
 #               ones run in other folders, to this repository.
 #   network: names come from --allow-file (default dns_allow.txt next to this
 #            script: api.anthropic.com), plus --allow HOST and, with --login,
 #            the sign-in hosts. Only those names resolve (dns_allow.py in the
-#            container, no off switch) and only their addresses get TCP 443.
+#            container, no off switch) and only the resolved IPv4 address:443
+#            gets TCP (F18): it filters destination IP:port, not the TLS name
+#            or HTTP host, so any other site on the same IP is reachable.
+#            IPv6: init_firewall.sh sets ip6tables DROP when it can and ignores
+#            a failure there, so 2.2.0 also starts the container with
+#            --sysctl net.ipv6.conf.all.disable_ipv6=1 (the image is unchanged,
+#            still dw-worker:1.2.0). If docker refuses the sysctl the container
+#            does not start (fail closed); doctor --probe is the check.
 #            --offline means no network at all.
 #   DNS upstream: DW_DNS_UPSTREAM (space-separated IPv4) if set, else the
 #            IPv4 nameservers in /etc/resolv.conf except 127.x.
@@ -87,7 +104,7 @@ if [ -n "$CLONE" ]; then
   WORKTREE="$CLONE"
   GITMOUNTS=(-v "$CLONE/.git/config:/work/.git/config:ro" -v "$CLONE/.git/hooks:/work/.git/hooks:ro")
 else
-  echo "run_worker: WARN K1: --git-common mounts the shared .git writable; use --clone (2.0 removes --git-common)" >&2
+  echo "run_worker: WARN K1: --git-common is a legacy mode (still supported; removal only in a major release, 3.0 at the earliest) and mounts the shared .git writable. Move to --clone: worker_clone.sh create --repo REPO --base COMMIT --branch BRANCH --dir DIR, then run_worker.sh --clone DIR --name NAME ..." >&2
   [ -n "$WORKTREE" ] && [ -d "$WORKTREE" ] || die "--worktree must be an existing folder"
   [ -n "$GITCOMMON" ] && [ -d "$GITCOMMON" ] || die "--git-common must be the repository's .git folder"
   # hooks/ and config run on the host later (git hooks, core.hooksPath, aliases), so the container gets them read-only.
@@ -124,6 +141,34 @@ else
   [ -n "$NAME" ] || NAME="${WTNAME:-$(basename "$WORKTREE")}"
 fi
 
+# F11 (2.2.0): the read-only DIRECTOR must not be reachable through a writable mount.
+# resolve() gives the real path; inside A B is true when A is B or below B, by path text or,
+# walking A's parents, by inode (-ef: symlinks, Windows/WSL aliases such as /mnt/D vs /mnt/d).
+resolve() { ( cd "$1" 2>/dev/null && pwd -P ) || die "cannot resolve $1"; }
+inside() {
+  local p="$1" q="$2"
+  [ "$q" = / ] && return 0
+  [[ "$p/" == "$q/"* ]] && return 0
+  if [[ "$p" == /mnt/* && "$q" == /mnt/* ]]; then [[ "${p,,}/" == "${q,,}/"* ]] && return 0; fi
+  while :; do
+    [ "$p" -ef "$q" ] && return 0
+    { [ "$p" = / ] || [ "$p" = . ]; } && break
+    p="$(dirname "$p")"
+  done
+  return 1
+}
+REAL_DIRECTOR="$(resolve "$DIRECTOR")"
+for pair in "--clone/--worktree:$WORKTREE" "--git-common:$GITCOMMON"; do
+  label="${pair%%:*}" path="${pair#*:}"
+  [ -n "$path" ] && [ -d "$path" ] || continue
+  real="$(resolve "$path")"
+  if inside "$real" "$REAL_DIRECTOR" || inside "$REAL_DIRECTOR" "$real"; then
+    die "--director ($REAL_DIRECTOR) overlaps the writable mount $label ($real): equal, inside or around it, so the worker could write to DIRECTOR through /work. Move DIRECTOR to its own folder outside the worker's folder (back it up first), then pass the new path."
+  fi
+done
+CLAUDE_VOLUME="${DW_CLAUDE_HOME_VOLUME:-dw-claude-home}"
+[[ "$CLAUDE_VOLUME" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || die "DW_CLAUDE_HOME_VOLUME: a docker volume name (letters, digits, _ . -)"
+
 ARGS=(docker run --rm --init
   --cap-drop ALL --cap-add NET_ADMIN --cap-add NET_RAW --cap-add SETUID --cap-add SETGID --cap-add SETPCAP
   --security-opt no-new-privileges
@@ -132,7 +177,7 @@ ARGS=(docker run --rm --init
   -v "$WORKTREE:/work"
   -v "$DIRECTOR:/director:ro"
   "${GITMOUNTS[@]}"
-  -v "dw-claude-home:/home/dw/.claude"
+  -v "$CLAUDE_VOLUME:/home/dw/.claude"
   -e CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1
   -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
   -e XDG_CACHE_HOME=/tmp/cache
@@ -178,6 +223,7 @@ else
   for ns in "${UPSTREAM[@]}"; do
     [[ "$ns" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || die "DW_DNS_UPSTREAM: not an IPv4 address: $ns"
   done
+  ARGS+=(--sysctl net.ipv6.conf.all.disable_ipv6=1 --sysctl net.ipv6.conf.default.disable_ipv6=1)
   ARGS+=(--dns 127.0.0.1 -e "DW_ALLOW_DOMAINS=${DOMAINS[*]}" -e "DW_DNS_UPSTREAM=${UPSTREAM[*]}")
 fi
 if [ -t 0 ] && [ -t 1 ]; then ARGS+=(-it); else ARGS+=(-i); fi

@@ -6,6 +6,111 @@
 - **MINOR**：新增規則、文件、工具或選項，舊檔案照樣通過。
 - **PATCH**：修正文字、修 bug，規則不變。
 
+## 2.2.0 — 2026-11-08
+
+MINOR：GPT 對 v2.1.0 的獨立審查（`DIRECTOR-WORK-v2.1.0-review.md`，21 項發現 F01–F21，每項附重現）PO 2026-11-08 決定全部併進 2.2.0，另加「建置時強制做出待決頁並置頂」。每項由負責的 worker 修前先重現、修後再跑 `repro_dw210.py` 確認不再重現（W1–W4 的 TASK REPORT 附輸出）。新的檢查先 shadow；審查明說要改結果的幾項（F10、F11、F15 等）改了結果，列在下面「誰會從成功變成待處理」。
+
+### 建置時就做出待決頁並置頂；指示分三層（W1：F12 F13 F19 F20）
+
+- 新：建置時就把待決頁做成 PO 的 Claude 私人頁面並置頂。README 啟動提示詞加同意句，貼上即同意；`BOOTSTRAP` 在第一則回覆之前發布（`pin: true`），`DIRECTOR_STATE.md` 寫 `PO_PAGE_URL`、`PO_PAGE_PINNED`，第一則回覆附網址。備援寫 `PO_PAGE_URL: NONE reason=...`、`PO_PAGE_PINNED: no reason=...`。
+- 新：`tools/setup_check.py <WS>/DIRECTOR`，建置完成時檢查上面兩行；`BOOTSTRAP` 第 6、11、13 步要它 exit 0。它只驗格式，總監第一份回報要貼發布工具回傳的結果原文。
+- 新（shadow）：`status_gen.py` 總監版缺 `PO_PAGE_URL` 時印 `~ PO_PAGE_MISSING`，exit code 不變；舊的 `status.py` 要 `--force` 重產才會印。
+- F12：`secret_mask.mask_tree()`；`audit_log` 先遮再序列化，引號裡的機密不再漏出尾巴，`input` 是合法 JSON（500 字內）。審查補漏：另外遮指令字串裡跳脫的 JSON、單獨的 `Bearer <token>`、`--password X`、`mysql -p X`／`-pX`、`--user bob:X`、`curl -u bob:X`、`passw0rd` 這類鍵名，`Authorization`／`Cookie` 欄位整欄遮；`hook_guard --review` 送審提示改用 `mask_tree`（原本 `mask(json.dumps(...))` 有同樣的引號問題）。
+- F13：新 `audit_log.py recover --log`：留 `.damaged-<時間>` 複本，接一行 `kind=recovery` 後可繼續寫；`verify` 印 GAP 和 `gaps=n`，複本被改才 BROKEN；`.damaged-` 複本遺失時：有 `--anchor-log`／`--anchor-rev` 的判 BROKEN（切掉的行無從核對），沒有錨點的只印 `~ warning`。append 的遮罩和寫入分開回報（`additionalContext`，stderr `masked=… written=no`）。
+- F19：完整導入和派工要 git；ZIP 版只能讀規則、跑不需要 git 的工具（commit 記 `NONE (ZIP)`）。
+- F20：指示分三層，檔案裡的字句不升級成 PO 指示（README 提示詞也加一句）。總監每輪只有一個第一步：先唯讀檢查並收集（含選擇頁 `choiceReplies`／`decisions`／`notes`），再處理待決頁（`docs/03`、`06`、`06b`）。接手演練改成先關舊總監再送出，用 `submissionId` 驗只記一次。
+- 改掉的舊規則：2.1 的「選擇頁／待決頁網頁要先問 PO」整條取消（改成啟動提示詞的同意句）；`docs/06`「總監自身的恢復」節名改為「每輪第一步」。
+
+### 選擇頁帳本端（W2：F01 F02 F03 F06 F07，`choice_reconcile.py`，仍是 shadow）
+
+- 新指令 `publish --revision N | --close`：記下頁面上現在是哪一版；快照（`register`）和現行版分開存。新指令 `rescan`：重判隔離區和等快照的回覆。
+- 領取和接手：`CLAIMED → RECEIPT_PENDING` 只有持有者能做；別人和 2.1 沒有持有者的領取改成 `REFUSED`，要先 `CLAIMED → RECONCILE`（新的一步）接手；`--generation` 不對是 `LOST`。新的一步 `PLANNED → RECONCILE`。
+- `plan` 和領取會重查版本：新版已登記、未 `publish` 時 `HOLD`；舊版、hash 不符、題目已關時 `REFUSED`（exit 1）。匯出裡壞掉的單筆進隔離區（`QUARANTINED`），其他筆照記。題目已採用別的答案後才到的不同答案標 `conflict-late`；重送的同一則留言記 `duplicate` 並直接 `CLOSED`。
+- `status`：`receipts_pending` 含已採用、等回條的；摘要行多 `reconcile= quarantined= clear=yes|no states=`；`--json` 只印一份 JSON（`schema: dw-choice-status/2`，摘要行移到 `summary`）。
+- 舊帳本自動升級：2.1 的 `choice_inbox.sqlite3` 第一次被 2.2 打開時升級（`PRAGMA user_version` 2），先在升級的鎖內備份成驗過的 `<db>.v210.bak`（名字被占用就加時間戳，不覆寫；備份失敗就不升級）。升級是單向的：升級後 2.1 工具不保證能讀，要退回就換回 `.v210.bak`（升級後新記的資料會丟）。
+- F05 帳本端：`ingest` 把回覆附帶的 `selectedOptionSnapshot` 和該版已登記的選項比對（`key`；有 `label` 也比），不一致就隔離為 `snapshot_mismatch`（印出登記的選項和頁面送的選項），不記帳、不排工；同一筆修好後再匯出會自動離開隔離區。沒附快照，或那一版沒登記，只印 WARNING，照 2.1 記帳；`register` 之後重判，對不上的改標 `snapshot_mismatch`、留在 `RECEIPT_PENDING`，`plan` 不會排。
+
+### 選擇頁頁面端（W3：F04 F05 F07，`templates/choice_page.html`）
+
+- 回覆與回條依 `questionId + revision + snapshotHash + submissionId` 配對，只有總監採用的回覆顯示交接結果；指紋對不上或缺欄位（舊格式）的回覆不算作答，題目仍留在待選。
+- 版本文件指紋與 `decisions` 登記的不同、或沒登記指紋時，該版文字與選項不採用、禁止送出並顯示原因；所選選項從登記快照重建。
+- 回覆與留言新增 `pageSource`、`pageVersion`；留言重送沿用同一個 `submissionId`；選擇回覆在內容改變後換新 `submissionId`。
+- 新 `tools/browser_check.py`：用 headless Chrome 跑頁面行為（W3 加，CI 的 browser job 用；沒有 Chrome 時 SKIP，`DW_REQUIRE_BROWSER=1` 時失敗）。
+
+### 追溯、驗收、證據、範圍、指標（W4：F08 F09 F10 F14 F15 F16 和 v2.1.0 已知問題）
+
+- F08 `trace_report`：「這版有驗證紀錄」拆成 worker 自述／證據有效／綁鎖定依據／總監重跑四欄；worker 自己的 PASS 只顯示「自述全過」，四欄齊才是「有」。新 LOG 行 `EVIDENCE_RERUN`，由 `evidence_record verify --rerun` 印出（`LOG_LINE:`）。
+- F09 `gate_check`／`trace_report`：PO 驗收綁到成品身分（`candidate_id`、commit、entry、`entry_sha256`、`manifest_sha256`）並核對檔案。新增 `--artifact-root`、紀錄的 `manifest` 欄、報告的 `CANDIDATE_ID:`（`templates/TASK_REPORT.md` 也加了這一欄，W5）。
+- F10 `evidence_record`：`verify --rerun` 遇到 symlink 或 submodule 的 tree 是 NOT_RUN（exit 2）。
+- F14 `scope_check`：REQUIRED_CHANGES 和最後結果比，新參數 `--candidate`，多一行 `REQUIRED_BASIS:`。
+- F15 `evidence_record`：`--log` 開不了是 NOT_RUN（exit 2，不寫紀錄）；寫一半失敗記 `log_error`、exit 4；`gate_check` 會提示。
+- F16 `metrics_report`：`run.json` 的 `sampling` 標記、每個數字的完整度；`--compare` 只比完整而且同劇本的 run；怪 kind 隔離；回覆要對得到發問。
+- v2.1.0 已知問題已修：`evidence_record run --log` 上層資料夾不存在時自動建立（建不出來是 NOT_RUN）；`verify --rerun` 加 `--brief`／`--order-history`，用 `gate_check` 同一組函式比初衷卡指紋；五支工具讀到非 UTF-8 檔只印一行 NOT_RUN、exit 2，不再印 traceback；`PO_PRODUCT_REVIEW` 只認整行（`docs/07` 已寫明，完整驗收要用 `PO_ACCEPTANCE.json`）。
+
+### 容器、CI、發布（W5：F11 F17 F18 F21）
+
+- F11：`run_worker.sh` 在 DIRECTOR（唯讀的 `/director`）和任何可寫掛載（`--clone`／`--worktree`／`--git-common`）重疊時 exit 2，不開容器。重疊 = 真實路徑（`pwd -P`）相同、一方在另一方底下、同一個 inode，或 `/mnt/*` 底下只差大小寫的別名。理由：重疊時 worker 可以改自己「唯讀」的規則。
+- F17：`--git-common` 是**仍支援的舊模式**（WARN K1、doctor 報 NOT_ENFORCED），只在 major 版移除，最早 3.0；不再說「2.0 拿掉」。要遷移就用 `worker_clone.sh create` + `run_worker.sh --clone`。
+- F18：文件寫清楚實際擋了什麼：443 只放行開容器時白名單名稱解析到的 **IPv4 目的 IP:443**（不看 TLS 名稱或 HTTP Host）；IPv6 在開容器時用 docker `--sysctl` 關掉（映像 `dw-worker:1.2.0` 不變）；所有容器 worker 共用同一個可寫登入 volume `dw-claude-home`（clone 隔離不等於登入隔離），要分開就給每個 worker 設不同的 `DW_CLAUDE_HOME_VOLUME`（名稱有格式檢查）。`README.md`、`docs/11`、`tools/README.md` 同步。
+- F21：`.github/workflows/selftest.yml` 三個 job：Windows（原有）、Linux（Python 3.9／3.11／3.12，含非 ASCII 與有空格的路徑、沒有 git 的一輪、SKIP 摘要）、browser（runner 內建的 Chrome 跑 `tools/browser_check.py`，`DW_REQUIRE_BROWSER=1`）。actions 都鎖到 commit SHA；不加付費服務。
+- 整合時修的（第一次 Linux CI 才抓到）：(a) 暫停中的 `pause_ctl.py status|procs|off` 放行名單在路徑有空格時對不上（`hook_guard` 剖析後去掉引號再比對，空格路徑就拆成好幾個字）。現在比對前把含空白的字重新加回引號，`guard_rules.json` 的三條樣式多認一種「加引號、檔名剛好是 `pause_ctl.py`」；沒加引號的舊寫法照舊，檔名不是 `pause_ctl.py` 或前面多一支別的腳本照樣被擋。selftest 的 `ctl` 也改成加引號，並新增四個反例。(b) Linux 與 browser 兩個 job 的 runner 從 `ubuntu-latest` 固定成 `ubuntu-24.04`：latest 已變成 26.04，沒有 Python 3.9，浮動映像會讓矩陣悄悄少一格。
+
+### 誰會從成功變成待處理，怎麼回到成功
+
+| 項目 | 以前 | 現在 | 回到成功 |
+|---|---|---|---|
+| 容器：DIRECTOR 放在 repo／clone／worktree 內或同一個資料夾 | 照開 | `run_worker.sh` exit 2 | DIRECTOR 放到 repo 和 clone 外面（例如 repo 的上一層 `<WS>/DIRECTOR/`），重開 |
+| 選擇頁：decisions 沒有 `snapshotHash` 的 2.1 新題、或版本文件指紋和登記不同 | 可以送出 | 頁面禁止送出，顯示原因 | 總監用 `choice_reconcile.py register` 重新登記，讓 `decisions` 與 `choiceRevisions` 指紋一致；舊格式回覆需總監在帳本確認 |
+| `choice_reconcile`：`advance` 到 `CLAIMED`／`RECONCILE` | `--session` 可省 | 沒給 exit 2；接手（`CLAIMED → RECONCILE`）一定要 `--generation` | 補參數 |
+| `choice_reconcile`：帳本被鎖超過 `--busy-timeout` | `SHADOW_ERROR`、exit 0 | `CHOICE_RECONCILE: BUSY`、exit 1 | 當成「沒跑」，稍後重試 |
+| `choice_reconcile`：回覆的 `selectedOptionSnapshot` 和登記的選項對不上（例如 `choice: A` 附 B 的快照） | 記帳、排工 | 隔離 `snapshot_mismatch`，不記帳不排工 | 查頁面送錯的原因；請 PO 重送，或修正快照後重新匯出（同一筆自動離開隔離區） |
+| `choice_reconcile`：2.1 留下沒有持有者的 `CLAIMED`、非持有者交件 | 照走 | `REFUSED` | 先 `advance --from CLAIMED --to RECONCILE --session <你> --generation 1`，查證後再往下走 |
+| `trace_report`：只有 worker 自述的 B | 「這版有驗證紀錄：有」 | 「部分（缺：…）」 | 給 `--evidence-dir`、`--director-log`（含 `BRIEF_LOCKED`），總監跑 `verify --rerun`，把 `EVIDENCE_RERUN` 行貼進 LOG |
+| PO 驗收紀錄沒有成品檔可核對 | 已驗收 | 成品待核對或 `UNBOUND_PO_REPLY` | 補 `entry_sha256`、`manifest`，成品檔放在紀錄旁邊或用 `--artifact-root` |
+| `trace_report`：LOG 裡帶 `brief=stale`／`brief=unconfirmed` 的 `EVIDENCE_RERUN` | 算總監重跑 | 不算 | 初衷卡和工單指紋對上（必要時重開工單），用最新鎖定的初衷卡再跑 `verify --rerun --brief`，貼 `brief=ok` 那行 |
+| `scope_check`：改了又改回的 REQUIRED_CHANGES | PASS | VIOLATION（`MISSING`） | 最後結果真的要有那個改動，或改工單 |
+| `evidence_record`：`--log` 開不了／寫一半失敗 | exit 0 並留紀錄 | exit 2 不寫紀錄／exit 4 | 修好 log 路徑和權限再跑 |
+| `verify --rerun`：tree 有 symlink 或 submodule | OK | NOT_RUN（exit 2） | 另外驗那些 AC，不要靠 `--rerun` |
+| `metrics_report --compare`：沒有 `sampling` 的 run | 出數字 | UNKNOWN | `run.json` 補 `sampling` |
+| `metrics_report`：「已回覆」數 | 有 `answer_received` 就算 | 要有同一個 `decision_id + ask_id`、時間更早的 `asked` | 補對應的 `asked` 事件，或修正 ask_id 和時間；對不到的列在「回覆對不到發問」 |
+| 五支工具讀到非 UTF-8 檔（`metrics_report` 的 `--run` 資料夾也算） | traceback（exit 1）或略過該檔照算（exit 0） | 一行 NOT_RUN、exit 2 | 把該檔另存成 UTF-8；看 exit 1 判斷的腳本改看 2 |
+| `audit_log verify`：`recover` 留下的 `.damaged-` 副本不在日誌旁邊，而且有 `--anchor-log`／`--anchor-rev` | 副本遺失只算 GAP、OK | 判 BROKEN（切掉的行無從核對），exit 1；沒有錨點時只印 `~ warning`，仍 OK | 把 `.damaged-<時間>` 副本放回日誌旁邊（sha256 要和復原行記的一樣）；副本真的沒了就重新設錨點（`audit_log head` 取新的 `AUDIT_HEAD`，記進 DIRECTOR_LOG） |
+
+### 遷移（已在用的專案，照順序做）
+
+1. 把 `tools/` 整個重新複製到 `DIRECTOR/tools/`（W4 的五支工具、`choice_reconcile.py`、新的 `setup_check.py`、`browser_check.py`）。
+2. 有選擇頁帳本的專案：換上新工具後跑一次 `choice_reconcile.py status --db <帳本>`（這一步會升級帳本），確認產生了 `.v210.bak`（或 `.v210.bak.<時間戳>`）；頁面上不是最新登記的那一版，跑 `publish --revision <頁面那一版>`；`status` 提示「2.1 舊領取，沒有持有者」的，逐筆 `advance --from CLAIMED --to RECONCILE --session <你> --generation 1`；每輪自查改看 `clear=yes`。
+3. 選擇頁用新範本重新發布（網址不變、資料不動）；沒有 `snapshotHash` 的題目用 `register` 補登記。
+4. `DIRECTOR_STATE.md` 加 `PO_PAGE_URL`、`PO_PAGE_PINNED` 兩行（先問 PO 要不要置頂的私人頁面），跑 `setup_check.py` 到 exit 0；總監版 `status.py` 用 `status_gen.py --force` 重產。
+5. 用容器 worker 的：確認 DIRECTOR 不在 repo／clone 內（否則 exit 2）；想分開登入的設 `DW_CLAUDE_HOME_VOLUME`。
+6. 用 `evidence_record run --log` 的：log 資料夾不用先建；總監重跑改用 `verify --rerun --brief <初衷卡> [--order-history ...]`，貼 `brief=ok` 那行；PO 驗收的 `PO_ACCEPTANCE.json` 補 `entry_sha256`、`manifest`；報告寫 `CANDIDATE_ID:`。
+7. 每輪必讀沒有變大（`docs/01`、`03`、`06`、`08` 合計仍在 9,550 bytes 內）；`docs/03`、`06` 的措辭有改，現任總監下一輪重讀一次。
+
+### 已知問題（不擋發布，下一版處理）
+
+- 規則式遮罩的極限（`secret_mask`，F12）：沒見過格式的 token、沒有關鍵字的位置參數（`tool login bob X`）、鍵名不像機密的欄位（`{"name":"DB_PASS","value":"X"}`）、名稱裡沒有關鍵字的變數（`PASS=X`、`MY_KEY=X`）、URL 編碼或 base64 包住的機密、跨行的引號值、中文鍵名、`pwd=X`（刻意不遮，和 shell 的 `PWD` 同名）、少於 8 字且前面沒有 `Authorization` 的 `Bearer X`、以 `-` 開頭的旗標值，以及被 `|`、`;`、`&` 隔開的 `mysql -p`／換行後的 `curl -u`，都遮不到。完整清單在 W1 報告。
+- `audit_log` 的 `input` 超過 500 字時截斷加 `…`，不是合法 JSON（短的才保證）；`recover` 只保留第一個壞行之前的行，壞行之後的好行只留在複本。
+- `choice_reconcile`：隔離區自動解除只對有 `id` 的列有效（`missing-id`、`bad-answer` 要手動 `settle --key <隔離鍵> --to CLOSED`）；`status` 打開 2.1 帳本時會升級它，不是唯讀；沒有 `publish` 的新版會讓舊版一直 `HOLD`（`status` 會提示）。
+- `choice_reconcile`：在不支援 `os.link` 的檔案系統（FAT／exFAT、部分網路磁碟）上，舊帳本升級會中止，只印一行 OSError（`SHADOW_ERROR`、exit 0）。不會掉資料，但要手動備份後再升級。
+- `choice_reconcile`：同一筆回覆，一次匯出有 `source`、一次沒有，又沒給 `--source`，會用兩個不同的冪等鍵，重複記帳；系統只印 WARNING。舊匯出請一律帶 `--source`。
+- 選擇頁頁面端只比對指紋字串，內容防竄改靠帳本端；兩個分頁同時送出由帳本標 conflict，頁面不仲裁。
+- 容器：真實 Docker 行為（`--sysctl` 實際關掉 IPv6、重疊掛載在 Docker Desktop 上的別名）只在本機模擬測過，沒有在真的容器裡跑；Linux 與 browser 兩個 CI job 已在 GitHub 上跑過且通過（見「數字」），但 CI 裡也沒有實際起 Docker。
+- 2.1 專案自己複製的 `guard_rules.json` 沒有新的帶引號樣式：專案路徑有空格時，暫停中 `pause_ctl status`／`procs`／`off` 還是會被擋。處理：從 2.2.0 範本更新 `guard_rules.json` 的 `pause.allow_shell`（`hook_guard.py` 也要用 2.2.0 版，`quote_blank` 在那裡）。
+- 外部 GPT 審查的重現腳本只認 v2.1.0 的版本字串；`repro_dw210.py` 對 2.2.0 的結果見 PR 說明，仍顯示「重現」的項目逐項列在那裡。
+
+### 數字
+
+- 每輪必讀（`docs/01`、`03`、`06`、`08`）：2.1.0 的 9,532 → 本版 9,549 bytes（上限 9,550，`MUST_READ_LIMIT` 不變；增加的是 W1 的待決頁與三層指示句）。量法是先把 CRLF 換成 LF 再數（selftest 的 `test_must_read_size` 就這樣量）；Windows checkout 的檔案是 CRLF，用 `wc -c` 直接量會顯示約 9,698。
+- `selftest.py`：2.1.0 的 1,946 項 → 本版 2,302 項（W1–W5 新增 356 項）。整合樹 cae6162（之後只改 CHANGELOG 與報告）本機 Python 3.11、3.9 各 2,302/2,302 全過；PATH 上沒有 git 時 1,140/1,140 全過，22 組依賴 git 的照名稱 skip；3.11 也在放在有空格與中文路徑的匯出樹裡跑過一次（CI 的 Linux job 用這種路徑）。之後只改了 CHANGELOG、報告和 CI 設定檔（無 git 那一步在 Linux 要保留 `ps`，見上面的 W5 整合修正）。GitHub CI（PR #20，push 與 pull_request 各一輪，全綠）：Windows 3.9／3.12 各 2,303/2,303（無 git 1,140/1,140，skip 22 組）；Linux 3.9／3.11／3.12（`ubuntu-24.04`，checkout 路徑 `dw 專案 路徑`）各 2,281/2,281（Windows 專屬的項目在 Linux 照名稱 skip），無 git 1,140/1,140（skip 22 組）；browser job（runner 的 Chrome）通過。
+- 外部審查重現器（`repro_dw210.py`，改版本字串後對整合樹跑）：19 個案例，14 個「不再重現」、1 個仍顯示重現、4 個本機跳過（`rerun_symlink`、`container_mount`、`container_legacy` 要 Linux／WSL／Docker；`browser` 要 `--chrome`，由 CI browser job 跑）。仍顯示重現的一個：`audit_cut_line`（斷行後 `audit_log` 仍拒寫並印 BROKEN，這是設計；2.2.0 多了 `recover` 出口，重現器的判斷不認得它；F13 已修的證明——`recover` 後 `verify` 印 `GAP`、副本 sha256 吻合——在 PR 說明和 W5 報告）。逐項狀態在 PR 說明。
+
+對齊初衷：
+1. 幫到誰：PO 和之後所有用 DW 的人。依據是外部獨立審查（GPT）對 v2.1.0 的 21 項發現，和 PO 2026-11-08 對「建置時就要有待決頁」的要求。
+2. Desktop：總監和五位 worker 都在 Desktop Code 分頁的 session 做；selftest 與 CI 的結果見上；真的 Claude Desktop 流程（手機送出選擇頁、置頂私人頁面實際發布、容器內的防火牆）沒有在這次全程跑過，列在「已知問題」。
+3. 服務：初衷 8（只跟總監聊天就能做出成品）：待決頁一開始就在、選擇頁不送錯不漏讀；初衷 5（成品要真的對）：驗收綁到成品本身、證據分四欄；初衷 4（中斷不丟進度）：帳本可接手、稽核鏈可修復；初衷 7（零成本）：CI 只用標準庫與 runner 內建的 Chrome。
+4. 核心：每輪必讀不超過 9,550 bytes；新的檢查先 shadow；改結果的幾項都列在上面的表，附回到成功的步驟。
+5. 舊檔案和舊指令：舊專案檔案、舊帳本（自動升級並備份）、舊稽核鏈照樣能讀；結果會變的只有上表。
+
 ## 2.1.0 — 2026-11-08
 
 含未發布的 2.0.1（PR #18）：選擇頁不漏讀。

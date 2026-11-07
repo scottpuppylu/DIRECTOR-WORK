@@ -719,7 +719,9 @@ def review(conf, call, rule, reason):
         spec = importlib.util.spec_from_file_location("secret_mask", pathlib.Path(__file__).with_name("secret_mask.py"))
         mask = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mask)
-        action = mask.mask(json.dumps(call.get("tool_input"), ensure_ascii=False))[0][:1000]
+        # mask each string before serializing (2.2.0, same as audit_log F12): masking the JSON text misses a value
+        # JSON escapes or a secret-named field holding a list or an object
+        action = json.dumps(mask.mask_tree(call.get("tool_input")), ensure_ascii=False)[:1000]
     except Exception:
         return "unavailable", "secret_mask.py could not be loaded", "none"
     prompt = REVIEW_PROMPT.format(tool=call.get("tool_name"), action=action, rule=rule, reason=reason)
@@ -948,8 +950,17 @@ def pause_allows(data, profile, call):
         return False  # git log > a.py writes a file; 2>&1 is not a redirect to a file
     commands = list(simple_commands(FD_DUP.sub(" ", command), "powershell" if tool == "PowerShell" else "bash"))
     allowed = pause["allow_shell"][base_profile(profile)]
-    return bool(commands) and all(any(re.fullmatch(r, " ".join([n] + list(rest)), re.I | re.S) for r in allowed)
+    return bool(commands) and all(any(re.fullmatch(r, " ".join([n] + [quote_blank(a) for a in rest]), re.I | re.S) for r in allowed)
                                   for n, rest in commands)
+
+
+def quote_blank(word):
+    """parse() took the quotes off; put them back round a word that holds blanks, so a path with spaces stays one word."""
+    if not re.search(r"\s", word):
+        return word
+    if '"' not in word:
+        return '"' + word + '"'
+    return "'" + word + "'" if "'" not in word else word
 
 
 def load_rules(path):

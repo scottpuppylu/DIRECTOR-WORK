@@ -41,6 +41,26 @@ traces, are listed at the end.
   --decisions: an ID that starts a list item (`- DD-1 用標準函式庫`, as the BRIEF lists the Director's decisions)
   counts as known but is not listed under 沒有工單的需求; a missing ID whose prefix no table in the files has gets a hint
   to add the decision register.
+
+2.2 (F08, F09; still shadow: nothing blocks, exit codes unchanged). 這版有驗證紀錄 is split into four columns, one per
+kind of proof, and the summary says 有 only when all four hold for every AC that traces the row:
+  worker 自述     the chosen report (current, not stale) marks every such AC PASS. An order that names two or more
+                  TRACES_TO IDs without a 追溯 column cannot say which AC verifies which row: 部分（工單層）.
+  證據有效        with --evidence-dir, gate_check's evidence check passes for each PASS (a named .json that is a
+                  passing evidence_record file at the report's HEAD); `—`, no file, or a file that is not a record is
+                  沒有. Without --evidence-dir: 未知.
+  綁鎖定依據      the order pins the row's fingerprint as the locked brief has it: the brief read is the latest
+                  BRIEF_LOCKED in --director-log (or its snapshot) and says LOCKED. A draft or no log is 依據未確認.
+  總監重跑        --director-log has a whole line `EVIDENCE_RERUN <WO-ID> <AC> candidate=<40 hex> result=ok` for each
+                  AC at the report's HEAD (evidence_record.py verify --rerun prints it). A line ending brief=stale or
+                  brief=unconfirmed (the rerun compared the brief and it did not hold) is 沒有：重跑時鎖定依據不符.
+  Otherwise the summary is 部分（缺：…） or 還沒有; only a worker's word is never shown as verified.
+你看過這個成品嗎 binds a PO reply to one product, not to a commit: a report HEAD that is not a commit matches nothing
+(報告 HEAD 認不出); a PO_PRODUCT_REVIEW line without manifest= is 對該 commit 的歷史回覆，成品待核對; PO_ACCEPTANCE records
+for the commit are grouped by product (candidate_id, entry, entry_sha256, manifest_sha256). A report line
+`CANDIDATE_ID: <id>` picks one; two products for one commit and no CANDIDATE_ID is 分不出是哪一份. Several records for one
+product are ordered by `replied_at` (ISO time), never by file position; without it they are 分不出先後. A reply_ref used
+for two products is listed under UNBOUND_PO_REPLY.
 """
 import argparse
 import importlib.util
@@ -143,7 +163,9 @@ def report_info(path, text):
     named = gate.order_line(text)
     attempt = re.search(r"^\s*ATTEMPT\s*[:=]\s*(\d+)", text, re.M | re.I)
     sha = re.search(r"^\s*ORDER_SHA256\s*[:=]\s*([0-9a-fA-F]{64})\b", text, re.M)
+    candidate = re.search(r"^\s*CANDIDATE_ID\s*[:=]\s*(\S+)", text, re.M)
     info = {"path": path, "table": gate.ac_table(text), "head": gate.report_head_value(text),
+            "candidate_id": candidate.group(1) if candidate else None,
             "rev": named[1] if named else None, "attempt": int(attempt.group(1)) if attempt else None,
             "when": first_date(text), "sha": sha.group(1).lower() if sha else None}
     info["key"] = (-1 if info["rev"] is None else info["rev"], -1 if info["attempt"] is None else info["attempt"],
@@ -229,54 +251,116 @@ def same_commit(one, other):
     return bool(one and other and (one.startswith(other) or other.startswith(one)))
 
 
-def verified_state(order, name, fingerprint, evidence_dir):
-    """這版有驗證紀錄 for one order and one brief row."""
-    if fingerprint is None:
-        return f"{gate.UNCONFIRMED}（初衷卡這條列了兩次或不是 4 格）"
+def proof_state(order, name, fingerprint, brief, evidence_dir, reruns, held=None):
+    """2.2 (F08): the four kinds of proof for one order and one brief row, and the summary 這版有驗證紀錄.
+    Returns {"self", "evidence", "locked", "rerun", "summary"}: each part a short text starting with 有, 沒有, 部分 or
+    未知 (or 依據未確認); a worker's own full PASS is 自述全過, so it never reads as 有."""
+    out = {}
     _, pins = gate.order_brief(order["text"])
-    if not pins or name not in pins:
-        return f"{gate.UNCONFIRMED}（工單沒有釘這條的指紋）"
-    if pins[name] != fingerprint:
-        return "沒有：工單是照舊條件寫的，新條件待重驗"
+    if fingerprint is None:
+        out["locked"] = f"{gate.UNCONFIRMED}（初衷卡這條列了兩次或不是 4 格）"
+    elif not pins or name not in pins:
+        out["locked"] = f"{gate.UNCONFIRMED}（工單沒有釘這條的指紋）"
+    elif pins[name] != fingerprint:
+        out["locked"] = "沒有：工單是照舊條件寫的，新條件待重驗"
+    elif not brief.get("trusted"):
+        out["locked"] = f"{gate.UNCONFIRMED}（讀到的初衷卡不是最新 BRIEF_LOCKED，或沒給 --director-log）"
+    else:
+        out["locked"] = "有"
+    acs = acs_for(order, name)
+    head = chosen_head(order)
     if order["tie"] or order["report"] is None:
-        return "沒有：還沒有報告" if not order["tie"] else "沒有：多份報告分不出先後"
-    if order["stale"]:
-        return f"沒有：{order['stale']}"
-    states = []
-    for ac in acs_for(order, name):
-        got = order["report"].get(ac) or {}
-        status = got.get("status") or "報告缺這條"
-        files = re.findall(r"[\w.-]+\.json", got.get("evidence") or "")
-        if status == "PASS" and evidence_dir and any(not (pathlib.Path(evidence_dir) / f).is_file() for f in files):
-            status = "PASS 但證據檔找不到"
-        states.append((ac, status))
-    passed = [ac for ac, status in states if status == "PASS"]
-    shown = "、".join(f"{ac} {status}" for ac, status in states) or "沒有 AC 驗這條"
-    return ("有" if passed else "還沒有") + f"（{shown}）"
+        why = "多份報告分不出先後" if order["tie"] else "還沒有報告"
+        out.update(self=f"沒有：{why}", evidence=f"沒有：{why}", rerun=f"沒有：{why}")
+    elif order["stale"]:
+        out.update(self=f"沒有：{order['stale']}", evidence="沒有：報告過期", rerun="沒有：報告過期")
+    elif not acs:
+        out.update(self="沒有：沒有 AC 驗這條", evidence="—", rerun="—")
+    else:
+        states = [(ac, (order["report"].get(ac) or {}).get("status") or "報告缺這條") for ac in acs]
+        shown = "、".join(f"{ac} {status}" for ac, status in states)
+        passed = [ac for ac, status in states if status == "PASS"]
+        whole = order["per_ac"] is None and len(order["traces"] or []) > 1
+        if len(passed) == len(states):
+            out["self"] = (f"部分（工單層 TRACES_TO，沒逐 AC 指定；{shown}）" if whole else f"自述全過（{shown}）")
+        else:
+            out["self"] = f"{'部分' if passed else '沒有'}（{shown}）"
+        if not passed:
+            out["evidence"] = "沒有：沒有 PASS 的 AC"
+        elif not evidence_dir:
+            out["evidence"] = "未知（沒給 --evidence-dir）"
+        else:
+            bad = []
+            for ac in passed:
+                problems, notes = [], []
+                gate.check_evidence(ac, (order["report"].get(ac) or {}).get("evidence") or "", evidence_dir, head,
+                                    problems, notes)
+                bad += problems[:1]
+            out["evidence"] = ("沒有：" + "；".join(bad)) if bad and len(bad) == len(passed) else \
+                (f"部分：{'；'.join(bad)}" if bad else "有")
+        if not head:
+            out["rerun"] = "沒有：報告 HEAD 認不出"
+        else:
+            done = [ac for ac in acs if any(same_commit(c, head) for c in reruns.get((order["id"], ac), []))]
+            stale = sorted({state for ac in acs for c, state in (held or {}).get((order["id"], ac), [])
+                            if same_commit(c, head)})
+            out["rerun"] = ("有" if len(done) == len(acs) else
+                            (f"部分（{'、'.join(done)}）" if done else
+                             (f"沒有：重跑時鎖定依據不符（brief={'/'.join(stale)}），新條件待重驗" if stale else
+                              "沒有：log 沒有這版的 EVIDENCE_RERUN")))
+    parts = (("self", "自述"), ("evidence", "證據"), ("locked", "鎖定依據"), ("rerun", "總監重跑"))
+    # a worker's own PASS is 自述全過, never 有: only the summary may say 有, and only with all four
+    lacking = [label for key, label in parts if not out[key].startswith("自述全過" if key == "self" else "有")]
+    if not lacking:
+        out["summary"] = f"有（{'、'.join(acs)}：自述、證據、鎖定依據、總監重跑都齊）"
+    elif out["self"].startswith(("自述全過", "部分")):
+        out["summary"] = f"部分（缺：{'、'.join(lacking)}）"
+    else:
+        out["summary"] = "還沒有"
+    return out
 
 
 SEEN = {"seen": "看過", "changes": "看過，要求修改", "accepted": "已接受"}
 
 
 def seen_state(order, name, fingerprint, reviews, accepted):
-    """你看過這個成品嗎 for one order and one brief row: the latest PO_PRODUCT_REVIEW for the report's HEAD, else a
-    bound PO_ACCEPTANCE record for that commit."""
+    """你看過這個成品嗎 for one order and one brief row (2.2, F09: bound to one product, not to a commit)."""
     head = chosen_head(order)
+    report = order["reports"][0] if order["reports"] and not order["tie"] else None
     mine = [r for r in reviews if r["order"] == order["id"] and not r["problem"]]
+    if not head:
+        return "報告 HEAD 認不出，對不到成品" if mine or accepted else "還沒看"
     if mine:
-        review = mine[-1]
-        if head and not same_commit(review["candidate"], head):
+        review = mine[-1]  # the log is append-only: its last line is the latest
+        if not same_commit(review["candidate"], head):
             return f"看過別的成品（{review['candidate'][:12]}），這版（{head[:12]}）還沒看"
         said = SEEN[review["outcome"]] + (f"（{review['ref']}）" if review["ref"] else "")
+        if not review["manifest"]:
+            return f"對該 commit 的歷史回覆：{said}，成品待核對（PO_PRODUCT_REVIEW 沒寫 manifest=）"
         if fingerprint and review["brief"].get(name) not in (None, fingerprint):
             return f"{said}，但當時是舊條件，新條件還沒看"
         return said
-    bound = [r for r in accepted if head and same_commit(r["commit"].lower(), head)]
-    if bound:
-        record = bound[-1]
-        outcome = gate.PO_OUTCOMES.get(record.get("outcome") or "")
-        return (SEEN[outcome] + f"（{record['reply_ref']}）") if outcome else f"已送出，還沒回覆（{record['offered_message_ref']}）"
-    return "還沒看"
+    bound = [r for r in accepted if same_commit(r["commit"].lower(), head)]
+    wanted = report and report.get("candidate_id")
+    if wanted:
+        bound = [r for r in bound if r.get("candidate_id") == wanted]
+    if not bound:
+        return f"還沒看（沒有 {wanted} 的驗收紀錄）" if wanted else "還沒看"
+    products = {gate.acceptance_identity(r) for r in bound}
+    if len(products) > 1:
+        return (f"同一 commit 有 {len(products)} 份成品（{'、'.join(sorted({p[0] for p in products}))}），"
+                "報告沒寫 CANDIDATE_ID，分不出是哪一份")
+    if len(bound) > 1:
+        timed = [r for r in bound if isinstance(r.get("replied_at"), str) and r["replied_at"].strip()]
+        if len(timed) != len(bound):
+            return f"{bound[0]['candidate_id']} 有 {len(bound)} 筆紀錄，沒有 replied_at，分不出先後"
+        bound.sort(key=lambda r: r["replied_at"])
+    record = bound[-1]
+    outcome = gate.PO_OUTCOMES.get(record.get("outcome") or "")
+    if not outcome:
+        return f"已送出，還沒回覆（{record['offered_message_ref']}）"
+    said = SEEN[outcome] + f"（{record['reply_ref']}）"
+    return f"PO 回覆{said}，成品待核對（{'；'.join(record['_unchecked'])}）" if record.get("_unchecked") else said
 
 
 def brief_sections(a, orders):
@@ -291,13 +375,24 @@ def brief_sections(a, orders):
             unbound.append(f"{path}：{problem}")
         for n, record in enumerate(records, 1):
             bad = gate.acceptance_problems(record)
+            if not bad:  # 2.2 (F09): the files the record names must be there, as recorded
+                more, unchecked = gate.acceptance_product(record, pathlib.Path(path).resolve().parent)
+                bad += more
+                record = dict(record, _unchecked=unchecked)
             if bad:
                 unbound.append(f"{path} #{n}：" + "；".join(bad))
             else:
                 accepted.append(record)
+    shared = gate.shared_replies(accepted)
+    if shared:
+        unbound += [f"reply_ref {ref} 用在 {len(products)} 份不同成品（{'、'.join(sorted(str(p[0]) for p in products))}）："
+                    "一則回覆只綁一份成品" for ref, products in shared.items()]
+        accepted = [r for r in accepted if r.get("reply_ref") not in shared]
     ids = {o["id"] for o in orders}
     unbound += [f"{a.director_log}：{r['line']}：{r['problem'] or '沒有這張工單'}" for r in reviews
                 if r["problem"] or r["order"] not in ids]
+    held = {}
+    reruns = gate.rerun_records(log_text, held) if log_text else {}
     sections = []
     if a.brief:
         notes = []
@@ -306,14 +401,18 @@ def brief_sections(a, orders):
         print("\n## 初衷卡三欄（每條 B 一列）\n\n"
               f"初衷卡 {brief['label']}，版次 {brief['revision'] if brief['revision'] is not None else '—'}。"
               "提示用，不擋任何關卡。\n")
-        print("| 需求 | 內容 | 有人負責 | 這版有驗證紀錄 | 你看過這個成品嗎 |\n|---|---|---|---|---|")
+        print("2.2：「這版有驗證紀錄」只有自述、證據、鎖定依據、總監重跑四欄都是「有」才寫「有」。\n")
+        print("| 需求 | 內容 | 有人負責 | worker 自述 | 證據有效 | 綁鎖定依據 | 總監重跑 | 這版有驗證紀錄 | 你看過這個成品嗎 |\n"
+              "|---|---|---|---|---|---|---|---|---|")
         for name in names:
             row = brief["rows"].get(name)
             fingerprint = gate.brief_fingerprint(row) if row else None
             serving = [o for o in orders if name in every(o)]
+            proofs = [(o, proof_state(o, name, fingerprint, brief, a.evidence_dir, reruns, held)) for o in serving]
+            joined = lambda key: "；".join(f"{o['id']}：{p[key]}" for o, p in proofs) or "—"
             cells = (name, row[2] if row else f"{gate.UNCONFIRMED}（列了兩次或不是 4 格）",
                      "、".join(o["id"] for o in serving) or "沒有工單",
-                     "；".join(f"{o['id']}：{verified_state(o, name, fingerprint, a.evidence_dir)}" for o in serving) or "—",
+                     joined("self"), joined("evidence"), joined("locked"), joined("rerun"), joined("summary"),
                      "；".join(f"{o['id']}：{seen_state(o, name, fingerprint, reviews, accepted)}" for o in serving) or "—")
             print("| " + " | ".join(cell(v) for v in cells) + " |")
         hints = ([brief["problem"]] if brief["problem"] else []) + notes
@@ -454,4 +553,8 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except UnicodeDecodeError as error:  # 2.2: one line and NOT_RUN (exit 2), never a traceback
+        print(f"TRACE_REPORT: NOT_RUN {gate.not_utf8(error)}")
+        sys.exit(2)

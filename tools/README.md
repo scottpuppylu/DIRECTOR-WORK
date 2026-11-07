@@ -11,6 +11,7 @@ Python 3.9 以上，只用標準函式庫。一律用 `python -I -X utf8 <tool> 
 | `usage_mix.py`（1.3.0） | 額度花在哪：每次呼叫依它選的動作歸成五大類（讀和查、協調、看圖與審查、實際動手、等待），對照門檻，各 session 的比例，以及開新 session 划不划算（RESTART 行） | 不寫 | 不花；只印比例，不印訊息內容 |
 | `memory_size_check.py` | 檢查記憶索引大小，超過門檻 exit 1 | 不寫 | 不花 |
 | `gate_check.py` | 檢查 RESUME_STATE、工單、TASK REPORT、裁決的欄位和用詞；`--match` 逐條對照報告和工單的驗收條件，加 `--evidence-dir` 再核對證據紀錄；`--hash` 印工單雜湊 | 不寫 | 不花 |
+| `setup_check.py`（2.2.0） | 建置完成的檢查：`DIRECTOR_STATE.md` 的 `PO_PAGE_URL` 和 `PO_PAGE_PINNED` 兩行是不是三種合法寫法之一 | 不寫 | 不花 |
 | `round_check.py`（1.3.0） | 修正輪數：RESUME_STATE 的 `FIX_ROUNDS:` 到第 4 輪（之後每組）沒有根因研究就 FAIL | 不寫 | 不花 |
 | `report_vs_audit.py`（1.3.0） | 用動作紀錄核對 TASK REPORT：報告說跑過的指令（`RAN:` 和 TESTS / EVIDENCE / DONE 裡的 selftest、Unity、Blender、雜湊檢查）紀錄裡有沒有、exit 和時間對不對 | 不寫 | 不花 |
 | `trace_report.py` | 從工單、報告、裁決產生追溯表：需求 → 工單 → AC → 證據 → 裁決 | 不寫 | 不花 |
@@ -24,7 +25,7 @@ Python 3.9 以上，只用標準函式庫。一律用 `python -I -X utf8 <tool> 
 | `poll_hint.py`（1.3.0） | PostToolUse hook：同一個 session 10 分鐘內讀同一份 log 第 3 次時，提示「等完成通知」，不擋；`report` 從動作紀錄算各 session 讀 log 的次數 | hook 只寫暫存資料夾的小狀態檔；`report` 不寫 | 不花 |
 | `secret_mask.py` | 把文字裡的私鑰、token、API key、JWT、`password=` 這類值換成 `[MASKED:種類]`；`--check` 只列出找到的種類 | 不寫 | 不花 |
 | `pause_ctl.py` | 暫停開關：`on` / `off` 寫入或移除 `<DIRECTOR>/PAUSE` 並記進 `DIRECTOR_LOG.md`，`status` 印目前狀態；`procs` 依 CPU 增量列出停機後程序樹還剩哪些 | `on` / `off` 只寫旗標檔和 LOG 一行；`procs` 不寫、不結束任何程序 | 不花 |
-| `audit_log.py` | 動作紀錄：PostToolUse / PostToolUseFailure hook 把每個工具呼叫寫成一行有雜湊鏈的 JSONL；`verify` 檢查鏈和總監的錨點，`head` 印錨點，`cite` 印 TASK REPORT 引用的區段 | `append` 只寫紀錄檔和它的 `.lock`；其他不寫 | 不花 |
+| `audit_log.py` | 動作紀錄：PostToolUse / PostToolUseFailure hook 把每個工具呼叫寫成一行有雜湊鏈的 JSONL；`verify` 檢查鏈和總監的錨點，`head` 印錨點，`cite` 印 TASK REPORT 引用的區段；`recover`（2.2.0）留複本後接著寫 | `append` 只寫紀錄檔和它的 `.lock`；其他不寫 | 不花 |
 | `guard_rules.json` | `hook_guard.py --rules` 的規則檔：每條規則的類別、worker / director 的結論、比對方式、正反例子和要寫進 settings 的權限規則 | — | — |
 | `selftest.py` | 用正反案例測 gate_check、trace_report、metrics_report、scope_check、evidence_record、hook_guard（含 `--review`，用假的 claude）、pause_ctl、audit_log、doctor（假的 claude 版本、暫存的設定層）和 `--hooks`、`--runtime-guard` 安裝；查用詞、必讀文件大小、`PURPOSE.md` 結構和 CHANGELOG 的「對齊初衷」 | 只寫暫存資料夾，結束刪除 | 不花 |
 
@@ -206,6 +207,8 @@ python -I -X utf8 secret_mask.py --check [FILE]  # 每種找到的機密印一�
 - 保留前段、只遮值：`Authorization: Bearer` / `Basic` / `token` 後面的值、URL 裡的密碼（`https://user:密碼@host`）、名稱含 password、passphrase、token、secret、api_key、access_key、private_key、client_secret、auth 的 `名稱=值` 或 `名稱: 值`。
 - 不遮：40 碼 git SHA、sha256、`max_tokens=4096`、`author=...`、`PWD=...`、已經遮過的值。已知會多遮：`"token_type": "Bearer"`。
 - 只認得常見格式，沒見過的 token 格式會原樣通過。也可當模組用：`mask(text)` 回傳 `(遮罩後文字, 種類清單)`。
+- `mask_tree(value)`（2.2.0）：遮罩 JSON 結構，序列化之前用。每個字串（含鍵名）都過 `mask()`；鍵名像機密（password、api_key、github_token、auth…）的整個值換成 `[MASKED:field]`，值是 null、true / false 或空字串時保留。先序列化再遮會漏掉 `password="a b"`：JSON 把引號跳脫成 `\"`，遮罩只遮到第一個空白。
+- 2.2.0 另外遮：指令字串裡跳脫的 JSON（`{\"password\": \"...\"}`）、單獨的 `Bearer <token>`（8 字以上）、`--password X` 這類空白分隔的旗標、`mysql` / `mysqldump` / `mysqladmin` / `mysqlsh` / `mariadb` / `sshpass` 的 `-p X` 和 `-pX`、`--user bob:X` 和 `curl -u bob:X`、`passw0rd`、`p@ssword` 這類鍵名；`mask_tree` 的 `Authorization`、`Proxy-Authorization`、`Cookie`、`Set-Cookie` 欄位整欄遮。還遮不到的寫法見 CHANGELOG 2.2.0 的已知問題。
 
 ### audit_log.py（1.1.0）
 
@@ -216,16 +219,19 @@ python -I -X utf8 audit_log.py verify --log <檔案> [--from N] [--to M] [--anch
 python -I -X utf8 audit_log.py verify --cite "AUDIT_RANGE file=... seq=a..b first=... last=..."
 python -I -X utf8 audit_log.py head --log <檔案>                       # 印 AUDIT_HEAD file=... seq=n sha=...
 python -I -X utf8 audit_log.py cite --log <檔案> --from A --to B        # 印 AUDIT_RANGE ...，貼進 TASK REPORT
+python -I -X utf8 audit_log.py recover --log <檔案>                    # 2.2.0：紀錄壞了，留複本、加一行 recovery 後接著寫
 ```
 
-- 一行一個 JSON：`seq`、`ts`（UTC）、`session_id`、`agent_id`、`tool`、`tool_use_id`、`kind`（`result` / `failure` / `decision`）、`input`（工具輸入先經 `secret_mask.py` 遮罩，最多 500 字）、`result`（`ok` / `error` / `interrupted`，或 `deny` / `ask` / `pause`；有輸出時只存遮罩後輸出的 sha256 和長度，**不存輸出本身**）、`duration_ms`、`rule`、`prev`（前一行的 hash，第一行是 64 個 0）、`hash`（其他欄位排序後的精簡 JSON 的 sha256）。
-- 多個 hook 同時寫：用 `<檔案>.lock`（`O_CREAT|O_EXCL`）排隊，等 5 秒還被占就 exit 1；超過 30 秒的鎖視為殘留，直接接手。最後一行沒寫完、不是 JSON 或 hash 不對時不再往後接，exit 1。
-- Bash 輸出遮罩：`append` 發現 stdout 或 stderr 有機密時，印出 `updatedToolOutput`（欄位和原本相同，只把值遮掉），Claude 看到的就是遮過的輸出。紀錄寫不進去時仍回傳遮罩結果（exit 0，錯誤印到 stderr）。PowerShell 工具的輸出格式 NOT_VERIFIED，不遮。
+- 一行一個 JSON：`seq`、`ts`（UTC）、`session_id`、`agent_id`、`tool`、`tool_use_id`、`kind`（`result` / `failure` / `decision` / `recovery`）、`input`（工具輸入先經 `secret_mask.py` 遮罩，最多 500 字；2.2.0 起先用 `mask_tree` 遮每個字串、名稱像機密的欄位整欄換掉，再序列化，所以沒超過 500 字時是合法 JSON；超過時截斷，結尾 `…`）、`result`（`ok` / `error` / `interrupted`，或 `deny` / `ask` / `pause`；有輸出時只存遮罩後輸出的 sha256 和長度，**不存輸出本身**）、`duration_ms`、`rule`、`prev`（前一行的 hash，第一行是 64 個 0）、`hash`（其他欄位排序後的精簡 JSON 的 sha256）。
+- 多個 hook 同時寫：用 `<檔案>.lock`（`O_CREAT|O_EXCL`）排隊，等 5 秒還被占就 exit 1；超過 30 秒的鎖視為殘留，直接接手。最後一行沒寫完、不是 JSON 或 hash 不對時不再往後接，exit 1，訊息要你先 `verify` 再 `recover`。
+- Bash 輸出遮罩：`append` 發現 stdout 或 stderr 有機密時，印出 `updatedToolOutput`（欄位和原本相同，只把值遮掉），Claude 看到的就是遮過的輸出。紀錄寫不進去時仍回傳遮罩結果（exit 0）。2.2.0 起「遮罩」和「寫入」是兩個結果：寫不進去時 `hookSpecificOutput` 另加 `additionalContext`（output masked, but the audit line was NOT written），stderr 印 `audit_log: masked=yes|no written=no: <原因>`。PowerShell 工具的輸出格式 NOT_VERIFIED，不遮。
 - PostToolUseFailure 的輸入欄位（`error`、`is_interrupt`）照文件假設，NOT_VERIFIED（沒有用 `claude -p` 實際取樣）。
 - `verify`：重算整條鏈，印第一個斷點（`BROKEN seq=n: ...` 或 `BROKEN line=n: not JSON`），exit 1；檔案、錨點 commit 或錨點檔不存在 exit 2（`NOT_RUN`）。最後一行是 `AUDIT_VERIFY file=... entries=n head_seq=n [anchors=k] [cite=checked] OK|BROKEN`。
 - 錨點：總監過 gate 時跑 `head`，把 `AUDIT_HEAD` 那行寫進 `DIRECTOR_LOG.md` 並 commit。`--anchor-rev` 從 commit 裡的 LOG 讀（`git show <commit>:<路徑>`），所以改工作樹裡的 LOG 騙不過；`--anchor-log` 讀目前的檔案。同一份紀錄（絕對路徑相同）的每個錨點都要還在鏈上、hash 相同；一個錨點都沒有也算失敗。
 - **沒有錨點就抓不到整條重寫**：把整條鏈連同每個 hash 重算一次，`verify` 單獨跑會過，只有錨點抓得到。最後一個錨點之後的行被截掉，也要等下一個錨點才抓得到。
 - `--cite`：TASK REPORT 的 `AUDIT_RANGE` 那一段的第一行和最後一行 hash 要和現在的紀錄相同，整條鏈也要完整。
+- **`recover`（2.2.0）**：`verify` 說 BROKEN（當機截斷最後一行、某行不是 JSON、某行不在鏈上）後用。在鎖內把整份原檔原封不動複製成 `<檔案>.damaged-<UTC 時間>`，保留第一個壞行之前的每一行（最後一個好 hash 和之前的 `AUDIT_HEAD` 錨點都還有效），再接一行 `kind=recovery`：`damage` 記拿掉部分的起始行、行數、位元組、sha256，以及複本的檔名和 sha256。印 `AUDIT_RECOVER ...` 和新的 `AUDIT_HEAD`，之後 `append` 照常接著寫。壞行之後的行只留在複本裡。沒壞的紀錄不動（`nothing broken`，exit 0）；檔案不存在 exit 2。
+- `verify` 對每個 recovery 行印 `GAP seq=n: from line a (k lines, b bytes, sha256=...) kept in <複本>, copy checked`，結尾加 `gaps=n`。GAP 本身不算壞；複本找不到時標 `copy not found`，並多印一行 `~ warning seq=n: ...`；有給錨點（`--anchor-log` / `--anchor-rev`）時算 BROKEN（錨定的紀錄少了證據）。複本內容被改過（sha256 對不上）也是 BROKEN。整條鏈壞掉時多印一行 `~ to go on writing: audit_log.py recover --log ...`。
 
 ## doctor.py（1.1.0）
 
@@ -325,10 +331,27 @@ python -I -X utf8 gate_check.py --preflight <報告.md> <WO.md> --evidence-dir <
   - `--brief BRIEF.md` 單獨用：印 `BRIEF_REVISION = <版次>` 和 `BRIEF_FINGERPRINTS_V1 = {"B-2": "<64 位>"}` 兩行，貼進工單表頭。指紋是 sha256(`brief-row-v1\n` + `[ID, 類別, 內容, 怎麼算做到]` 的精簡 JSON)；同一編號兩列或欄數不是 4，印 `~ BRIEF_UNCONFIRMED`（依據未確認），不給指紋。
   - `--brief` 配 `--order` / `--match` / `--preflight`：工單記的列變了，印 `~ BRIEF_STALE <WO> <B> <AC-1,AC-2>`（舊條件驗過，新條件待重驗）；工單沒有追溯欄時寫 `WHOLE_ORDER`；版次沒升卻內容變了另註「同版內容有變」；列被刪掉寫「需求已取消，待調整範圍」。工單追溯了 B 卻沒記指紋，印 `~ BRIEF_UNCONFIRMED`。
   - `--brief BRIEF.md --snapshot <資料夾>`：只收狀態 LOCKED、有版次的初衷卡，否則 exit 2。快照原子寫入：同資料夾暫存檔、fsync、改名；同內容的舊檔保留。寫完印 `BRIEF_LOCKED rev=<n> sha=<雜湊> snapshot=<路徑>`，整行寫進 DIRECTOR_LOG。再加 `--dispatch-log` 時，以最新一行 BRIEF_LOCKED 為依據：現在的初衷卡不是它（例如定版後的草稿），就改拿快照比，並印 `compared with the locked snapshot`。
-  - `--hash <WO.md> --snapshot <資料夾>`：另存 `<WO-ID>-rev<n>-<雜湊>.md`。`--match ... --order-history <資料夾>`：用 EVIDENCE_EQUIVALENT 沿用的證據，拿舊工單記的指紋比；條件變了印 `BRIEF_STALE`，找不到舊工單印 `BRIEF_UNCONFIRMED`（沿用依據未確認）。`evidence_record.py verify --rerun` 還不做這項比對。
+  - `--hash <WO.md> --snapshot <資料夾>`：另存 `<WO-ID>-rev<n>-<雜湊>.md`。`--match ... --order-history <資料夾>`：用 EVIDENCE_EQUIVALENT 沿用的證據，拿舊工單記的指紋比；條件變了印 `BRIEF_STALE`，找不到舊工單印 `BRIEF_UNCONFIRMED`（沿用依據未確認）。2.2 起 `evidence_record.py verify --rerun` 加 `--brief` / `--order-history` 也用同一個函式做這項比對（見 evidence_record 第 10 點）。
   - `--po-acceptance PO_ACCEPTANCE.json [--candidate <40 位>]`：檢查 PO 驗收紀錄（schema `po-acceptance-v1`），必填 candidate_id、commit（40 位）、entry、manifest_sha256、offered_message_ref；outcome 是 seen / changes / accepted 時還要 reply_ref，還沒回覆寫 null。少綁一項、雜湊不是 64 位、commit 不是 `--candidate`，印 `~ UNBOUND_PO_REPLY`；綁好的印 `~ PO_ACCEPTANCE <候選 ID>: <commit 前 12 位> <入口>: 已驗收 (<訊息>)`。
   - 裁決可加 `ORDER_SHA256:`、`REPORT_SHA256:`（`--hash` 的值）。`--verdict ... --match` 時值不是現在的雜湊，印 `~ VERDICT_RECORD`。
+- **PO 驗收綁到成品本身（2.2，F09，shadow：只改 `~` 提示的內容，exit code 不變）**：
+  - `--po-acceptance` 另外核對成品檔：從 `--artifact-root <資料夾>`（預設：驗收紀錄檔所在的資料夾）讀 `entry`，要是這個資料夾裡的檔；紀錄有 `entry_sha256` 就要相同。選填的 `manifest` 欄寫 manifest 檔的路徑，要算得出 `manifest_sha256`。
+  - 檔不見、雜湊不同、入口在資料夾外、同一個 `reply_ref` 用在兩份不同成品（候選 ID、commit、入口、兩個雜湊任一不同），都印 `~ UNBOUND_PO_REPLY`，不再印已驗收。
+  - 沒有 `entry_sha256` 或沒列 `manifest` 路徑的舊紀錄照讀，印 `~ PO_ACCEPTANCE … PO 回覆 accepted，成品待核對（沒核對的項目）`，不算已驗收。要升成已驗收：補 `entry_sha256` 和 `manifest` 兩欄。
+- 證據紀錄有 `log_error`（2.2，F15：`run --log` 寫到一半失敗）：Standard 印提示「its --log was not written in full」，Strict 失敗。重新記一次就好。
 - 已有舊檔案的專案導入時：`--warn` 只警告、exit 0；`--since YYYY-MM-DD` 跳過較早的檔案（工單看 ISSUED_BY、RESUME_STATE 看 UPDATED、報告和裁決看第一個日期）；找不到日期的檔案無從比較，也跳過，印 `UNDATED` 並在最後一行另計，要查它就不加 `--since`。先用 `--warn` 看全貌，新工單再用 `--since` 嚴格檢查。舊檔案不追溯修改。
+
+## setup_check.py（2.2.0）
+
+```text
+python -I -X utf8 setup_check.py <WS>/DIRECTOR [更多資料夾或檔案]   # 建置完成：待決頁網址和置頂兩行
+```
+
+- 讀資料夾裡的 `DIRECTOR_STATE.md`（也可直接給檔案）。每個對象印 `OK   setup <檔案>` 或 `FAIL setup <檔案>`，問題一行一個 `  - ...`，提示 `  ~ ...`。
+- 合法的只有三種：`PO_PAGE_URL: https://claude.ai/artifact/<id>`（或 `https://claude.ai/code/artifact/<id>`）加 `PO_PAGE_PINNED: yes`；同樣的網址加 `PO_PAGE_PINNED: no reason=<原因>`（另印提示：請 PO 自己置頂）；`PO_PAGE_URL: NONE reason=<原因>`（沒有頁面，`PO_PAGE_PINNED` 可省略或寫 `no reason=...`，不能寫 yes）。
+- 缺行、同一行寫兩次、不是 claude.ai 的 Artifact 網址、`<...>` 佔位、`NONE` / `no` 沒寫原因、檔案不存在，都 exit 1。全部合法 exit 0。
+- 只驗格式，不驗頁面真的存在或真的置頂：偽造的 Artifact 網址、`NONE reason=x` 都會 exit 0。所以總監回報時要貼出發布工具回傳的結果原文（BOOTSTRAP 第 6 步第 7 點、第 13 步）。
+- `BOOTSTRAP` 第 6、11、13 步要它 exit 0 才送第一份回報。只用在建置流程；舊專案不跑它，`status.py` 只印 shadow 提示 `PO_PAGE_MISSING`（`status_gen.py`）。
 
 ## trace_report.py
 
@@ -348,6 +371,18 @@ python -I -X utf8 trace_report.py --orders <DIRECTOR>/orders --reports <報告�
   - 你看過：`--director-log` 讀 `PO_PRODUCT_REVIEW` 行，`--acceptance PO_ACCEPTANCE.json`（可重複）讀驗收紀錄，都要綁到報告的 HEAD。看的是別的成品，寫「看過別的成品」；看的是舊條件，寫「當時是舊條件」。
   - 另列 `BRIEF_STALE` / `BRIEF_UNCONFIRMED` 提示和綁不到成品的 PO 回覆（`UNBOUND_PO_REPLY`）。`--director-log` 有 BRIEF_LOCKED 時以它為依據，和 gate_check 相同。
   - `--director-log`、`--evidence-dir` 要配 `--brief`，否則 exit 2；`--acceptance` 可以單獨用。
+- **四種證明分開寫（2.2，F08，shadow：只多四欄、exit code 不變）**：初衷卡一節的表頭變成 `| 需求 | 內容 | 有人負責 | worker 自述 | 證據有效 | 綁鎖定依據 | 總監重跑 | 這版有驗證紀錄 | 你看過這個成品嗎 |`。
+  - worker 自述：報告的 AC 狀態。全部 PASS 寫 `自述全過（AC-1 PASS）`，**永遠不寫「有」**。
+  - 證據有效：加 `--evidence-dir` 時，每條 PASS 的證據檔都要是合格的 `evidence_record` 紀錄、HEAD 是報告的 HEAD（和 `gate_check --match --evidence-dir` 同一套檢查）；沒給寫「未知」。
+  - 綁鎖定依據：讀到的初衷卡是 `--director-log` 最新一行 BRIEF_LOCKED 的那份，而且狀態是 LOCKED。
+  - 總監重跑：`--director-log` 有這張工單每條 AC、這個報告 HEAD 的整行 `EVIDENCE_RERUN`（`evidence_record.py verify --rerun` 通過時印的 `LOG_LINE:`，總監貼進 LOG）。
+  - 這版有驗證紀錄：四欄都齊才寫 `有（AC-1：自述、證據、鎖定依據、總監重跑都齊）`；缺的寫 `部分（缺：…）`。只有 worker 自述的舊專案會從「有」變成「部分」，這是預期的：照上面四步補齊就會回到「有」。工單只有工單層 TRACES_TO（沒逐 AC 指定）時寫 `部分（工單層 TRACES_TO，沒逐 AC 指定；…）`。
+- **你看過哪一份成品（2.2，F09）**：
+  - 報告可加 `CANDIDATE_ID: <id>`，指定 PO_ACCEPTANCE 裡哪一份成品。同一 commit 有兩份以上成品、報告沒寫 CANDIDATE_ID，寫「分不出是哪一份」。
+  - 同一份成品有多筆紀錄時照 `replied_at` 取最新；沒有 `replied_at` 寫「分不出先後」。
+  - 報告 HEAD 認不出時，寫「報告 HEAD 認不出，對不到成品」，不拿別的成品充數。
+  - `PO_PRODUCT_REVIEW` 行沒寫 `manifest=` 的，寫「對該 commit 的歷史回覆：…，成品待核對」。
+  - 驗收紀錄的成品檔照 gate_check 的規則核對（入口和 manifest 從驗收紀錄檔所在的資料夾讀）；同一個 reply_ref 用在兩份不同成品，兩筆都列進綁不到。
 - 不悄悄略過檔案：三個資料夾裡不是該類檔案的 `.md`（工單沒有 `ISSUED_BY =`、報告沒有 `TASK_ID`、裁決沒有 `## A`）列在「沒計入的檔案」，寫數量和檔名。舊格式工單要算進來，補一行 `ISSUED_BY = <誰> <日期>`。
 - 只看檔案寫了什麼，不判斷做得對不對。資料夾或 `--decisions` / `--brief` / `--director-log` / `--acceptance` 檔不存在 exit 1，其他情況 exit 0。
 
@@ -388,6 +423,12 @@ python -I -X utf8 metrics_report.py --run <run 資料夾> [--compare <基準 run
 - 同一個 `event_id` 只算一次（照檔名順序取第一筆）；內容不同的會註明。缺欄位、不認得的 type、時間沒帶時區的事件不算，列出檔名和第幾筆。
 - 決策依 `decision_id` 去重：提出、已回覆、還在等（提出 − 已回覆 − 撤回）、撤回。重問：同一個 `topic_id` + `scope_id` 有幾個不同的 `ask_id`，減 1 再加總；同一個 `ask_id` 重送不算重問。
 - `--compare`：省下 = 基準 − 本次（正數表示本次比較少），PO 操作另印百分比，基準是 0 時百分比寫 UNKNOWN。沒有開始時間或沒有 `preview_ready` 時預覽時間寫 UNKNOWN，不寫 0。
+- **採樣完整度（2.2，F16）**：`run.json` 可加 `"sampling": {"version": 1, "complete": true, "scenario": "S-1", "counted": ["po_action", "asked"], "kinds": ["click", "type"]}`。
+  - `complete: true` 表示這一輪每一筆事件都記了；`counted` 寫有記的 type（省略＝全部）；`kinds` 寫認得的 po_action kind（省略＝任何短名稱）。
+  - 每個數字後面標完整度：確認／部分／未知。沒有標記的舊 run 照讀，標「未知」；沒有事件時印 UNKNOWN，不印 0。
+  - `--compare` 只在兩邊都「確認」、`scenario` 相同時才相減，否則寫 `UNKNOWN：採樣不完整（…）` 或 `UNKNOWN：劇本不同`。舊 run 要再比較：補上 sampling 標記。
+  - `kind` 不是短名稱（例如 `[]`、數字）或不在 `kinds` 裡的 po_action 隔離：列在「隔離」一行，不算、不中斷，exit 0。
+  - `answer_received` 要有同一個 `decision_id` + `ask_id`、時間更早的 `asked` 才算已回覆，否則列在「回覆對不到發問」。
 - 不加 `--run` 時輸出和以前完全相同；`--director` 和 `--run` 至少給一個。run 資料夾不存在：exit 1。
 
 ## scope_check.py
@@ -403,6 +444,7 @@ python -I -X utf8 scope_check.py --order <WO.md> --base <ref>        # 取代工
 - 看不到被 git 忽略的檔案和 repo 外的檔案。
 - 清單項目裡 ` #` 之後是註解。檔名本身有 ` #` 時，整個項目用反引號包起來：`` - `src/x #draft.txt` ``，反引號裡的字照原樣讀（檔名不能含反引號）。`gate_check.py --order` 看到沒包反引號、` #` 後面緊接著字（像 `a #1.txt`）而被切掉的項目會印提示；`# 說明`（`#` 後面有空格）當一般註解，不提示。
 - 工單有 `REQUIRED_CHANGES:` 清單時，每一條 glob 都要對到至少一個改動的檔案；沒對到的印 `MISSING   <glob>`，結果是 VIOLATION，最後一行多一個 ` missing=n`。沒有這個清單，輸出和以前一樣。`gate_check.py --order` 另外查每一條都在 SCOPE 裡、不在 FORBIDDEN 裡，否則這張工單做不到。
+- REQUIRED_CHANGES 看最後結果（2.2，F14）：比的是 merge base 和最後狀態（工作樹現在的檔案加未追蹤檔）的差，不是三段 diff 的聯集。暫存後又改回、或兩次 commit 改了又改回的檔，現在是 `MISSING`。加 `--candidate <commit>` 時改比 merge base 和那個 commit 的 tree，總監審查用這個。多印一行 `REQUIRED_BASIS: worktree-final|candidate=<12 位> final=<n>`。越界檢查（SCOPE / FORBIDDEN）照舊看聯集。
 - 最後一行貼進 TASK REPORT。exit 0 通過、1 越界或缺必要改動、2 沒辦法檢查（`NOT_RUN`，包括 SCOPE / FORBIDDEN 下一行不是 `- 項目`）。
 
 ## evidence_record.py
@@ -415,8 +457,10 @@ python -I -X utf8 evidence_record.py verify <紀錄.json> --rerun-recorded   # �
 ```
 
 - 紀錄放 repo 外的工作資料夾。只留最後 40 行（`--tail`）、每行最多 400 字；要完整輸出就加 `--log <檔案>`。
+- `--log` 的上層資料夾不存在時自動建立（2.2，v2.1.0 已知問題）。建不出來或開不了（例如上層是一個檔案、沒有寫入權限）：印 `EVIDENCE: NOT_RUN cannot open --log …`、exit 2，指令不跑、不寫紀錄（F15；以前會照跑並寫 exit 0 的紀錄）。跑到一半寫不進 log：指令照跑完，紀錄多一個 `log_error` 欄，結論行加 ` log=incomplete(…)`，指令 exit 0 時改 exit 4。
 - 沒有 git（2.1.0，例如從 ZIP 解開的規則包）：`run` 照樣跑指令、寫紀錄，`git` 欄是 `{"head": null, "dirty": null}`，stderr 印一行 `git metadata not available (git not found ...)`。這種紀錄在 `gate_check --match --evidence-dir` 算「沒有 git HEAD 的紀錄」（Strict 失敗、Standard 提示）。`verify` 不加 `--rerun` 照常可用；`--rerun` 要 git，沒有就 `NOT_RUN git not found ...`、exit 2，絕不算通過。
 - 螢幕只印一行結論，指令本身的 exit code 原樣傳回。
+- 讀到不是 UTF-8 的檔（2.2，v2.1.0 已知問題）：gate_check、scope_check、trace_report、metrics_report、evidence_record 都只印一行 `<工具>: NOT_RUN a file is not UTF-8 text (<檔名>) …`、exit 2，不再印 traceback。把檔案另存成 UTF-8 再跑。
 - 指令和輸出結尾會照原樣存檔，不要把密鑰放進指令。
 - `verify` 先查紀錄有沒有 `run` 寫的每個欄位（缺欄位或型別不對：`NOT_RUN not an evidence record`，exit 2；沒有 `schema` 的舊紀錄照讀，印提示），再比對產物雜湊。結論行把三件事分開印：`integrity=same|changed`（產物和紀錄時相同）、`test=not-rerun|passed|failed(...)`（只有 `--rerun` 跑核准的檢查而且 exit 0 才是 `passed`；不重跑就是 `not-rerun`，不算重跑過）、`artifacts=N missing=M`（紀錄時就缺的、現在不見的都算 missing）。有任何一項不對就是 `MISMATCH`，exit 1；產物缺了絕不會 OK。會變動的產物（含時間戳）重跑後一定不同，這種就只比 exit code 和人工看的部分。
 - `--rerun` 跑的是總監核准的檢查，不是紀錄裡寫的指令，四個參數都要給，少一個就 `NOT_RUN`、exit 2，什麼都不跑：
@@ -428,6 +472,9 @@ python -I -X utf8 evidence_record.py verify <紀錄.json> --rerun-recorded   # �
   6. 跑完再讀一次 `--repo`：HEAD、tree、狀態或旗標有變，就是 `MISMATCH`、exit 1。
   7. 紀錄的 `order` 欄（`run --order` 寫的工單 ID、REVISION、雜湊）照 `gate_check.py --match --evidence-dir` 的規則比對，LOG 裡的整行 `EVIDENCE_EQUIVALENT` 也照算：Strict 工單不符是 `MISMATCH`、exit 1，Standard 印 `~` 提示；沒綁的紀錄 REVISION 1 印 WARN。
   結論行最後加 `check=AC-1 source=order candidate=<12 位>`。
+  8. （2.2，F10）候選 commit 的 tree 有 symlink（mode 120000）或 submodule（160000）時，重建出來的就不是候選 commit，所以 `NOT_RUN unsupported tree mode …`、exit 2，什麼都不跑。這種 AC 改用別的方式驗，或把連結拿出候選 commit。
+  9. （2.2，F08）通過時多印一行 `LOG_LINE: EVIDENCE_RERUN <WO-ID> <AC> candidate=<40 位> result=ok record=<檔名>`，總監整行貼進 DIRECTOR_LOG，`trace_report --brief` 的「總監重跑」欄讀它。
+  10. （2.2，v2.1.0 已知問題）加 `--brief <BRIEF.md>`（初衷卡）和 / 或 `--order-history <資料夾>`：用 `gate_check --match` 的同一組函式比初衷卡。工單釘的指紋和鎖定的初衷卡比（`brief_notes`）；紀錄是用 EVIDENCE_EQUIVALENT 從舊工單沿用的，再拿舊工單釘的指紋比（`carried_notes`）。結果印 `~ BRIEF_STALE` / `~ BRIEF_UNCONFIRMED`，`LOG_LINE` 結尾多 ` brief=ok|stale|unconfirmed`（`ok` 要有 `--brief`，而且初衷卡是 `--dispatch-log` 裡最新的 BRIEF_LOCKED；只給 `--order-history` 沒給 `--brief` 時沒東西可比，印 `brief=unconfirmed`）。只是提示，exit code 不變；不加這兩個參數時 `LOG_LINE` 和以前一樣。`brief=stale` 或 `brief=unconfirmed` 的行，`trace_report` 的「總監重跑」欄不算，顯示「沒有：重跑時鎖定依據不符」。
 - 暫存資料夾只有已 commit 的檔，沒有 `.git`、未追蹤檔和被忽略的檔，跑完就刪。這證明「跑的是總監核准的檢查、在候選 commit 的 tree 上」，但檢查仍會執行候選 commit 裡 worker 寫的測試碼，不是沙箱。`--repo` 仍要乾淨，建議用 `git worktree add --detach <目錄> <候選 commit>` 新開（只新增 worktree，不刪別的）。
 - `--rerun-recorded` 是 v0.12 的 `--rerun`：在紀錄的 cwd 跑紀錄寫的指令。能改紀錄的人就能決定跑什麼，所以結論是 `test=recorded-command-passed source=record`，永遠不印 `test=passed`。v0.12 只寫 `--rerun` 的指令現在會 exit 2，改成上面的完整寫法。
 
@@ -443,7 +490,7 @@ bash tools/container/worker_clone.sh create  --repo /mnt/d/.../repo --base <comm
 bash tools/container/run_worker.sh --clone ~/dw-clones/<名稱> --name <名稱> --director /mnt/d/.../DIRECTOR \
      [--offline | --login | --allow <host> | --allow-file <檔案>] [--dry-run] -- claude
 bash tools/container/worker_clone.sh collect --repo /mnt/d/.../repo --branch <分支> --dir ~/dw-clones/<名稱> --name <名稱>
-# 舊的寫法（1.1.0）保留一版，印 WARN K1，doctor 報 NOT_ENFORCED，2.0 拿掉：
+# 舊的寫法（1.1.0）：2.2.0 仍支援的舊模式，印 WARN K1，doctor 報 NOT_ENFORCED；只會在 major 版（最早 3.0）移除，小版本不會拿掉。要遷移就改用上面的 worker_clone.sh create + --clone：
 bash tools/container/run_worker.sh --worktree /mnt/d/.../wt --director /mnt/d/.../DIRECTOR \
      --git-common /mnt/d/.../repo/.git [--worktree-name <名稱>] [...] -- claude
 ```
@@ -463,20 +510,24 @@ bash tools/container/run_worker.sh --worktree /mnt/d/.../wt --director /mnt/d/..
 - `Dockerfile`：基底 `python:3.12-slim-bookworm` 用 digest 釘住，Claude Code 用 `ARG CLAUDE_VERSION` 釘版本，`DISABLE_AUTOUPDATER=1`。要升級就改這兩行重 build，不會自己更新。
 - `run_worker.sh` 給容器的東西只有：
   - `/work`：worker 的 worktree，唯一能寫的專案資料夾。
-  - `/director`：DIRECTOR，唯讀。
+  - `/director`：DIRECTOR，唯讀。**2.2.0（F11）起 DIRECTOR 不可以和任何可寫掛載重疊**：`--clone`、`--worktree`、`--git-common` 的真實路徑（`pwd -P`）與 DIRECTOR 相同、在它底下、或包住它，都 exit 2、不印 docker 指令；另用 inode（`-ef`）和 `/mnt/<磁碟>` 不分大小寫比對，擋住 symlink、`..`、Windows／WSL 大小寫別名。原因：DIRECTOR 放在 clone 裡時，worker 改 `/work/DIRECTOR/...` 就等於改了唯讀的 `/director`（審查實測寫入成功）。
+    - 遷移：先備份 DIRECTOR，再把它搬到 clone／repo 以外的獨立資料夾（例如 `/mnt/d/DIRECTOR-WORK-DIRECTOR`），同步改 `--director` 與專案設定裡寫死的路徑；舊專案若 DIRECTOR 在 repo 內，這是 2.1.0 → 2.2.0 唯一會從「能啟動」變成「exit 2」的行為。
+    - 啟動前的重疊檢查是掛載設定檢查，不寫任何檔；doctor 的診斷若要寫入測試，只准用一次性 canary 檔，不碰正式工單。
   - repo 的 `.git`，可寫（見 K1），其中三處另外唯讀蓋上：
     - `hooks/` 和 `config`：之後在主機上執行。少了這兩個就 exit 2，免得 docker 用 root 身分在主機上建出來。
     - `worktrees/`：別的 worktree 的紀錄。它們的 `gitdir` 檔寫的是 Windows 路徑，容器裡看起來不存在，所以容器裡的 `git worktree prune` 會把它們刪掉。
   - 兩種 worktree：
     - 主 checkout（不給 `--worktree-name`）：`--git-common` 必須是 `<worktree>/.git`，`.git` 就在 `/work/.git`。
     - linked worktree（`--worktree-name <名稱>`）：`.git` 掛在 `/repo-git`。主機上 worktree 的 `.git` 檔寫的是 Windows 路徑，Linux 的 git 讀不懂，所以另外唯讀掛一個 `/work/.git` 檔指到 `/repo-git/worktrees/<名稱>`。自己那筆紀錄可寫（index、HEAD、logs），其中 `gitdir` 檔唯讀換成 `/work/.git`，prune 就不會刪它。
-  - docker volume `dw-claude-home` → `/home/dw/.claude`：只放容器裡 Claude Code 自己的登入。
+  - docker volume `dw-claude-home` → `/home/dw/.claude`：只放容器裡 Claude Code 自己的登入。**這是同一台主機上所有 worker 共用、可寫的同一個 volume（F18）**：clone 隔離不等於登入與使用者設定隔離，一個 worker 能讀到、改到另一個 worker 的登入狀態與設定，也和跨專案、跨帳號共用。需要隔離時，每個信任範圍用自己的 volume：啟動前設環境變數 `DW_CLAUDE_HOME_VOLUME=dw-claude-home-<範圍>`（預設仍是 `dw-claude-home`，不設就和 2.1.0 一樣；名稱只准字母、數字、`_ . -`），各 volume 第一次都要在容器裡 `/login`。舊 volume 保留到確認遷移完成再刪（刪除屬於 PO 或總監的決定）。
   - `--clone`（1.2.0）：`/work` 就是 worker 自己的 clone，`.git/config` 和 `.git/hooks` 另外唯讀蓋上；原 repo 完全不掛。上面 `.git` 的三種掛法只用在舊的 `--git-common`。
-  - 環境變數只有這些：`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`、`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`、`XDG_CACHE_HOME`、`DW_ALLOW_DOMAINS`、`DW_DNS_UPSTREAM`、`DW_WORKER_NAME`（audit log 檔名用）、`DW_GIT_MODE`（`clone` 或 `shared`，doctor 用），`--git-common` 時再加 `GIT_CONFIG_COUNT/KEY/VALUE` 設的 `gc.auto=0` 和 `gc.worktreePruneExpire=never`（git 不會自己 gc 或 prune）。不帶 `--env-file`，主機的變數一個都不進去。`--offline` 沒有 `DW_ALLOW_DOMAINS` 和 `DW_DNS_UPSTREAM`。
+  - 環境變數只有這些：`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`、`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`、`XDG_CACHE_HOME`、`DW_ALLOW_DOMAINS`、`DW_DNS_UPSTREAM`、`DW_WORKER_NAME`（audit log 檔名用）、`DW_GIT_MODE`（`clone` 或 `shared`，doctor 用），有網路時 `--sysctl`（關 IPv6，不是環境變數），`--git-common` 時再加 `GIT_CONFIG_COUNT/KEY/VALUE` 設的 `gc.auto=0` 和 `gc.worktreePruneExpire=never`（git 不會自己 gc 或 prune）。不帶 `--env-file`，主機的變數一個都不進去。`--offline` 沒有 `DW_ALLOW_DOMAINS` 和 `DW_DNS_UPSTREAM`。
   - 沒有 `GIT_DIR` 和 `GIT_WORK_TREE`：設成全域變數，容器裡每個 git 都會指到這個 repo，連在別的資料夾跑的也是（selftest 在暫存區 `git init` 就壞了）。
   - 不掛主機的家目錄、`~/.ssh`、gh 設定、AppData，也沒有 docker socket。
 - 權限：`--cap-drop ALL`，只加回 NET_ADMIN、NET_RAW、SETUID、SETGID、SETPCAP，給 entrypoint 以 root 設防火牆用。設完 `setpriv` 換成使用者 `dw`，並清空所有 capability（包括 bounding set，所以要 SETPCAP）和 `no_new_privs`。另有 `--read-only`（根目錄唯讀，`/tmp`、`/run` 是 tmpfs）、`--pids-limit 512 --memory 4g --cpus 4`。
 - 網路（`init_firewall.sh`，分兩段，中間由 entrypoint 啟動 `dns_allow.py`）：OUTPUT 預設 DROP。只放行 loopback、已建立連線的回應、使用者 `dwdns`（只有 `dns_allow.py` 用）對 `DW_DNS_UPSTREAM` 的 53，以及白名單名稱在**開容器當下**解析到的 IPv4 的 TCP 443。其他一律 REJECT；IPv6 一律 DROP。
+  - **這條規則的準確說法（F18）：放行的是「解析後的目的 IP:443」，不是網域名稱。** 防火牆不看 TLS SNI，也不看 HTTP Host；同一個 IP 上若還有別的網站（CDN、共用主機），443 也連得到。要做到網域層控制，得改用受控代理並禁止直接連線，目前沒有做。
+  - IPv6（F18）：`init_firewall.sh` 設 `ip6tables` DROP 時失敗會被忽略，所以 2.2.0 的 `run_worker.sh` 在有網路時另外給 docker `--sysctl net.ipv6.conf.all.disable_ipv6=1` 和 `net.ipv6.conf.default.disable_ipv6=1`（映像不變，仍是 `dw-worker:1.2.0`）。docker 不接受這個 sysctl 時容器起不來（失敗即關閉）。實際有效與否用 `doctor.py --probe` 在容器裡驗證；本版沒有在真實 Docker 上跑（見 TASK_REPORT 的 UNVERIFIED）。
   - 名稱清單：`--allow-file`（預設是同資料夾的 `dns_allow.txt`，裡面只有 `api.anthropic.com`），加上 `--login` 和 `--allow`，依序合併、去重、轉小寫；有不合法的名稱就 exit 2，清單是空的也 exit 2（要沒網路就用 `--offline`）。
   - `--login` 加 `claude.ai`、`platform.claude.com`、`console.anthropic.com`，只有第一次登入要用。
   - `--allow <host>` 再加別的名稱。`*.example.com` 代表它底下的子網域（不含本身）：只解析，不開 443。
@@ -569,6 +620,7 @@ python -I -X utf8 status_gen.py --out <DIRECTOR>/status.py --config templates/st
 - 總監段（設定檔，都選用）：`po_page`（待決頁的計數：每項一個 regex，或 JSON 頁的 `list` 加 `field` / `value`）、`orders`（沒有結案字樣的工單）、`pending_sends`（還沒勾的 `- [ ]`）、`audit`（每份動作紀錄最近 `hours` 小時的筆數、被擋次數、讀 log 次數、session 數；讀 log 的判斷照抄 `poll_hint.py`）、`processes`（命令列含某字串的程序有沒有在跑）。
 - 讀不到的路徑印 MISSING；磁碟低於門檻、讀不到待決頁或程序沒在跑時 exit 1。
 - 2.1.0（shadow）：待決頁是文字頁（沒有 `extract`）時，若有項目 `STATUS: open` 但 `ANSWER:` 已填（不算空白或 `<…>` 佔位），多印一行 `PO hint: N item(s) still STATUS open with an ANSWER filled in (ID…)`：PO 可能已回覆但沒改狀態，計數會漏掉，要到頁上讀。exit code 不變。
+- 2.2.0（shadow）：總監版設了 `po_page` 時，待決頁旁邊的 `DIRECTOR_STATE.md`（或 `po_page.state` 指定的路徑，相對於設定檔）沒有 `PO_PAGE_URL:` 開頭的行，多印一行 `~ PO_PAGE_MISSING: <路徑> has no PO_PAGE_URL line; publish and pin the PO page (BOOTSTRAP step 6)`，exit code 不變。2.2.0 以前建置的專案會看到它：照 `docs/11`「待決頁網頁的授權與備援」取得同意後補建，或寫 `PO_PAGE_URL: NONE reason=<原因>`。舊的 `status.py` 要用新 `status_gen.py` 重新產生（`--force`）才會印。
 - 已存在的 `--out` 要加 `--force` 才覆蓋。
 
 ## round_check.py（1.3.0）
@@ -603,26 +655,42 @@ python -I -X utf8 report_vs_audit.py --report <報告.md> --log <動作紀錄.js
 - 最後一行 `REPORT_VS_AUDIT: PASS|FAIL|NONE claims= ok= failed= session= logs=`；FAIL exit 1，不能跑 exit 2。
 - 只證明「有跑、結果和報告一致」，不證明跑的內容對；動作紀錄沒有 exit code，用 ok / error 判斷。
 
-## choice_reconcile.py（2.1.0，shadow）
+## browser_check.py（2.2.0）
+
+用無頭 Chrome 和假的 Artifact SDK 檢查選擇頁的行為（F04 F05 F07 頁面端）：錯指紋或舊格式回覆不會藏起題目、回條只配給總監採用的回覆、指紋不符禁止送出、重送沿用同一個 submissionId。
+
+```
+python -I -X utf8 browser_check.py [--chrome <Chrome 路徑>] [--page <choice_page.html>]
+```
+
+找瀏覽器的順序：`--chrome`、環境變數 `DW_CHROME`、PATH 上的 google-chrome／chromium／chrome、Windows 的 Chrome 與 Edge。找不到：印 `SKIP browser_check: …` 並結束碼 0；`DW_REQUIRE_BROWSER=1`（CI 用）時結束碼 1。每項印一行 `名稱=True/False`，任一項 False 結束碼 1。selftest 不依賴它。
+
+## choice_reconcile.py（2.2.0，shadow）
 
 ```text
 python -I -X utf8 choice_reconcile.py register --db <DIRECTOR>/choice_inbox.sqlite3 --snapshot <一題一版.json>
-python -I -X utf8 choice_reconcile.py ingest   --db <DIRECTOR>/choice_inbox.sqlite3 --export <從選擇頁讀回來的.json>
+python -I -X utf8 choice_reconcile.py publish  --db <DIRECTOR>/choice_inbox.sqlite3 --question CH-01 --revision 2 | --close
+python -I -X utf8 choice_reconcile.py ingest   --db <DIRECTOR>/choice_inbox.sqlite3 --export <從選擇頁讀回來的.json> [--source <artifact id>]
+python -I -X utf8 choice_reconcile.py rescan   --db <DIRECTOR>/choice_inbox.sqlite3
 python -I -X utf8 choice_reconcile.py plan     --db <DIRECTOR>/choice_inbox.sqlite3 --question CH-01 --revision 2 [--wo WO-012] [--orders <DIRECTOR>/orders]
-python -I -X utf8 choice_reconcile.py advance  --db <DIRECTOR>/choice_inbox.sqlite3 --question CH-01 --revision 2 --from QUEUED --to CLAIMED [--session <名字>] [--result <文字>]
+python -I -X utf8 choice_reconcile.py advance  --db <DIRECTOR>/choice_inbox.sqlite3 --question CH-01 --revision 2 --from QUEUED --to CLAIMED --session <名字> [--generation N] [--result <文字>]
 python -I -X utf8 choice_reconcile.py settle   --db <DIRECTOR>/choice_inbox.sqlite3 --key <來源鍵> --to NOTED|SUPERSEDED|CLOSED [--result <文字>]
 python -I -X utf8 choice_reconcile.py status   --db <DIRECTOR>/choice_inbox.sqlite3 [--now <ISO>] [--late-min 10] [--stuck-min 30] [--json]
 ```
 
-- 選擇頁回覆的本機帳本（`docs/12` 第四、六節），一個 SQLite 檔，四個表：`revisions`（每題每版的內容和 hash，登記後不能改）、`inbox`（每筆回覆一列，用來源鍵去重）、`decisions`（每題每版最多採用一筆和它的狀態）、`effects`（固定的 WO 編號、誰接手、結果）。
-- `register` 印 `snapshotHash=sha256:…`（JSON 排序鍵、UTF-8、不含 `snapshotHash` 和 `id`）；同一版內容不同就 `REFUSED`，exit 1。
-- `ingest` 的 JSON：`{"source": "<artifact>", "decisions": [...], "choiceReplies": [...], "notes": [...]}`，每筆是 db 的欄位加 `id`。每筆標 `ok`、`legacy`（2.0 舊題）、`note`、`duplicate`、`conflict`、`conflict-same-submission`、`stale`、`bad-hash`、`bad-choice`、`unknown-revision`；後面這些只記錄，進 `RECEIPT_PENDING`，要回給使用者。題目已關閉的 2.0 舊答案記成 `legacy-closed`，直接 `CLOSED`。再跑一次同一份不會多記（`already=`）。
-- `plan` 在 `BEGIN IMMEDIATE` 裡採用最早一筆 `RECORDED` 回覆，給固定 WO 編號（沒給 `--wo` 就取帳本和 `--orders` 裡最大號加一）；再跑還是同一張（`already`）。沒有可採用的回覆 `NOTHING`，exit 1。
-- `advance` 只照 `RAW → RECORDED → PLANNED → QUEUED → CLAIMED | RECONCILE → RECEIPT_PENDING → CLOSED`（`RECONCILE → CLAIMED | QUEUED`）走；不是一步 exit 2。狀態已經不是 `--from` 就 `LOST`，exit 1：兩個總監同時接手，只有一個成功。
-- `settle` 結案沒被採用的那幾列：留言 `NOTED`、被取代 `SUPERSEDED`、回給使用者後 `CLOSED`；已被採用的要用 `advance`，exit 1。
-- `status` 列出還沒結束的：只有 `ok`、`legacy` 的 `RECORDED` 回覆超過 `--late-min` 分才標「沒交出去」，留言另計 `notes=`；`PLANNED / QUEUED / CLAIMED / RECONCILE` 超過 `--stuck-min` 分標「收到但卡住」。最後一行 `CHOICE_RECONCILE: open= not_handed= stuck= receipts_pending= notes= (shadow: hints only)`，一律 exit 0；沒有帳本也 exit 0。
-- 壞資料、壞 `--now`、壞帳本、資料夾不存在：`ingest`、`plan`、`advance`、`settle`、`status` 只印 `CHOICE_RECONCILE: SHADOW_ERROR <原因>`，exit 0；`register` exit 2。只有 `MOVED`、`PLANNED`、`SETTLED` 代表狀態真的改了。
-- 2.1 是 shadow：只提示、不擋任何工具；讀 db 和寫回條仍由總監用 `ArtifactData` 做，本工具不連網。
+- 選擇頁回覆的本機帳本（`docs/12` 第四、六節），一個 SQLite 檔：`revisions`（每題每版的快照和 hash，登記後不能改）、`questions`（頁面上現在是哪一版、題目開或關，和快照分開記）、`inbox`（每筆回覆一列，用來源鍵和冪等鍵去重）、`decisions`（每題每版最多採用一筆和它的狀態）、`effects`（固定的 WO 編號、持有者、世代、結果）、`events`（每一步誰動的）、`quarantine`（讀不懂的那幾筆）。
+- 回覆身分是 `questionId + revision + snapshotHash + submissionId`；冪等鍵是 `<source>|<kind>|<submissionId>`（`docs/12` 第六節）。
+- `register` 印 `snapshotHash=sha256:…`（JSON 排序鍵、UTF-8、不含 `snapshotHash` 和 `id`）；同一版內容不同就 `REFUSED`，exit 1。一題第一次登記時同時當成現行版；之後的新版只存快照，等 `publish`。
+- `publish --revision N` 把現行版指到 N（要先登記過）；`--close` 記成題目已關。之後所有回覆重判一次，印 `REEVALUATED <來源> <舊> -> <新>`。匯出裡的 `decisions`、或新版的有效回覆，也會帶動現行版。
+- `ingest` 的 JSON：`{"source": "<artifact>", "decisions": [...], "choiceReplies": [...], "notes": [...]}`，每筆是 db 的欄位加 `id`。匯出沒有最上層 `source` 時用 `--source` 補；兩者都沒有就當成 `artifact` 並印 `WARNING`（同一筆換一份匯出重送會多算一次）；兩者不同時以匯出的為準，也印 `WARNING`。逐筆讀：讀不懂的那筆進隔離區（`QUARANTINED <來源> reason=`），其他照記。新題的回覆用登記時存的選項重建 `choice` 指的那個選項，跟回覆的 `selectedOptionSnapshot` 比 `key`（有 `label` 也比 `label`）；不一致進隔離區（`reason=snapshot_mismatch`），不記帳、不排工。回覆沒附 `selectedOptionSnapshot`（舊頁面）或那一版還沒登記，照記並印 `WARNING`，不擋。每筆標 `ok`、`legacy`（2.0 舊題）、`note`、`duplicate`、`conflict`、`conflict-late`（題目已採用別的答案後才到）、`conflict-same-submission`、`stale`、`question-closed`、`bad-hash`、`bad-choice`、`unknown-revision`；`ok`、`legacy` 以外的只記錄，進 `RECEIPT_PENDING`，要回給使用者。`unknown-revision` 在快照登記後自動重判；重判時選項對不上的改標 `snapshot_mismatch`，留在 `RECEIPT_PENDING`，不會排工。題目已關閉的 2.0 舊答案記成 `legacy-closed`，直接 `CLOSED`。重送的留言記 `duplicate`，直接 `CLOSED`。再跑一次同一份不會多記（`already=`）。
+- `rescan` 重讀隔離區和等快照的回覆。
+- `plan` 在 `BEGIN IMMEDIATE` 裡採用最早一筆 `RECORDED` 回覆，先查這一版還能不能做（現行版、hash、題目開著、沒有登記了卻還沒上頁面的新版）：新版待發布印 `HOLD`，其他不符印 `REFUSED`，exit 1。可以就給固定 WO 編號（沒給 `--wo` 就取帳本和 `--orders` 裡最大號加一），印 `PLANNED <鍵> <WO> ... identity={...}`；再跑還是同一張（`already`），已經不能做時多印 `WARNING` 和下一步 `advance --from <目前狀態> --to RECONCILE`。沒有可採用的回覆 `NOTHING`，exit 1。
+- `advance` 只照 `RAW → RECORDED → PLANNED → QUEUED → CLAIMED | RECONCILE → RECEIPT_PENDING → CLOSED`（`PLANNED | QUEUED | CLAIMED → RECONCILE`、`RECONCILE → CLAIMED | QUEUED`）走；不是一步 exit 2。動到 `CLAIMED` 或 `RECONCILE` 的要 `--session`，沒給 exit 2。狀態已經不是 `--from`、或 `--generation` 不對，就 `LOST`，exit 1。領取時再查一次版本，世代加 1，記下持有者；只有持有者能交成 `RECEIPT_PENDING`，別人（含 2.1 沒有持有者的領取）`REFUSED`，要先 `CLAIMED → RECONCILE` 接手。持有者以外的人接手一定要帶 `--generation <看到的世代>`，沒帶印 `REFUSED ... a takeover needs --generation N`，exit 2；接手記一筆 `takeover from <原持有者>`。
+- `settle` 結案沒被採用的那幾列：留言 `NOTED`、被取代 `SUPERSEDED`、回給使用者後 `CLOSED`；`--key` 是隔離區的來源鍵時 `CLOSED` 代表確認是垃圾，之後不再提起。已被採用的要用 `advance`，exit 1。
+- `status` 列出還沒結束的：只有 `ok`、`legacy` 的 `RECORDED` 回覆超過 `--late-min` 分才標「沒交出去」，留言另計 `notes=`；`PLANNED / QUEUED / CLAIMED / RECONCILE` 超過 `--stuck-min` 分標「收到但卡住」；版本已不能做、2.1 沒有持有者的領取另有提示。`receipts_pending` 算所有還在等回條的回覆（含已採用的）。最後一行 `CHOICE_RECONCILE: open= not_handed= stuck= receipts_pending= notes= reconcile= quarantined= clear=yes|no states= (shadow: hints only)`，一律 exit 0；沒有帳本也 exit 0。`status` 打開 2.1 的帳本時也會升級它（見下），不是唯讀。`--json` 只印一份 JSON（`schema: dw-choice-status/2`，摘要行在 `summary`），沒有帳本、帳本壞了也一樣。
+- 帳本檔壞了、壞 `--now`、資料夾不存在：`register` 以外的指令只印 `CHOICE_RECONCILE: SHADOW_ERROR <原因>`，exit 0（`status --json` 印成一份 JSON）；`register` exit 2。`publish` 找不到快照、版本不對是 `REFUSED`，exit 1。帳本被另一個總監鎖住超過 `--busy-timeout`（預設 5 秒）：每個指令都印 `CHOICE_RECONCILE: BUSY <原因>`，exit 1（`status --json` 印一份 `"busy": true` 的 JSON），什麼都沒改，稍後重跑。只有 `MOVED`、`PLANNED`、`SETTLED`、`PUBLISHED` 代表狀態真的改了。
+- 2.1 的帳本第一次被打開時自動升級（`PRAGMA user_version` 2）：先在升級的鎖內備份：複製到暫存檔，`PRAGMA quick_check` 通過、確定是 2.1 的帳本，才取名 `<帳本>.v210.bak`；這個名字已有檔案（例如上次留下的空檔或半截檔）就改用 `<帳本>.v210.bak.<UTC 時間>`，不覆寫。備份失敗就不升級，原帳本不動。之後補欄位和新表，每題最新一版記成現行版（來源 `backfill-2.1`），舊回覆補冪等鍵，已領取的世代記 1、持有者照留（2.1 沒記持有者的仍是空的，要先接手到 `RECONCILE`）。升級後 2.1 版工具不保證能讀。
+- 仍是 shadow：只提示、不擋其他工具；讀 db 和寫回條仍由總監用 `ArtifactData` 做，本工具不連網。
 
 ## selftest.py
 
