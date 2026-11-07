@@ -995,6 +995,21 @@ def test_purpose():
             failures.append(f"CHANGELOG {version}: no 對齊初衷 line (PURPOSE.md, 改規則前的檢查)")
 
 
+def test_readme_prompt_first():
+    """2.1.0 (PO, via the Director): README opens with the start prompt; its text block comes before "## 這是什麼",
+    and the two versioned guard sections are one section whose heading has no version."""
+    global total
+    text = (TOOLS.parent / "README.md").read_text(encoding="utf-8")
+    total += 1
+    prompt = text.find("```text\n你是這個專案的「總監」")
+    what = text.find("\n## 這是什麼")
+    if prompt < 0 or what < 0 or prompt > what:
+        failures.append("README: the start prompt text block must come before '## 這是什麼'")
+    total += 1
+    if "\n## 防護：哪些真的擋、哪些只提醒\n" not in text or re.search(r"^#+ .*（\d+\.\d+\.\d+）", text, re.M):
+        failures.append("README: one guard section '## 防護：哪些真的擋、哪些只提醒' without a version in the heading")
+
+
 def test_chat_to_product(tmp):
     """2.0.0 (PURPOSE aim 8): mode choice first, a locked BRIEF that orders trace to, and a choice page for A/B picks."""
     global total
@@ -5565,6 +5580,7 @@ def main():
         guarded(test_dispatch_plan_rule)
         guarded(test_metrics_run, tmp)
         guarded(test_status_po_hint, tmp)
+        guarded(test_readme_prompt_first)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     for failure in failures:
