@@ -936,7 +936,7 @@ def audit(log, call, decision, rule):
         spec = importlib.util.spec_from_file_location("audit_log", pathlib.Path(__file__).with_name("audit_log.py"))
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        module.append_entry(log, module.decision_entry(call, decision, rule))
+        module.append_entry(module.expand(log), module.decision_entry(call, decision, rule))
     except Exception:  # noqa: BLE001 - the log is a record, never a reason to block or allow
         pass
 

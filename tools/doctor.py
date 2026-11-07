@@ -286,8 +286,13 @@ def main():
     elif len(logs) != 1:
         item("MISSING", "audit_log", f"the hooks name {len(logs)} logs; wanted one")
     else:
-        log = pathlib.Path(logs.pop())
-        if not log.exists():
+        try:
+            log = pathlib.Path(load("audit_log").expand(logs.pop(), repo))  # {worktree} / {container} as the hook does
+        except ValueError as error:
+            log, problem = None, str(error)
+        if log is None:
+            item("MISSING", "audit_log", problem)
+        elif not log.exists():
             item("CONFIGURED_NOT_VERIFIED", "audit_log", f"hooks set; {log.as_posix()} has no entries yet")
         else:
             done = subprocess.run([sys.executable, "-I", "-X", "utf8", str(HERE / "audit_log.py"), "verify", "--log", str(log)],

@@ -2632,6 +2632,146 @@ def test_audit(tmp):
     expect("setup plain --hooks keeps --audit", "setup_project_settings.py", 0, "--repo", wt, "--only-this", "--hooks", says="OK")
 
 
+def test_audit_names(tmp):
+    """K6: {worktree} and {container} in the log path, filled in when the command runs; one chain per file."""
+    global total
+    folder = tmp / "audit_names"
+    folder.mkdir()
+    spec = importlib.util.spec_from_file_location("audit_log_names", TOOLS / "audit_log.py")
+    audit = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(audit)
+    script = str(TOOLS / "audit_log.py")
+    ids = ["a1b2c3d4e5f6" + "0" * 52, "0f9e8d7c6b5a" + "1" * 52]
+    infos = []
+    for n, cid in enumerate(ids):
+        info = folder / f"mountinfo{n}"
+        info.write_text(f"1 0 0:1 / / rw - overlay overlay rw\n2 1 8:1 /var/lib/docker/containers/{cid}/hostname "
+                        f"/etc/hostname rw - ext4 /dev/sda1 rw\n", encoding="utf-8")
+        infos.append(info)
+    nothing = folder / "absent"
+
+    def check(name, ok, detail=""):
+        global total
+        total += 1
+        if not ok:
+            failures.append(f"audit names {name}: {detail}")
+
+    def env(**extra):
+        out = {k: v for k, v in os.environ.items() if k not in ("DW_WORKER_NAME", "CLAUDE_PROJECT_DIR")}
+        out.update(extra)
+        return out
+
+    def tool(*args, cwd=None, stdin="", **extra):
+        return subprocess.run([sys.executable, "-I", "-X", "utf8", *map(str, args)], env=env(**extra), cwd=cwd,
+                              input=stdin, capture_output=True, encoding="utf-8")
+
+    check("container ID from mountinfo is its first 12 characters", audit.container_id(infos[0], nothing) == "a1b2c3d4e5f6")
+    check("no mountinfo and no /.dockerenv gives host", audit.container_id(nothing, nothing) == "host")
+    marker = folder / "dockerenv"
+    marker.write_text("", encoding="utf-8")
+    got = audit.container_id(nothing, marker)
+    check("/.dockerenv without an ID in mountinfo gives the host name", got not in ("", "host")
+          and all(c.isalnum() or c in "._-" for c in got), got)
+    saved = os.environ.get("DW_WORKER_NAME")
+    made = set()
+    try:
+        os.environ["DW_WORKER_NAME"] = "w/1 x"
+        check("DW_WORKER_NAME wins and is made safe", audit.worker_name(folder) == "w_1_x", audit.worker_name(folder))
+        os.environ.pop("DW_WORKER_NAME")
+        check("without DW_WORKER_NAME the folder name is used", audit.worker_name(folder) == "audit_names")
+        # the same name in two containers, and two names in one container: four files, four chains
+        for name in ("w1", "w2"):
+            os.environ["DW_WORKER_NAME"] = name
+            for info in infos:
+                path = audit.expand(folder / "logs" / "{worktree}-{container}.jsonl", mountinfo=info, dockerenv=nothing)
+                for i in range(3):
+                    audit.append_entry(path, audit.hook_entry({"tool_name": "Bash", "tool_input": {"n": i}}))
+                made.add(path)
+    finally:
+        if saved is None:
+            os.environ.pop("DW_WORKER_NAME", None)
+        else:
+            os.environ["DW_WORKER_NAME"] = saved
+    names = sorted(pathlib.Path(p).name for p in made)
+    check("two names x two containers give four files", names == ["w1-0f9e8d7c6b5a.jsonl", "w1-a1b2c3d4e5f6.jsonl",
+          "w2-0f9e8d7c6b5a.jsonl", "w2-a1b2c3d4e5f6.jsonl"], str(names))
+    for path in sorted(made):
+        expect(f"audit names {pathlib.Path(path).name} is its own chain", "audit_log.py", 0, "verify", "--log", path,
+               says=["entries=3", "head_seq=3", " OK"])
+    try:
+        audit.expand(folder / "{user}.jsonl")
+        check("an unknown placeholder is refused", False, "no error")
+    except ValueError as error:
+        check("an unknown placeholder is refused", "{user}" in str(error), str(error))
+    check("a path without placeholders is left as it is", audit.expand("x/a.jsonl") == "x/a.jsonl")
+    check("only= fills in just the named ones",
+          audit.expand("{worktree}-{container}", folder, only=("worktree",)) == "audit_names-{container}")
+
+    # the command line fills them in as it runs
+    here = audit.container_id()
+    call = json.dumps({"hook_event_name": "PostToolUse", "tool_name": "Read", "tool_input": {"file_path": "a"}, "tool_response": "x"})
+    pattern = folder / "cli" / "{worktree}-{container}.jsonl"
+    want = folder / "cli" / f"cli1-{here}.jsonl"
+    done = tool(script, "append", "--log", pattern, stdin=call, DW_WORKER_NAME="cli1")
+    check("append writes the filled-in file", done.returncode == 0 and want.is_file(), done.stderr + str(want))
+    done = tool(script, "verify", "--log", pattern, DW_WORKER_NAME="cli1")
+    check("verify reads the same filled-in file", done.returncode == 0 and f"file={want.resolve().as_posix()}" in done.stdout,
+          done.stdout)
+    done = tool(script, "append", "--log", pattern, cwd=folder, stdin=call)
+    check("without DW_WORKER_NAME append uses the current folder name",
+          done.returncode == 0 and (folder / "cli" / f"audit_names-{here}.jsonl").is_file(), done.stderr)
+    bad = folder / "cli" / "{user}.jsonl"
+    done = tool(script, "append", "--log", bad, stdin=call)
+    check("append with an unknown placeholder exits 1 and names it", done.returncode == 1 and "{user}" in done.stderr
+          and not list((folder / "cli").glob("*user*")), done.stderr)
+    fake_key = "gh" + "p_" + "Z4k" * 12  # built at run time: nothing key-shaped in the source
+    bash = json.dumps({"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": {"command": "x"},
+                       "tool_response": {"stdout": "out " + fake_key, "stderr": "", "interrupted": False, "isImage": False}})
+    done = tool(script, "append", "--log", bad, stdin=bash)
+    check("append with an unknown placeholder still returns the masked output", done.returncode == 0
+          and "[MASKED:github_token]" in done.stdout and fake_key not in done.stdout, done.stdout + done.stderr)
+    for cmd in ("verify", "head"):
+        expect(f"audit names {cmd} with an unknown placeholder", "audit_log.py", 2, cmd, "--log", bad, says=["NOT_RUN", "{user}"])
+    expect("audit names cite with an unknown placeholder", "audit_log.py", 2, "cite", "--log", bad, "--from", 1, "--to", 1,
+           says=["NOT_RUN", "{user}"])
+
+    # hook_guard --audit fills them in too
+    push = json.dumps({"tool_name": "Bash", "tool_input": {"command": "git push origin main"}})
+    done = tool(TOOLS / "hook_guard.py", "--rules", TOOLS / "guard_rules.json", "--profile", "worker",
+                "--audit", folder / "guard" / "{worktree}-{container}.jsonl", stdin=push, DW_WORKER_NAME="g1")
+    written = folder / "guard" / f"g1-{here}.jsonl"
+    rows = [json.loads(x) for x in written.read_text(encoding="utf-8").splitlines()] if written.is_file() else []
+    check("hook_guard --audit writes its decision to the filled-in file", done.returncode == 2 and len(rows) == 1
+          and rows[0]["kind"] == "decision" and not list((folder / "guard").glob("*{*")), str(rows))
+
+    # setup fills in {worktree}, keeps {container} for the hook, and refuses an unknown placeholder
+    wt = folder / "wt"
+    wt.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=wt, check=True)
+    (wt / ".git" / "info" / "exclude").write_text(".claude/settings.local.json\n", encoding="utf-8")
+    per = (folder / "logs2" / "{worktree}-{container}.jsonl").as_posix()
+    done = tool(TOOLS / "setup_project_settings.py", "--repo", wt, "--only-this", "--audit-log", per, "--apply")
+    check("setup writes the {container} path", done.returncode == 0 and "SET" in done.stdout, done.stdout[-300:] + done.stderr)
+    data = json.loads((wt / ".claude" / "settings.local.json").read_text(encoding="utf-8"))
+    wanted = (folder / "logs2").resolve().as_posix() + "/wt-{container}.jsonl"
+    command = data["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+    check("setup fills in {worktree} and leaves {container} for the hook", f'append --log "{wanted}"' in command, command)
+    done = tool(TOOLS / "setup_project_settings.py", "--repo", wt, "--only-this", "--audit-log", (folder / "{user}.jsonl").as_posix())
+    check("setup refuses an unknown placeholder", done.returncode == 1 and "{user}" in done.stderr, done.stdout[-200:] + done.stderr)
+
+    # doctor fills them in the same way before it looks for the file
+    done = tool(TOOLS / "doctor.py", "--repo", wt)
+    line = next((x for x in done.stdout.splitlines() if " audit_log: " in x), "")
+    check("doctor: the filled-in file has no entries yet", line.startswith("CONFIGURED_NOT_VERIFIED")
+          and line.endswith(f"wt-{here}.jsonl has no entries yet"), done.stdout[-600:])
+    target = pathlib.Path(wanted.replace("{container}", here))
+    audit.append_entry(target, audit.hook_entry({"tool_name": "Read", "tool_input": {}}))
+    done = tool(TOOLS / "doctor.py", "--repo", wt)
+    line = next((x for x in done.stdout.splitlines() if " audit_log: " in x), "")
+    check("doctor verifies the filled-in file", line.startswith("ENFORCED") and f"file={target.resolve().as_posix()}" in line,
+          done.stdout[-600:])
+
+
 FAKE_CLAUDE = '''import json, os, sys, time
 mode = os.environ.get("FAKE_REVIEW_MODE", "block")
 with open(os.environ["FAKE_REVIEW_LOG"], "a", encoding="utf-8") as out:
@@ -2830,7 +2970,7 @@ def test_doctor(tmp):
     setup = ("--repo", wt, "--only-this", "--pause-flag", pause)
     expect("setup plain first", "setup_project_settings.py", 0, *setup, "--apply", says="SET")
     expect("setup --runtime-guard default log is in the git common dir", "setup_project_settings.py", 1, *setup,
-           "--runtime-guard", says=["runtime_guard=on", "guard_profile=worker", "director-audit/{worktree}.jsonl",
+           "--runtime-guard", says=["runtime_guard=on", "guard_profile=worker", "director-audit/{worktree}-{container}.jsonl",
                                     "env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"])
     guard = setup + ("--runtime-guard", "--audit-log", (folder / "audit" / "{worktree}.jsonl").as_posix())
     expect("setup --runtime-guard written and tested", "setup_project_settings.py", 0, *guard, "--apply",
@@ -3115,6 +3255,7 @@ def main():
         test_pause(tmp)
         test_auto_pause(tmp)
         test_audit(tmp)
+        test_audit_names(tmp)
         test_review(tmp)
         test_doctor(tmp)
         test_container(tmp)
