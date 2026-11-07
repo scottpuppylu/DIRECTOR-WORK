@@ -457,11 +457,12 @@ def auto_pause(flag, conf, rule):
                 continue
         if len(recent) < conf["denies"]:
             if len(recent) * 4 < len(state.read_text(encoding="utf-8", errors="replace").splitlines()):
-                state.write_text("".join(f"{now.timestamp():.3f} {r}\n" for r in recent), encoding="utf-8", newline="\n")
+                with open(state, "w", encoding="utf-8", newline="\n") as out:  # Path.write_text(newline=) needs 3.10
+                    out.write("".join(f"{now.timestamp():.3f} {r}\n" for r in recent))
             return None
         why = f"auto: {len(recent)} denies in {conf['window_s']}s ({' '.join(recent)})"
-        pathlib.Path(flag).write_text(f"PAUSE by hook_guard at {now.isoformat(timespec='seconds')}: {why}\n",
-                                      encoding="utf-8", newline="\n")
+        with open(flag, "w", encoding="utf-8", newline="\n") as out:
+            out.write(f"PAUSE by hook_guard at {now.isoformat(timespec='seconds')}: {why}\n")
         state.write_text("", encoding="utf-8")
         return why
     except OSError:

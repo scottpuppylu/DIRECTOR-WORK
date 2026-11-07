@@ -172,7 +172,8 @@ def main():
         if not why:
             sys.exit("pause_ctl on: --reason is empty")
         flag.parent.mkdir(parents=True, exist_ok=True)
-        flag.write_text(f"PAUSE by {by} at {stamp}: {why}\n", encoding="utf-8", newline="\n")
+        with open(flag, "w", encoding="utf-8", newline="\n") as f:  # Path.write_text(newline=) needs 3.10
+            f.write(f"PAUSE by {by} at {stamp}: {why}\n")
         log(log_path, f"PAUSE on by={by} at={stamp} reason={why}")
         print(f"PAUSE: on by {by} at {stamp}: {why}")
         return 0

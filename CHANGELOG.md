@@ -21,6 +21,7 @@
 - `tools/container/`：Dockerfile（base 以 digest 鎖定、Claude Code 鎖版本、不自動更新）、entrypoint（以 root 設防火牆後 `setpriv` 成 `dw`，丟掉所有 capability、no_new_privs）、`init_firewall.sh`（只放行 `DW_ALLOW_DOMAINS` 名稱的 443，啟動時解析；IPv6 全擋）、`run_worker.sh`（worktree 可寫、DIRECTOR 唯讀、`.git` 的 `hooks/`、`config`、`worktrees/` 唯讀，不設 GIT_DIR，`gc.auto=0`）。
 - README 新增「執行期防護：哪些真的擋、哪些只是提醒」一節；`docs/10` 加第 23 條（只印環境變數名稱，不印值）；`docs/11` 補容器 worker 的開法。
 - `selftest.py` 加上面各項的正反案例（524 → 1,326 項）。
+- 修正：Python 3.9 相容。`Path.write_text(newline=)` 要 3.10，3.9 的自動暫停會崩潰；四處改用 `open(..., newline="\n")`，selftest 靜態掃 `tools/*.py` 不得再出現。
 
 對齊初衷：
 1. 幫到誰：worker 在 bypass 模式下能做的事太多，PO 看不到它做了什麼。批次 1 交付後總監的對抗測試找到的繞路（git alias、send-pack、shell 寫規則檔、Windows 的 gh hosts.yml、暫停中的重導向、`{}>`）先重現才修，修完重跑。

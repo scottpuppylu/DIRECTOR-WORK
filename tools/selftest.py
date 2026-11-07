@@ -1145,6 +1145,29 @@ def test_shared_code():
         failures.append("parse_list differs between gate_check.py and scope_check.py; keep the two copies identical")
 
 
+def newline_kw_calls(source):
+    """Lines of Path.write_text(newline=) (3.10+) and Path.read_text(newline=) (3.13+) calls, also split over lines."""
+    import ast
+    return [node.lineno for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr in ("write_text", "read_text") and any(k.arg == "newline" for k in node.keywords)]
+
+
+def test_py39_newline():
+    """1.1.0 fix: the tools run on Python 3.9, where Path.write_text has no newline= (CI 3.9 crash in auto-pause)."""
+    global total
+    total += 1
+    sample = 'p.write_text(\n    "x",\n    encoding="utf-8",\n    newline="\\n",\n)\nq.read_text(encoding="utf-8")\n'
+    if newline_kw_calls(sample) != [1]:
+        failures.append(f"py39 newline scan: detector missed the multi-line sample: {newline_kw_calls(sample)}")
+    for tool in sorted(TOOLS.glob("*.py")):
+        total += 1
+        hits = newline_kw_calls(tool.read_text(encoding="utf-8"))
+        if hits:
+            failures.append(f"py39 newline scan: {tool.name} line(s) {hits} pass newline= to Path.write_text/read_text;"
+                            " use open(path, 'w', encoding='utf-8', newline='\\n')")
+
+
 def test_hook_protect(tmp):
     """v0.13: --protect blocks Write / Edit on DIRECTOR/orders/** and DIRECTOR_LOG.md; setup migrates old entries."""
     global total
@@ -2467,7 +2490,8 @@ def test_audit(tmp):
         return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
     def write(path, entries):
-        path.write_text("".join(audit.canonical(e) + "\n" for e in entries), encoding="utf-8", newline="\n")
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:  # Path.write_text(newline=) needs 3.10
+            fh.write("".join(audit.canonical(e) + "\n" for e in entries))
 
     def copy(name, change=None):
         target = folder / name
@@ -3081,6 +3105,7 @@ def main():
         test_scope(tmp)
         test_submodule_ignore(tmp)
         test_shared_code()
+        test_py39_newline()
         test_vocabulary()
         test_must_read_size()
         test_must_read_reasons()
