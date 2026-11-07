@@ -2207,6 +2207,325 @@ def test_order_binding(tmp):
         failures.append("run --order: a refused run still wrote a record")
 
 
+BRIEF_V1 = """# 專案初衷卡
+- 狀態：LOCKED
+- 版次：1
+
+| 編號 | 類別 | 內容（使用者的話） | 怎麼算做到 |
+|---|---|---|---|
+| B-1 | 給誰 | 給櫃台 | 打開就能看到表 |
+| B-2 | 一定要有 | 匯出姓名 | CSV 只有 name 欄 |
+
+## 不問使用者、由總監決定的事
+- DD-1 用標準函式庫
+"""
+BRIEF_V2 = BRIEF_V1.replace("版次：1", "版次：2").replace("匯出姓名 | CSV 只有 name 欄",
+                                                     "匯出姓名與總額 | CSV 必須有 name,total 兩欄")
+
+
+def brief_print(*cells):
+    """The fingerprint as WO-DW-210-W2 P-1 defines it, written here apart from gate_check.py."""
+    data = "brief-row-v1\n" + json.dumps(list(cells), ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(data.encode("utf-8")).hexdigest()
+
+
+B2_V1 = brief_print("B-2", "一定要有", "匯出姓名", "CSV 只有 name 欄")
+B2_V2 = brief_print("B-2", "一定要有", "匯出姓名與總額", "CSV 必須有 name,total 兩欄")
+
+
+def pinned_order(pins, rev=1, traces="B-2, DD-1", column=False, revision=1):
+    """TYPED_ORDER tracing brief rows and pinning their fingerprints (pins None: an order from before 2.1)."""
+    text = TYPED_ORDER.format(base="abc123").replace("TRACES_TO      = DD-1", f"TRACES_TO      = {traces}").replace(
+        "REVISION       = 1", f"REVISION       = {revision}")
+    if pins is not None:
+        text = text.replace(f"TRACES_TO      = {traces}\n", f"TRACES_TO      = {traces}\nBRIEF_REVISION = {rev}\n"
+                            f"BRIEF_FINGERPRINTS_V1 = {json.dumps(pins)}\n")
+    if column:
+        text = (text.replace("| ID | 類型 | 要求 | 驗證方法 | 預期 |\n|---|---|---|---|---|\n",
+                             "| ID | 類型 | 要求 | 驗證方法 | 預期 | 追溯 |\n|---|---|---|---|---|---|\n")
+                .replace("| exit 0 |\n", "| exit 0 | B-2 |\n").replace("| no WRONG answer |\n", "| no WRONG answer | B-1 |\n")
+                .replace("| PO says yes |\n", "| PO says yes | DD-1 |\n"))
+    return text
+
+
+def test_brief_fingerprint(tmp):
+    """2.1 (WO-DW-210-W2 P-1 / P-4, 題1 F-1 / F-3, shadow): an order pins the brief rows it answers with
+    BRIEF_FINGERPRINTS_V1; `--brief` makes a changed or removed row a `~ BRIEF_STALE` note and an unclear basis
+    `~ BRIEF_UNCONFIRMED` (依據未確認). The exit code never changes, and an order without the new fields passes as
+    before."""
+    global total
+    base = tmp / "brief_fingerprint"
+    base.mkdir()
+
+    def put(name, text, raw=False):
+        path = base / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(text if raw else text.encode("utf-8"))
+        return path
+
+    brief = put("BRIEF.md", BRIEF_V1)
+    code, out = run("gate_check.py", "--brief", brief)
+    total += 1
+    shown = re.search(r"^  BRIEF_FINGERPRINTS_V1 = (\{.*\})$", out, re.M)
+    if code != 0 or not shown or json.loads(shown.group(1)) != {
+            "B-1": brief_print("B-1", "給誰", "給櫃台", "打開就能看到表"), "B-2": B2_V1} or "  BRIEF_REVISION = 1" not in out:
+        failures.append(f"brief: --brief alone does not print the P-1 fingerprints: {code} {out.strip()[-300:]}")
+    spaced = put("spaced.md", BRIEF_V1.replace("| B-2 | 一定要有 |", "|  B-2  |  一定要有|").replace("\n", "\r\n"))
+    expect("brief: cell spaces and CRLF keep the fingerprint", "gate_check.py", 0, "--brief", spaced, says=B2_V1)
+    expect("brief: ** and backticks around the ID keep the fingerprint", "gate_check.py", 0, "--brief",
+           put("bold.md", BRIEF_V1.replace("| B-2 |", "| **`B-2`** |")), says=B2_V1)
+    expect("brief: without a 編號 table it fails", "gate_check.py", 1, "--brief", put("none.md", "# 初衷卡\n- 狀態：LOCKED\n"),
+           says="no table whose header starts with 編號")
+    expect("brief: a fenced example row is not a row", "gate_check.py", 0, "--brief",
+           put("fenced.md", BRIEF_V1 + "```\n| 編號 | 類別 | 內容 | 怎麼算做到 |\n| B-9 | x | y | z |\n```\n"), lacks='"B-9"')
+
+    old = put("WO-001-old.md", TYPED_ORDER.format(base="abc123"))
+    _, plain = run("gate_check.py", "--order", old)
+    expect("brief: an order from before 2.1 passes with --brief, no brief note", "gate_check.py", 0, "--order", old,
+           "--brief", put("BRIEF_V2.md", BRIEF_V2), says=plain.strip(), lacks=["BRIEF_STALE", "BRIEF_UNCONFIRMED"])
+
+    def case(name, order, brief_text, says=None, lacks=None, *extra):
+        expect(f"brief: {name}", "gate_check.py", 0, "--order", put(f"{name}/WO-001-parser.md", order), "--brief",
+               put(f"{name}/BRIEF.md", brief_text), *extra, says=["OK   order"] + ([says] if isinstance(says, str) else says or []),
+               lacks=lacks)
+
+    pins = {"B-2": B2_V1}
+    case("unchanged", pinned_order(pins), BRIEF_V1, None, ["BRIEF_STALE", "BRIEF_UNCONFIRMED"])
+    case("only the 版次 raised", pinned_order(pins), BRIEF_V1.replace("版次：1", "版次：2"), None, "BRIEF_STALE")
+    case("changed row (F-1)", pinned_order(pins), BRIEF_V2,
+         "~ BRIEF_STALE WO-001 B-2 WHOLE_ORDER: the brief row changed since the order pinned it (BRIEF_REVISION 1, brief "
+         "版次 2): 舊條件驗過，新條件待重驗", "同版內容有變")
+    case("changed row, 追溯 column", pinned_order(pins, column=True), BRIEF_V2, "~ BRIEF_STALE WO-001 B-2 AC-1: ")
+    case("changed row, same 版次 (F-3)", pinned_order(pins), BRIEF_V2.replace("版次：2", "版次：1"),
+         "同版內容有變: the 版次 was not raised: 舊條件驗過，新條件待重驗")
+    case("row removed", pinned_order(pins), BRIEF_V1.replace("| B-2 | 一定要有 | 匯出姓名 | CSV 只有 name 欄 |\n", ""),
+         "~ BRIEF_STALE WO-001 B-2 WHOLE_ORDER: B-2 is no longer in ")
+    case("row listed twice", pinned_order(pins), BRIEF_V1.replace("| B-2 |", "| B-2 | x | y | z |\n| B-2 |"),
+         "~ BRIEF_UNCONFIRMED WO-001 B-2: 依據未確認: ", "BRIEF_STALE")
+    case("row not 4 cells", pinned_order(pins), BRIEF_V1.replace("CSV 只有 name 欄 |", "CSV 只有 name 欄 | 多一格 |"),
+         "~ BRIEF_UNCONFIRMED WO-001 B-2: 依據未確認: ")
+    case("no pins but traces B-2", pinned_order(None), BRIEF_V1,
+         "~ BRIEF_UNCONFIRMED WO-001 B-2: 依據未確認: the order has no BRIEF_FINGERPRINTS_V1")
+    case("traced row without a pin", pinned_order(pins, traces="B-1, B-2, DD-1"), BRIEF_V1,
+         "~ BRIEF_UNCONFIRMED WO-001 B-1: 依據未確認: the order traces B-1 but BRIEF_FINGERPRINTS_V1 has no fingerprint")
+    case("malformed pins", pinned_order(None).replace("TRACES_TO      = B-2, DD-1\n", "TRACES_TO      = B-2, DD-1\n"
+         "BRIEF_REVISION = one\nBRIEF_FINGERPRINTS_V1 = {B-2: abc}\n"), BRIEF_V1,
+         ["~ BRIEF_FINGERPRINTS_V1: not a JSON object", "~ BRIEF_REVISION: not a number (one)", "依據未確認"])
+    case("a draft is noted", pinned_order(pins), BRIEF_V1.replace("LOCKED", "DRAFT"), "does not say 狀態：LOCKED")
+
+    # BRIEF_LOCKED and the snapshot (P-4): atomic, kept on a retry, a draft refused; a log's lock is the basis
+    hist = base / "lock" / "DIRECTOR" / "brief-history"
+    locked = put("lock/DIRECTOR/BRIEF.md", BRIEF_V1)
+    code, out = run("gate_check.py", "--brief", locked, "--snapshot", hist)
+    line = re.search(r"^  (BRIEF_LOCKED rev=1 sha=[0-9a-f]{64} snapshot=brief-history/1-[0-9a-f]{64}\.md)$", out, re.M)
+    snaps = list(hist.glob("*")) if hist.is_dir() else []
+    total += 1
+    if code != 0 or not line or len(snaps) != 1 or snaps[0].read_bytes() != BRIEF_V1.encode("utf-8") or "(written)" not in out:
+        failures.append(f"brief: --snapshot does not write one snapshot and print the BRIEF_LOCKED line: {code} {out.strip()[-300:]}")
+    expect("brief: --snapshot again keeps the file", "gate_check.py", 0, "--brief", locked, "--snapshot", hist,
+           says="(already there, kept)")
+    total += 1
+    if len(list(hist.glob("*"))) != 1:
+        failures.append("brief: a retried --snapshot left a temp file or a second snapshot")
+    expect("brief: --snapshot refuses a draft", "gate_check.py", 2, "--brief", put("lock/draft.md", BRIEF_V2.replace("LOCKED", "DRAFT")),
+           "--snapshot", hist)
+    log = put("lock/DIRECTOR/DIRECTOR_LOG.md", "# DIRECTOR_LOG\n2026-11-08 10:00 +08:00 | "
+              + (line.group(1) if line else "BRIEF_LOCKED") + " | PO locked 版次 1\n")
+    order = put("lock/WO-001-parser.md", pinned_order(pins))
+    put("lock/DIRECTOR/BRIEF.md", BRIEF_V2.replace("LOCKED", "DRAFT"))
+    expect("brief: a draft after BRIEF_LOCKED is not the basis: the locked snapshot is", "gate_check.py", 0, "--order", order,
+           "--brief", locked, "--dispatch-log", log, says=["is not the latest BRIEF_LOCKED", "compared with the locked snapshot"],
+           lacks="BRIEF_STALE")
+    put("lock/DIRECTOR/DIRECTOR_LOG2.md", "> " + (line.group(1) if line else "BRIEF_LOCKED") + "\n")
+    expect("brief: a quoted BRIEF_LOCKED is not a lock", "gate_check.py", 0, "--order", order, "--brief", locked,
+           "--dispatch-log", base / "lock/DIRECTOR/DIRECTOR_LOG2.md", says=["the log has no BRIEF_LOCKED line", "BRIEF_STALE"])
+    put("lock/DIRECTOR/DIRECTOR_LOG3.md", (line.group(1) if line else "BRIEF_LOCKED").replace("brief-history/", "gone/") + "\n")
+    expect("brief: a lock whose snapshot is missing is 依據待確認", "gate_check.py", 0, "--order", order, "--brief", locked,
+           "--dispatch-log", base / "lock/DIRECTOR/DIRECTOR_LOG3.md", says="BRIEF_UNCONFIRMED: ")
+    expect("brief: --order-history needs --match", "gate_check.py", 2, "--order", order, "--order-history", hist)
+    expect("brief: --snapshot needs --brief or --hash", "gate_check.py", 2, "--order", order, "--snapshot", hist)
+    code, out = run("gate_check.py", "--hash", order, "--snapshot", base / "lock" / "orders")
+    total += 1
+    if code != 0 or not list((base / "lock" / "orders").glob("WO-001-rev1-*.md")):
+        failures.append(f"brief: --hash --snapshot does not keep the order as <ID>-rev<n>-<sha>.md: {out.strip()[-200:]}")
+
+
+def test_brief_carry(tmp):
+    """2.1 (題1 F-4, shadow): --match with --brief: a Strict pass stays a pass with `~ BRIEF_STALE` on a changed row,
+    and evidence EVIDENCE_EQUIVALENT carries over is compared with the fingerprints the old order (--order-history,
+    found by hash) pinned. A verdict's optional ORDER_SHA256 / REPORT_SHA256 are compared with the files."""
+    head = "0123456789abcdef0123456789abcdef01234567"
+
+    def case(name, code, says=None, lacks=None, old_pins=None, new_pins=None, brief_text=BRIEF_V2, history=True,
+             equivalent=True, verdict=None):
+        folder = tmp / "brief_carry" / str(len(list((tmp / "brief_carry").glob("*"))) if (tmp / "brief_carry").is_dir() else 0)
+        (folder / "history").mkdir(parents=True)
+        def text_of(rev, pins):
+            return pinned_order(pins, column=True, revision=rev).replace("GOVERNANCE     = Standard", "GOVERNANCE     = Strict")
+        old_text, new_text = text_of(1, old_pins), text_of(2, new_pins)
+        old_sha, new_sha = (hashlib.sha256(t.encode("utf-8")).hexdigest() for t in (old_text, new_text))
+        if history:
+            (folder / "history" / f"WO-001-rev1-{old_sha}.md").write_bytes(old_text.encode("utf-8"))
+        path = folder / "WO-001-parser.md"
+        path.write_bytes(new_text.encode("utf-8"))
+        evidence_file(folder, "e.json", head, order={"id": "WO-001", "rev": 1 if equivalent else 2,
+                                                     "sha": old_sha if equivalent else new_sha})
+        (folder / "log.md").write_text(f"# DIRECTOR_LOG\nDISPATCH WO-001 rev=2 sha={new_sha}\n"
+                                       + (f"EVIDENCE_EQUIVALENT WO-001 rev=1 sha={old_sha} to rev=2\n" if equivalent else ""),
+                                       encoding="utf-8")
+        (folder / "BRIEF.md").write_text(brief_text, encoding="utf-8")
+        report = folder / "report.md"
+        report.write_text(match_report(list(ACCEPTANCE.values()), "PARTIAL", new_sha).replace(
+            "/ c / d0d0d0d / yes", f"/ c / {head} / yes", 1).replace("REVISION 1", "REVISION 2", 1), encoding="utf-8")
+        args = ["--match", report, path, "--evidence-dir", folder, "--dispatch-log", folder / "log.md", "--candidate", head,
+                "--brief", folder / "BRIEF.md"] + (["--order-history", folder / "history"] if history else [])
+        if verdict is not None:
+            (folder / "verdict.md").write_text(verdict(sha=new_sha, report=report), encoding="utf-8")
+            args += ["--verdict", folder / "verdict.md"]
+        expect(f"brief carry: {name}", "gate_check.py", code, *args, says=says, lacks=lacks)
+
+    v1, v2 = {"B-2": B2_V1}, {"B-2": B2_V2}
+    case("bound to this revision, brief changed: still a pass", 0, ["OK   match", "~ BRIEF_STALE WO-001 B-2 AC-1: "], "  - ",
+         old_pins=v1, new_pins=v1, equivalent=False)
+    case("carried over, old condition (F-4)", 0, ["OK   match",
+         "~ BRIEF_STALE WO-001 B-2 AC-1: e.json was recorded for REVISION 1 under the old condition of B-2 and carried over "
+         "by EVIDENCE_EQUIVALENT: 舊條件驗過，新條件待重驗"], "  - ", old_pins=v1, new_pins=v2)
+    case("carried over, same condition", 0, "OK   match", ["BRIEF_STALE", "沿用依據未確認", "  - "], old_pins=v2, new_pins=v2)
+    case("carried over, old order not kept", 0, ["OK   match", "沿用依據未確認"], "  - ", old_pins=v1, new_pins=v2,
+         history=False)
+    case("carried over, old order pinned nothing", 0, ["OK   match", "pinned no fingerprint for B-2: 沿用依據未確認"], "  - ",
+         old_pins=None, new_pins=v2)
+
+    def verdict_text(sha, report, order_sha=None, report_sha=None):
+        report_sha = report_sha or hashlib.sha256(report.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+        lines = (f"ORDER: WO-001-parser.md REVISION 2\nCANDIDATE_HEAD: {head}\nORDER_SHA256: {order_sha or sha}\n"
+                 f"REPORT_SHA256: {report_sha}\n")
+        return lines + VERDICT.format(verdict="PASS", step="REQUEST_OWNER_AUTHORIZATION")
+
+    case("verdict record matches", 0, "OK   verdict", "VERDICT_RECORD", old_pins=v2, new_pins=v2, verdict=verdict_text)
+    case("verdict record names another report", 0, ["OK   verdict", "~ VERDICT_RECORD: REPORT_SHA256 eeeeeeeeeeee is not the "
+         "report's hash now"], old_pins=v2, new_pins=v2,
+         verdict=lambda sha, report: verdict_text(sha, report, report_sha="e" * 64))
+
+
+def test_po_acceptance(tmp):
+    """2.1 (題4 P-2, shadow): PO_ACCEPTANCE.json binds the PO's reply to one product: candidate ID, commit, entry file,
+    manifest SHA-256 and the message refs. A record that does not bind is `~ UNBOUND_PO_REPLY`; the exit code is 0."""
+    base = tmp / "po_acceptance"
+    base.mkdir()
+    good = {"schema": "po-acceptance-v1", "candidate_id": "C-1", "commit": "a" * 40, "entry": "out/index.html",
+            "entry_sha256": "c" * 64, "manifest_sha256": "b" * 64, "offered_message_ref": "msg-10", "reply_ref": "msg-11",
+            "outcome": "accepted", "replied_at": "2026-11-08T10:00:00+08:00", "excerpt": "可以"}
+
+    def case(name, data, says, lacks=None, *extra):
+        path = base / f"{len(list(base.iterdir()))}.json"
+        path.write_text(data if isinstance(data, str) else json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        expect(f"po acceptance: {name}", "gate_check.py", 0, "--po-acceptance", path, *extra, says=says, lacks=lacks)
+
+    case("bound record", good, ["OK   po-acceptance", "~ PO_ACCEPTANCE C-1: aaaaaaaaaaaa out/index.html: 已驗收 (msg-11)"],
+         "UNBOUND_PO_REPLY")
+    case("bound record, --candidate", good, "~ PO_ACCEPTANCE C-1", "UNBOUND_PO_REPLY", "--candidate", "a" * 40)
+    case("records list, offered only", {"records": [dict(good, outcome=None, reply_ref=None)]}, "已送出，還沒回覆")
+    case("other candidate", good, "~ UNBOUND_PO_REPLY C-1: commit aaaaaaaaaaaa is not the --candidate", None,
+         "--candidate", "f" * 40)
+    case("no manifest", {k: v for k, v in good.items() if k != "manifest_sha256"},
+         "~ UNBOUND_PO_REPLY C-1: manifest_sha256 is not 64 hex digits")
+    case("outcome without reply", dict(good, reply_ref=""), "an outcome without reply_ref")
+    case("short commit", dict(good, commit="abc1234"), "commit is not 40 hex digits")
+    case("not JSON", "{", "~ UNBOUND_PO_REPLY file: not JSON")
+    expect("po acceptance: --candidate works with --po-acceptance only among the new flags", "gate_check.py", 2,
+           "--order", base / "none.md", "--candidate", "a" * 40)
+
+
+def test_trace_brief(tmp):
+    """2.1 (WO-DW-210-W2 P-2, 題1 F-1 / F-2, 題4 P-2): trace_report --brief adds 初衷卡三欄 (有人負責／這版有驗證紀錄／
+    你看過這個成品嗎) from the orders' fingerprints, the reports, PO_PRODUCT_REVIEW lines and PO_ACCEPTANCE records;
+    --decisions BRIEF.md alone no longer calls the brief's listed DD-1 missing. Without the new flags nothing changes."""
+    head = "0123456789abcdef0123456789abcdef01234567"
+    root = tmp / "trace_brief"
+    for name in ("orders", "reports"):
+        (root / name).mkdir(parents=True)
+
+    def put(name, text):
+        path = root / name
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    order = f"""# WO-001
+ISSUED_BY = Director 2026-11-08
+REVISION = 1
+TRACES_TO = B-2, DD-1, PO-01
+BRIEF_REVISION = 1
+BRIEF_FINGERPRINTS_V1 = {json.dumps({"B-2": B2_V1})}
+
+| ID | 類型 | 要求 | 驗證方法 | 預期 | 追溯 |
+|---|---|---|---|---|---|
+| AC-1 | AUTO | CSV 有姓名 | 跑檢查 | 有 name 欄 | B-2 |
+| AC-2 | PO | 檢視匯出成品 | 打開成品 | 使用者回覆 | B-2, PO-01 |
+"""
+    put("orders/WO-001.md", order)
+    put("reports/report.md", f"# TASK REPORT\nTASK_ID: WO-001 / export\nHEAD: {head}\nORDER: WO-001.md REVISION 1\n"
+        "RESULT: PARTIAL\nACCEPTANCE:\n| ID | 實際 | 證據 | 狀態 |\n|---|---|---|---|\n| AC-1 | exit 0 | e.json | PASS |\n"
+        "| AC-2 | waiting | — | PENDING_PO |\n")
+    brief = put("BRIEF.md", BRIEF_V1)
+    review = f"PO_PRODUCT_REVIEW WO-001 candidate={head[:12]} outcome=seen ref=msg-3 brief=B-2:{B2_V1}"
+    log = put("LOG.md", "# DIRECTOR_LOG\n2026-11-08 11:00 +08:00 | " + review + " | PO 看過匯出\n"
+              "PO_PRODUCT_REVIEW WO-001 candidate=zz outcome=maybe\n")
+    base = ("--orders", root / "orders", "--reports", root / "reports")
+    expect("trace brief: without --brief no brief section", "trace_report.py", 0, *base,
+           lacks=["初衷卡三欄", "BRIEF_STALE", "UNBOUND_PO_REPLY"])
+    expect("trace brief: three columns, brief as pinned", "trace_report.py", 0, *base, "--brief", brief, "--director-log", log,
+           says=["| 需求 | 內容 | 有人負責 | 這版有驗證紀錄 | 你看過這個成品嗎 |",
+                 "| B-1 | 給櫃台 | 沒有工單 | — | — |",
+                 "| B-2 | 匯出姓名 | WO-001 | WO-001：有（AC-1 PASS、AC-2 PENDING_PO） | WO-001：看過（msg-3） |",
+                 "## PO 回覆沒綁到成品（UNBOUND_PO_REPLY）\n- ", "candidate= is not a commit"], lacks="- BRIEF_STALE")
+    put("BRIEF.md", BRIEF_V2)
+    expect("trace brief: a changed row is not verified this version (F-1)", "trace_report.py", 0, *base, "--brief", brief,
+           "--director-log", log,
+           says=["| B-2 | 匯出姓名與總額 | WO-001 | WO-001：沒有：工單是照舊條件寫的，新條件待重驗 | "
+                 "WO-001：看過（msg-3），但當時是舊條件，新條件還沒看 |",
+                 "- BRIEF_STALE WO-001 B-2 AC-1,AC-2: "])
+    put("BRIEF.md", BRIEF_V1)
+    put("LOG2.md", review.replace(head[:12], "f" * 12) + "\n")
+    expect("trace brief: a review of another candidate is not this one", "trace_report.py", 0, *base, "--brief", brief,
+           "--director-log", root / "LOG2.md", says=f"WO-001：看過別的成品（ffffffffffff），這版（{head[:12]}）還沒看")
+    expect("trace brief: no review, no record", "trace_report.py", 0, *base, "--brief", brief, says="| WO-001：還沒看 |")
+    record = {"schema": "po-acceptance-v1", "candidate_id": "C-1", "commit": head, "entry": "out.csv", "manifest_sha256": "b" * 64,
+              "offered_message_ref": "msg-10", "reply_ref": "msg-11", "outcome": "accepted"}
+    put("ACC.json", json.dumps([record, dict(record, manifest_sha256="short")]))
+    expect("trace brief: a bound PO_ACCEPTANCE record answers 你看過", "trace_report.py", 0, *base, "--brief", brief,
+           "--acceptance", root / "ACC.json", says=["| WO-001：已接受（msg-11） |", "ACC.json #2：manifest_sha256 is not 64 hex"])
+    expect("trace brief: --acceptance alone lists unbound records", "trace_report.py", 0, *base, "--acceptance", root / "ACC.json",
+           says="## PO 回覆沒綁到成品（UNBOUND_PO_REPLY）\n- ", lacks="初衷卡三欄")
+    (root / "evidence").mkdir()
+    expect("trace brief: with --evidence-dir a PASS needs its evidence file", "trace_report.py", 0, *base, "--brief", brief,
+           "--evidence-dir", root / "evidence", says="WO-001：還沒有（AC-1 PASS 但證據檔找不到、AC-2 PENDING_PO）")
+    expect("trace brief: --director-log needs --brief", "trace_report.py", 2, *base, "--director-log", log)
+    expect("trace brief: a missing --brief file", "trace_report.py", 1, *base, "--brief", root / "gone.md", says="FAIL file not found")
+
+    # F-2: the brief lists the Director's decisions as `- DD-1 ...`; alone it no longer reports DD-1 missing
+    register = put("REGISTER.md", "| ID | 決定 |\n|---|---|\n| DD-1 | 用標準函式庫 |\n| PO-01 | 送出供使用者驗收 |\n")
+    expect("trace brief: --decisions BRIEF alone knows the listed DD-1 (F-2)", "trace_report.py", 0, *base, "--decisions", brief,
+           says=["## TRACES_TO 找不到的編號\n- WO-001: PO-01（--decisions 的表格沒有 PO 開頭的編號；",
+                 "請再加 --decisions DECISION_REGISTER.md）", "## 沒有工單的需求\n- B-1\n"],
+           lacks=["## TRACES_TO 找不到的編號\n- WO-001: DD-1", "## 沒有工單的需求\n- B-1\n- DD-1"])
+    expect("trace brief: --decisions BRIEF and the register find every ID", "trace_report.py", 0, *base, "--decisions", brief,
+           "--decisions", register, says="## TRACES_TO 找不到的編號\n- 無")
+    put("FENCED.md", "| 編號 | x |\n|---|---|\n| B-1 | a |\n```\n- DD-1 例子\n```\n")
+    expect("trace brief: a fenced list item is an example, not a decision", "trace_report.py", 0, *base, "--decisions",
+           root / "FENCED.md", says="- WO-001: DD-1（")
+
+    # the log's BRIEF_LOCKED is the basis: a draft after it is compared through the locked snapshot
+    hist = root / "brief-history"
+    _, out = run("gate_check.py", "--brief", brief, "--snapshot", hist)
+    line = re.search(r"^  (BRIEF_LOCKED .*)$", out, re.M)
+    put("LOG3.md", (line.group(1) if line else "BRIEF_LOCKED") + "\n")
+    put("BRIEF.md", BRIEF_V2.replace("LOCKED", "DRAFT"))
+    expect("trace brief: a draft after BRIEF_LOCKED is not the basis", "trace_report.py", 0, *base, "--brief", brief,
+           "--director-log", root / "LOG3.md", says=["compared with the locked snapshot", "| B-2 | 匯出姓名 | WO-001 | WO-001：有"],
+           lacks="- BRIEF_STALE")
+
+
 def test_trusted_rerun(tmp):
     """v0.13 (A06 A07): `verify --rerun` runs the order's approved check at the candidate commit, in a clean checkout,
     and only after the order matches its DISPATCH line. The record's command is compared, never run."""
@@ -4955,6 +5274,10 @@ def main():
         test_order_checks(tmp)
         test_preflight(tmp)
         test_order_binding(tmp)
+        test_brief_fingerprint(tmp)
+        test_brief_carry(tmp)
+        test_po_acceptance(tmp)
+        test_trace_brief(tmp)
         test_trusted_rerun(tmp)
         test_rerun_binding(tmp)
         test_trusted_isolation(tmp)

@@ -321,6 +321,13 @@ python -I -X utf8 gate_check.py --preflight <報告.md> <WO.md> --evidence-dir <
 - `--preflight 報告 工單`（可重複，只讀）：舊版本做的審查要照現在的 Strict 重審前，逐項列出缺什麼，一項一行 `LACKS`：報告 HEAD 不是 40 位（給 `--repo` 時在那個 checkout 解出完整 commit；解不出來就要 worker 重交）、報告 `ORDER:` 行沒寫 REVISION、LOG 沒有這一版的 DISPATCH 行、AUTO 條件沒有 CHECKS（要用核准重跑就要補）、證據紀錄沒有支援的 schema、git.head 不是 40 位或 `git.dirty` 不是 false（要重新收證）。沒給 `--evidence-dir` / `--dispatch-log` 的部分印 `NOT_CHECKED`。有缺就 exit 1。
 - `--hash`：派工時記下，交件時比對。**這是事後偵測，不是事前防止**：任何人都還是改得動工單，只是改了會被查出來；沒有派工紀錄就查不出「改完重算」。
 - 固定用詞（判定、下一步、RESULT、治理模式、證據等級）只在 `vocabulary.json` 定義；改用詞時改它，再改 selftest 點名的文件和範本。
+- **初衷卡與 PO 看過的紀錄（2.1，shadow：只加 `~` 提示，exit code 不變；沒有新欄位的舊工單照樣通過）**：
+  - `--brief BRIEF.md` 單獨用：印 `BRIEF_REVISION = <版次>` 和 `BRIEF_FINGERPRINTS_V1 = {"B-2": "<64 位>"}` 兩行，貼進工單表頭。指紋是 sha256(`brief-row-v1\n` + `[ID, 類別, 內容, 怎麼算做到]` 的精簡 JSON)；同一編號兩列或欄數不是 4，印 `~ BRIEF_UNCONFIRMED`（依據未確認），不給指紋。
+  - `--brief` 配 `--order` / `--match` / `--preflight`：工單記的列變了，印 `~ BRIEF_STALE <WO> <B> <AC-1,AC-2>`（舊條件驗過，新條件待重驗）；工單沒有追溯欄時寫 `WHOLE_ORDER`；版次沒升卻內容變了另註「同版內容有變」；列被刪掉寫「需求已取消，待調整範圍」。工單追溯了 B 卻沒記指紋，印 `~ BRIEF_UNCONFIRMED`。
+  - `--brief BRIEF.md --snapshot <資料夾>`：只收狀態 LOCKED、有版次的初衷卡，否則 exit 2。快照原子寫入：同資料夾暫存檔、fsync、改名；同內容的舊檔保留。寫完印 `BRIEF_LOCKED rev=<n> sha=<雜湊> snapshot=<路徑>`，整行寫進 DIRECTOR_LOG。再加 `--dispatch-log` 時，以最新一行 BRIEF_LOCKED 為依據：現在的初衷卡不是它（例如定版後的草稿），就改拿快照比，並印 `compared with the locked snapshot`。
+  - `--hash <WO.md> --snapshot <資料夾>`：另存 `<WO-ID>-rev<n>-<雜湊>.md`。`--match ... --order-history <資料夾>`：用 EVIDENCE_EQUIVALENT 沿用的證據，拿舊工單記的指紋比；條件變了印 `BRIEF_STALE`，找不到舊工單印 `BRIEF_UNCONFIRMED`（沿用依據未確認）。`evidence_record.py verify --rerun` 還不做這項比對。
+  - `--po-acceptance PO_ACCEPTANCE.json [--candidate <40 位>]`：檢查 PO 驗收紀錄（schema `po-acceptance-v1`），必填 candidate_id、commit（40 位）、entry、manifest_sha256、offered_message_ref；outcome 是 seen / changes / accepted 時還要 reply_ref，還沒回覆寫 null。少綁一項、雜湊不是 64 位、commit 不是 `--candidate`，印 `~ UNBOUND_PO_REPLY`；綁好的印 `~ PO_ACCEPTANCE <候選 ID>: <commit 前 12 位> <入口>: 已驗收 (<訊息>)`。
+  - 裁決可加 `ORDER_SHA256:`、`REPORT_SHA256:`（`--hash` 的值）。`--verdict ... --match` 時值不是現在的雜湊，印 `~ VERDICT_RECORD`。
 - 已有舊檔案的專案導入時：`--warn` 只警告、exit 0；`--since YYYY-MM-DD` 跳過較早的檔案（工單看 ISSUED_BY、RESUME_STATE 看 UPDATED、報告和裁決看第一個日期）；找不到日期的檔案無從比較，也跳過，印 `UNDATED` 並在最後一行另計，要查它就不加 `--since`。先用 `--warn` 看全貌，新工單再用 `--since` 嚴格檢查。舊檔案不追溯修改。
 
 ## trace_report.py
@@ -335,8 +342,14 @@ python -I -X utf8 trace_report.py --orders <DIRECTOR>/orders --reports <報告�
 - 過期報告（1.3.3）：選中的報告 `ORDER:` 行的 REVISION 不是工單現在的 REVISION，或 `ORDER_SHA256` 不是工單現在的雜湊，狀態欄不再照抄它的 PASS，改寫「過期：…（報告寫 PASS）」或「版次不符：…」。只是提示，不擋；正式判定仍是 `gate_check --match`。沒寫 `ORDER:` 或 `ORDER_SHA256` 的舊報告不判斷。
 - 一列一條 AC（1.3.3），不再把 TRACES_TO 的每個編號和每條 AC 交叉配對。工單的 AC 表可加選用的 `追溯`（或 `traces`）欄，寫這條 AC 驗證哪些編號：每個編號一列，空的（或 `—`）寫「（未指定）」；表後另列「AC 的追溯不在工單 TRACES_TO 裡」和「TRACES_TO 裡沒有 AC 驗證的編號」。沒有這欄、TRACES_TO 有兩個以上編號時，每條 AC 一列，需求欄寫「DD-1、DD-2（工單層）」。`--decisions` 也查 AC 追溯的編號。
 - `--decisions 檔案`（可重複）：讀專案需求或決定檔裡表格列第一欄的 `XX-數字` 編號。TRACES_TO 寫了、卻不在這些檔裡的，列在「TRACES_TO 找不到的編號」；檔裡有、卻沒有任何工單追溯的，列在「沒有工單的需求」。不給這個旗標，輸出和以前相同。
+- 初衷卡只用清單列出 DD 編號（`- DD-1 …`，2.1）：只給 `--decisions BRIEF.md` 時，這些編號也算找得到，但不列進「沒有工單的需求」；圍欄裡的清單是例子，不算。表格裡沒有某個開頭的編號時（例如 PO），會提示再加 `--decisions DECISION_REGISTER.md`。
+- `--brief BRIEF.md`（2.1，只讀、不擋）：多印「初衷卡三欄」一節，每條 B 一列：有人負責／這版有驗證紀錄／你看過這個成品嗎。
+  - 驗證紀錄看選中的報告：AC 狀態，加 `--evidence-dir` 時 PASS 還要找得到證據檔。工單記的指紋和現在的列不同，寫「工單是照舊條件寫的，新條件待重驗」。
+  - 你看過：`--director-log` 讀 `PO_PRODUCT_REVIEW` 行，`--acceptance PO_ACCEPTANCE.json`（可重複）讀驗收紀錄，都要綁到報告的 HEAD。看的是別的成品，寫「看過別的成品」；看的是舊條件，寫「當時是舊條件」。
+  - 另列 `BRIEF_STALE` / `BRIEF_UNCONFIRMED` 提示和綁不到成品的 PO 回覆（`UNBOUND_PO_REPLY`）。`--director-log` 有 BRIEF_LOCKED 時以它為依據，和 gate_check 相同。
+  - `--director-log`、`--evidence-dir` 要配 `--brief`，否則 exit 2；`--acceptance` 可以單獨用。
 - 不悄悄略過檔案：三個資料夾裡不是該類檔案的 `.md`（工單沒有 `ISSUED_BY =`、報告沒有 `TASK_ID`、裁決沒有 `## A`）列在「沒計入的檔案」，寫數量和檔名。舊格式工單要算進來，補一行 `ISSUED_BY = <誰> <日期>`。
-- 只看檔案寫了什麼，不判斷做得對不對。資料夾或 `--decisions` 檔不存在 exit 1，其他情況 exit 0。
+- 只看檔案寫了什麼，不判斷做得對不對。資料夾或 `--decisions` / `--brief` / `--director-log` / `--acceptance` 檔不存在 exit 1，其他情況 exit 0。
 
 ## metrics_report.py
 

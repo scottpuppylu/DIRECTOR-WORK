@@ -2,6 +2,8 @@
 <YYYY-MM-DD HH:MM，讀 date> 總監
 ORDER: <WO-檔名.md> REVISION <n>
 CANDIDATE_HEAD: <審查的 commit，40 位，git rev-parse worker 分支>
+ORDER_SHA256: <選用：gate_check.py --hash 工單>
+REPORT_SHA256: <選用：gate_check.py --hash 報告；寫了之後報告再被改，--match 會印 ~ VERDICT_RECORD>
 
 ## A. 判定
 <PASS | PASS_WITH_WARNINGS | CONDITIONAL_PASS | PARTIAL | HOLD | BLOCKED | FAIL | NOT_RUN>

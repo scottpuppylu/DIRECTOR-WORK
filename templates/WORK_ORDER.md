@@ -5,6 +5,8 @@
 ISSUED_BY      = 總監  <YYYY-MM-DD HH:MM，讀 date>
 REVISION       = 1    # 開工後每改一次 +1，並在 H 節加一列
 TRACES_TO      = <這張工單服務的初衷卡、需求或決定編號，逗號分隔，例如 B-2, DD-03；有初衷卡時至少一個 B 編號（docs/12）；沒有寫 NONE>
+BRIEF_REVISION        = <選用：初衷卡版次；不用就刪掉這兩行>
+BRIEF_FINGERPRINTS_V1 = <選用：gate_check.py --brief BRIEF.md 印的 {"B-2": "<64 位雜湊>"}>
 PRIMARY_WORKER = session「<名稱>」
 MODEL / EFFORT = <模型> / <medium|high|xhigh>（理由見 docs/05）
 FALLBACK       = <同 session 新對話，從 RESUME_STATE 接續 | 其他 worker>
@@ -16,6 +18,8 @@ WORK_DIR       = <放報告、RESUME_STATE.md、輸出的資料夾>
 BUDGET         = <US$0 | PO 核准的金額>
 HEAVY_RESOURCE = <無 | 需先 TEST REQUEST：類型、預估分鐘>
 ```
+
+兩個 `BRIEF_` 欄位是選用的：寫了以後，工單依據的初衷卡列被改掉時，`gate_check.py --order / --match --brief BRIEF.md` 印 `~ BRIEF_STALE`（舊條件驗過，新條件待重驗）；只是提示，不改結果。不寫照樣通過。
 
 ## A. 背景
 需求、已知事實（附證據等級）、限制。只寫 worker 需要知道的。
