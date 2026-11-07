@@ -4,14 +4,19 @@ not drifted.
 Prints one line per failed case and a summary; exit 1 when anything fails. Writes only to the temporary folder.
 """
 import hashlib
+import importlib.util
 import json
 import os
 import pathlib
 import re
+import shlex
 import shutil
+import signal
+import socket
 import subprocess
 import sys
 import tempfile
+import time
 
 TOOLS = pathlib.Path(__file__).resolve().parent
 TEMPLATES = TOOLS.parent / "templates"
@@ -1140,6 +1145,29 @@ def test_shared_code():
         failures.append("parse_list differs between gate_check.py and scope_check.py; keep the two copies identical")
 
 
+def newline_kw_calls(source):
+    """Lines of Path.write_text(newline=) (3.10+) and Path.read_text(newline=) (3.13+) calls, also split over lines."""
+    import ast
+    return [node.lineno for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr in ("write_text", "read_text") and any(k.arg == "newline" for k in node.keywords)]
+
+
+def test_py39_newline():
+    """1.1.0 fix: the tools run on Python 3.9, where Path.write_text has no newline= (CI 3.9 crash in auto-pause)."""
+    global total
+    total += 1
+    sample = 'p.write_text(\n    "x",\n    encoding="utf-8",\n    newline="\\n",\n)\nq.read_text(encoding="utf-8")\n'
+    if newline_kw_calls(sample) != [1]:
+        failures.append(f"py39 newline scan: detector missed the multi-line sample: {newline_kw_calls(sample)}")
+    for tool in sorted(TOOLS.glob("*.py")):
+        total += 1
+        hits = newline_kw_calls(tool.read_text(encoding="utf-8"))
+        if hits:
+            failures.append(f"py39 newline scan: {tool.name} line(s) {hits} pass newline= to Path.write_text/read_text;"
+                            " use open(path, 'w', encoding='utf-8', newline='\\n')")
+
+
 def test_hook_protect(tmp):
     """v0.13: --protect blocks Write / Edit on DIRECTOR/orders/** and DIRECTOR_LOG.md; setup migrates old entries."""
     global total
@@ -1167,9 +1195,9 @@ def test_hook_protect(tmp):
     guard("Write to orders", 2, "Write", director / "orders" / "WO-002-new.md")
     guard("Edit of DIRECTOR_LOG", 2, "Edit", director / "DIRECTOR_LOG.md")
     guard("relative path from the hook cwd", 2, "Write", "../DIRECTOR/orders/WO-001-a.md", cwd=worker)
-    guard("backslashes", 2, "Edit", str(director / "orders" / "WO-001-a.md").replace("/", "\\"))
     guard(".. detour", 2, "Write", director / "orders" / ".." / "orders" / "sub" / "x.md")
-    if os.name == "nt":
+    if os.name == "nt":  # elsewhere a backslash is part of a file name, and that file is not under orders/
+        guard("backslashes", 2, "Edit", str(director / "orders" / "WO-001-a.md").replace("/", "\\"))
         guard("other case on Windows", 2, "Edit", str(director / "ORDERS" / "wo-001-a.md").upper())
     guard("other file in DIRECTOR", 0, "Write", director / "notes.md")
     guard("folder named like orders", 0, "Write", director / "orders-old" / "x.md")
@@ -1320,6 +1348,366 @@ def test_hook(tmp):
     expect("unknown config version is refused", *setup[:1], 1, "--repo", repo, "--only-this", "--config", future)
     future.write_text('{"window": 250000}', encoding="utf-8")
     expect("config without a version counts as 1", *setup[:1], 0, "--repo", repo, "--only-this", "--config", future, says="OK")
+
+
+def test_hook_rules(tmp):
+    """1.1.0 item 1: hook_guard --rules / --profile. Every rule's examples under both profiles, bypass forms, MCP read-only
+    and internal-report exemptions, config paths, self-protection, determinism, bad rules files, setup --guard-profile."""
+    global total
+    rules_path = TOOLS / "guard_rules.json"
+    rules = json.loads(rules_path.read_text(encoding="utf-8"))
+    home = pathlib.Path.home().as_posix()
+
+    def hook(call, profile, rules_file=rules_path):
+        return subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), "--rules", str(rules_file),
+                               "--profile", profile], capture_output=True, encoding="utf-8", input=json.dumps(call))
+
+    def outcome(done):
+        """deny:ID / ask:ID / legacy / silent / bad / other(...), from exit code, stdout and stderr."""
+        if done.returncode == 1 and done.stderr.startswith("hook_guard: bad rules file: ") and not done.stdout:
+            return "bad"
+        if done.returncode == 2 and not done.stdout:
+            found = re.match(r"BLOCKED by hook_guard \[(G\d+)\]: \S", done.stderr)
+            if found:
+                return f"deny:{found.group(1)}"
+            if done.stderr.startswith("BLOCKED by hook_guard: "):
+                return "legacy"
+        if done.returncode == 0 and not done.stderr:
+            if not done.stdout:
+                return "silent"
+            try:
+                out = json.loads(done.stdout)["hookSpecificOutput"]
+                found = re.match(r"\[(G\d+)\] \S", out["permissionDecisionReason"])
+                if out["hookEventName"] == "PreToolUse" and out["permissionDecision"] == "ask" and found and len(out) == 3:
+                    return f"ask:{found.group(1)}"
+            except (ValueError, KeyError, TypeError):
+                pass
+        return f"other(exit {done.returncode}: {(done.stdout + done.stderr).strip()[:160]!r})"
+
+    def check(name, call, profile, want, rules_file=rules_path):
+        global total
+        total += 1
+        done = hook(call, profile, rules_file)
+        got = outcome(done)
+        if got != want:
+            failures.append(f"hook_guard rules {name} [{profile}]: expected {want}, got {got}")
+        elif re.search(r"<[^>]*>", done.stdout + done.stderr):
+            failures.append(f"hook_guard rules {name} [{profile}]: message has a <...> placeholder")
+        return done
+
+    bash = lambda command: {"tool_name": "Bash", "tool_input": {"command": command}}
+    shell = lambda command: {"tool_name": "PowerShell", "tool_input": {"command": command}}
+    tool = lambda name, **kw: {"tool_name": name, "tool_input": kw}
+    write = lambda path, **kw: {"tool_name": "Write", "tool_input": {"file_path": str(path), "content": "x"}, **kw}
+
+    # every rule: its example_block gives that rule's decision and id, its example_allow is silent, in both profiles
+    for rule in rules["rules"]:
+        for profile in ("worker", "director"):
+            decision = rule["decision"][profile]
+            for n, call in enumerate(rule["example_block"] if isinstance(rule["example_block"], list) else [rule["example_block"]]):
+                check(f"{rule['id']} example_block {n}", call, profile, "silent" if decision == "none" else f"{decision}:{rule['id']}")
+            for n, call in enumerate(rule["example_allow"] if isinstance(rule["example_allow"], list) else [rule["example_allow"]]):
+                check(f"{rule['id']} example_allow {n}", call, profile, "silent")
+
+    # push written to slip past a text match is still push (F6)
+    for command in ("git -C . push", "git 'push'", "/usr/bin/git push", 'bash -c "git push"', 'powershell -c "git push"',
+                    "cmd /c git push", "cd x && git push", "echo $(git push)", r'"C:\Program Files\Git\bin\git.exe" push'):
+        for profile in ("worker", "director"):
+            check(f"push bypass {command!r}", bash(command), profile, "deny:G02")
+    check("force push wins over push (lowest id)", bash("git push -f origin main"), "worker", "deny:G01")
+    check("delete of a remote branch is G01", bash("git push origin :old"), "director", "deny:G01")
+    # deleting, every way of writing it
+    for call in (bash("bash -c 'rm -rf x'"), bash("/bin/rm -rf x"), bash("find . -name '*.tmp' -delete"), bash("ls | xargs rm"),
+                 bash("cmd /c rd /s /q build"), bash("del /s x"), shell("Get-ChildItem x | Remove-Item"), shell("ri build"),
+                 shell("Remove-Item -Recurse -Force build")):
+        check(f"delete {call['tool_input']['command']!r}", call, "worker", "deny:G10")
+        check(f"delete {call['tool_input']['command']!r}", call, "director", "ask:G10")
+    done = check("worker delete message names the next step", bash("rm -rf build"), "worker", "deny:G10")
+    total += 1
+    if "deletable list" not in done.stderr or "cleaner" not in done.stderr:
+        failures.append(f"G10 deny message lacks the next step: {done.stderr.strip()}")
+    # MCP: only the action part counts; read-only prefixes never match (D3 b)
+    for name in ("mcp__vendor__get_order", "mcp__vendor__get_domain_order", "mcp__vendor__list_billing_charges",
+                 "mcp__vendor__get_purchase_quote", "mcp__vendor__read_payment_status", "mcp__vendor__search_orders",
+                 "mcp__vendor__query_subscriptions", "mcp__vendor__status_of_transfer", "mcp__buy_tools__get_status",
+                 "mcp__ccd_session_mgmt__get_session", "mcp__ccd_settings__get_settings"):
+        for profile in ("worker", "director"):
+            check(f"read-only MCP {name}", tool(name), profile, "silent")
+    for name, worker, director in (("mcp__vendor__buy_domain", "deny:G30", "deny:G30"),
+                                   ("mcp__shop__checkoutCart", "deny:G30", "deny:G30"),
+                                   ("mcp__drive__trash_file", "deny:G11", "ask:G11"),
+                                   ("mcp__drive__share_file", "deny:G21", "ask:G21"),
+                                   ("mcp__github__createPullRequest", "deny:G21", "ask:G21"),
+                                   ("mcp__chat__send_message", "deny:G21", "ask:G21"),
+                                   ("mcp__ccd_session_mgmt__set_session_permission_mode", "deny:G42", "ask:G42")):
+        check(f"MCP {name}", tool(name), "worker", worker)
+        check(f"MCP {name}", tool(name), "director", director)
+    # the internal report channel is not "sending" (D3 c)
+    for name in ("SendMessage", "mcp__ccd_session_mgmt__send_message"):
+        for profile in ("worker", "director"):
+            check(f"internal report {name}", tool(name, to="x", message="done"), profile, "silent")
+    # config files, not all of ~/.claude (D3 a)
+    for path, want in ((f"{home}/.claude/settings.json", "G40"), (f"{home}/.claude/.credentials.json", "G40"),
+                       (f"{home}/.claude/CLAUDE.md", "G40"), (f"{home}/.claude.json", "G40"),
+                       ("D:/proj/.claude/settings.local.json", "G40"), ("D:/proj/.mcp.json", "G40"),
+                       ("C:/ProgramData/ClaudeCode/managed-settings.json", "G40"),
+                       (f"{home}/.claude/projects/p/memory/MEMORY.md", None), (f"{home}/.claude/plans/plan.md", None),
+                       ("D:/proj/docs/settings.md", None), ("D:/proj/CLAUDE.md.bak", None)):
+        check(f"Write {path}", write(path), "worker", f"deny:{want}" if want else "silent")
+        check(f"Write {path}", write(path), "director", f"ask:{want}" if want else "silent")
+    check("relative path read against the hook cwd", write(".claude/settings.local.json", cwd=str(tmp)), "worker", "deny:G40")
+    check("~ in the path", write("~/.claude/settings.json"), "worker", "deny:G40")
+    if os.name == "nt":
+        check("other case on Windows", write("D:/PROJ/.CLAUDE/Settings.Local.JSON"), "worker", "deny:G40")
+        check("backslashes", write(r"D:\proj\.claude\settings.json"), "worker", "deny:G40")
+    check("reading a settings file is not a change", tool("Read", file_path=f"{home}/.claude/settings.json"), "worker", "silent")
+    for path in (rules_path, TOOLS / "hook_guard.py"):
+        check(f"self-protection {path.name}", write(path), "worker", "deny:G00")
+        check(f"self-protection {path.name}", write(path), "director", "ask:G00")
+    # batch 1 acceptance (11-07) 1: push through a git alias or the push plumbing is still push, in both profiles
+    for command in ("git -c alias.p=push p", "git -c alias.p='!git push' p", "git config alias.p push && git p",
+                    "git config --local alias.p push", "git -C . config set alias.p push", "git --config-env=alias.p=X p",
+                    "git send-pack origin HEAD", "git http-push https://example.invalid/r.git main",
+                    '"C:/Program Files/Git/mingw64/libexec/git-core/git-send-pack.exe" origin HEAD', "git-push origin"):
+        for profile in ("worker", "director"):
+            check(f"push bypass {command!r}", bash(command), profile, "deny:G02")
+    for command in ("git config --get alias.p", "git config -l", "git config --unset alias.p", "git -c core.autocrlf=false status",
+                    "git log --grep=alias.p=x"):
+        check(f"not a push {command!r}", bash(command), "worker", "silent")
+    # 2: a shell command that writes the rules file or hook_guard.py is G00; reading them is not
+    for call in (bash(f"sed -i s/deny/none/ {rules_path.as_posix()}"), bash("sed -i.bak s/x/y/ tools/hook_guard.py"),
+                 bash("sed --in-place s/x/y/ tools/guard_rules.json"), bash("echo x > tools/hook_guard.py"),
+                 bash("cat x >> tools/guard_rules.json"), bash("cat x>tools/guard_rules.json"), bash("> tools/guard_rules.json cat x"),
+                 bash("cat x 2> tools/guard_rules.json"), bash("cat x &> tools/guard_rules.json"), bash("cat x >| tools/guard_rules.json"),
+                 bash("tee tools/guard_rules.json < x"), bash("cp /tmp/r.json tools/guard_rules.json"), bash("mv tools/hook_guard.py x.py"),
+                 bash("git checkout HEAD -- tools/hook_guard.py"), bash("git restore tools/guard_rules.json"),
+                 bash("perl -pi -e s/deny/none/ tools/guard_rules.json"), bash('bash -c "sed -i s/a/b/ tools/guard_rules.json"'),
+                 bash('echo "$(cat x > tools/guard_rules.json)"'), shell(r"Set-Content tools\guard_rules.json x"),
+                 shell(r"Get-Content x | Out-File tools\GUARD_RULES.json"), shell(r"Copy-Item x -Destination tools\hook_guard.py"),
+                 shell(r"[IO.File]::WriteAllText('tools\guard_rules.json', 'x')")):
+        check(f"G00 shell write {call['tool_input']['command']!r}", call, "worker", "deny:G00")
+        check(f"G00 shell write {call['tool_input']['command']!r}", call, "director", "ask:G00")
+    for call in (bash("cat tools/guard_rules.json"), bash("sed -n 1p tools/guard_rules.json"), bash("git diff tools/hook_guard.py"),
+                 bash("git log -p tools/hook_guard.py > /tmp/hook.patch"), bash("sed -n '/a>b/p' tools/guard_rules.json"),
+                 bash("python -I tools/hook_guard.py --rules tools/guard_rules.json < call.json 2>&1"),
+                 shell(r"Get-Content tools\guard_rules.json | Select-Object -First 5"), bash("sed -i s/a/b/ notes.md")):
+        for profile in ("worker", "director"):
+            check(f"G00 shell read {call['tool_input']['command']!r}", call, profile, "silent")
+    # batch 2 commit 1: a { } next to the > no longer hides the redirect (probe miss on e6a9959)
+    for call in (bash("echo {}>tools/guard_rules.json"), bash("echo {} >tools/guard_rules.json"), bash("echo a{}>tools/guard_rules.json"),
+                 bash("{ echo x; }>tools/hook_guard.py"), bash("echo }>>tools/hook_guard.py"), bash("(echo x)>tools/guard_rules.json"),
+                 bash("echo x >&tools/guard_rules.json"), shell("@{}>tools/guard_rules.json")):
+        check(f"G00 brace redirect {call['tool_input']['command']!r}", call, "worker", "deny:G00")
+        check(f"G00 brace redirect {call['tool_input']['command']!r}", call, "director", "ask:G00")
+    # (a quoted "{}>tools/guard_rules.json" stays G00 as on e6a9959: the parsed word holds > and names the file)
+    for call in (bash("echo {}>/tmp/x.json"), bash("jq '{}' tools/guard_rules.json > /tmp/out.json")):
+        for profile in ("worker", "director"):
+            check(f"G00 brace not a write {call['tool_input']['command']!r}", call, profile, "silent")
+    # G40 shell_write: writing a settings or CLAUDE.md file from the shell is G40 like Write / Edit
+    for call in (bash("sed -i s/a/b/ .claude/settings.local.json"), bash("echo x > CLAUDE.md"), bash("echo x>>CLAUDE.local.md"),
+                 bash("cp a.json ~/.claude/settings.json"), bash("tee .mcp.json < x"), bash("echo {}>.claude/settings.json"),
+                 bash("touch .claude/settings.json"), bash("cp new/settings.json ~/.claude/"), bash("echo x > ~/.claude.json"),
+                 shell("Set-Content ~/.claude.json x"), shell(r"Copy-Item a -Destination .claude\settings.json"),
+                 shell(r"[IO.File]::WriteAllText('.claude\settings.json', 'x')"), shell(r"'x' | Out-File D:\proj\CLAUDE.md")):
+        check(f"G40 shell write {call['tool_input']['command']!r}", call, "worker", "deny:G40")
+        check(f"G40 shell write {call['tool_input']['command']!r}", call, "director", "ask:G40")
+    for call in (bash("cat CLAUDE.md"), bash("grep x .claude/settings.json"), bash("cp CLAUDE.md /tmp/backup.md"),
+                 bash("echo x > ~/.claude/projects/p/memory/note.md"), bash("echo x > ~/.claude/plans/plan.md"),
+                 bash("echo x > docs/settings.md"), bash("sed -n 1p CLAUDE.md > /tmp/c.txt"), bash("echo CLAUDE.md > list.txt"),
+                 shell(r"Copy-Item .claude\settings.json -Destination backup\settings.json")):
+        for profile in ("worker", "director"):
+            check(f"G40 shell not a write {call['tool_input']['command']!r}", call, profile, "silent")
+    # Monitor runs a shell command (hooks see it since Claude Code 2.1.314): checked as Bash; no string command is silent
+    monitor = lambda **kw: tool("Monitor", description="watch", **kw)
+    for call, worker, director in ((monitor(command="git push"), "deny:G02", "deny:G02"),
+                                   (monitor(command="cat .env"), "deny:G50", "deny:G50"),
+                                   (monitor(command="echo x > CLAUDE.md"), "deny:G40", "ask:G40"),
+                                   (monitor(command="echo {}>tools/guard_rules.json"), "deny:G00", "ask:G00"),
+                                   (monitor(command="tail -f log.txt"), "silent", "silent"),
+                                   (monitor(), "silent", "silent"), (monitor(command=["git", "push"]), "silent", "silent"),
+                                   (monitor(command=None), "silent", "silent"), (monitor(command=42), "silent", "silent"),
+                                   ({"tool_name": "Monitor", "tool_input": "git push"}, "silent", "silent"),
+                                   (tool("OtherTool", command="rm -rf x"), "silent", "silent")):
+        check(f"Monitor {json.dumps(call['tool_input'])}", call, "worker", worker)
+        check(f"Monitor {json.dumps(call['tool_input'])}", call, "director", director)
+    # 3: the gh token file on Windows (%APPDATA%/GitHub CLI) is a credential file like ~/.config/gh/hosts.yml
+    gh_win = f"{home}/AppData/Roaming/GitHub CLI"
+    gh_calls = [tool("Read", file_path=f"{gh_win}/hosts.yml"), tool("Grep", pattern="oauth", path=gh_win),
+                tool("Grep", pattern="oauth", path=f"{home}/.config/gh"), bash(f'cat "{gh_win}/hosts.yml"'),
+                shell(r'Get-Content "$env:APPDATA\GitHub CLI\hosts.yml"'), bash(r'type "%APPDATA%\GitHub CLI\hosts.yml"')]
+    if os.name == "nt":
+        gh_calls.append(tool("Read", file_path=f"{gh_win}/HOSTS.yml".replace("/", "\\")))
+    for call in gh_calls:
+        for profile in ("worker", "director"):
+            check(f"gh hosts.yml {json.dumps(call['tool_input'])}", call, profile, "deny:G50")
+    check("another file under AppData/Roaming is not G50", tool("Read", file_path=f"{home}/AppData/Roaming/Code/settings.json"),
+          "worker", "silent")
+    # legacy checks still run with --rules, and plain commands stay silent with nothing on stdout (F2)
+    check("legacy stash is still blocked", bash("git stash"), "director", "legacy")
+    check("legacy reset --hard is still blocked", bash("git reset --hard HEAD~1"), "director", "legacy")
+    for profile in ("worker", "director"):
+        check("git status is silent", bash("git status"), profile, "silent")
+        check("a build is silent", bash("python -m unittest"), profile, "silent")
+        check("Read is silent", tool("Read", file_path="README.md"), profile, "silent")
+    # 1.1.0 item 4: reading credential files, printing the environment or a token is denied in both profiles
+    grep = lambda **kw: tool("Grep", pattern="KEY", **kw)
+    blocked = {
+        "G50": [tool("Read", file_path=".env"), tool("Read", file_path="~/.ssh/id_ed25519"),
+                grep(path=f"{home}/.aws/credentials"), grep(glob=".env"), grep(path=".", glob="*.pem"),
+                tool("Glob", pattern="**/.env"), bash("cat .env"), shell(r"Get-Content .\.env"), bash("type .env"),
+                bash("copy .env x"), bash("base64 id_rsa"), bash("cat $HOME/.ssh/id_rsa"), bash("bash -c 'cat .env'"),
+                bash("sed -n 1p .env.local"), shell("Select-String -Path .env -Pattern KEY"),
+                tool("Read", file_path="D:/proj/sub/../.env"), bash("cp ./sub/../.env x"),
+                tool("Read", file_path="D:/proj/.claude/.credentials.json"), tool("Read", file_path="D:/proj/config/secrets.yaml")]
+               + ([tool("Read", file_path=r"D:\proj\.ENV"), bash("cat .ENV")] if os.name == "nt" else []),
+        "G51": [bash("printenv"), bash("env"), bash("env -0"), shell("gci env:"), shell("Get-ChildItem Env:\\"),
+                bash("echo $GITHUB_TOKEN"), bash('echo "token is ${GITHUB_TOKEN}"'), shell("Write-Output $env:API_KEY"),
+                bash("echo %OPENAI_API_KEY%"), shell("$env:GITHUB_TOKEN"), bash("set"), bash("cmd /c set"), bash("export -p"),
+                bash("printenv AWS_SECRET_ACCESS_KEY"), shell("[Environment]::GetEnvironmentVariables()")],
+        "G52": [bash("gh auth token"), bash("gh auth status --show-token"), bash("git credential fill"),
+                bash("git credential-manager get"), bash("aws --profile x configure get aws_secret_access_key"),
+                bash("az account get-access-token"), bash("gcloud auth print-access-token"), bash("kubectl config view --raw")],
+    }
+    for rid, calls in blocked.items():
+        for call in calls:
+            for profile in ("worker", "director"):
+                check(f"secret {rid} {json.dumps(call['tool_input'])}", call, profile, f"deny:{rid}")
+    for call in (tool("Read", file_path=".env.example"), bash("cat README.md"), bash("echo $HOME"), bash("echo $AUTHOR"),
+                 bash("grep TODO src/"), bash("grep -r password ."), bash("set -e"), bash("export FOO=1"), bash("printenv PATH"),
+                 shell("Get-ChildItem"), shell("Get-ChildItem src"), shell("Write-Output $env:PATH"), bash("cat ~/.ssh/id_rsa.pub"),
+                 bash("cat ~/.ssh/config"), bash("env FOO=1 python x.py"), bash("gh auth status"), bash("aws configure list"),
+                 bash("gcloud auth application-default login"), grep(path="src"), tool("Glob", pattern="**/*.py"),
+                 bash("kubectl config view")):
+        for profile in ("worker", "director"):
+            check(f"not a secret {json.dumps(call['tool_input'])}", call, profile, "silent")
+    done = check("secret deny message names the next step", bash("cat .env"), "worker", "deny:G50")
+    total += 1
+    if "report which one and why to the Director" not in done.stderr:
+        failures.append(f"G50 deny message lacks the next step: {done.stderr.strip()}")
+    g50 = next(r for r in rules["rules"] if r["id"] == "G50")
+    paths, shells = (next(m for m in g50["match"] if m["kind"] == k) for k in ("path", "shell"))
+    total += 1
+    if (paths["globs"], paths["except"]) != (shells["path_args"], shells["path_except"]):
+        failures.append("G50: the path globs and the shell path_args differ; keep one list")
+    # secret_mask: every kind is masked with nothing of the secret left; SHAs, counts and names stay
+    spec = importlib.util.spec_from_file_location("secret_mask_under_test", TOOLS / "secret_mask.py")
+    masker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(masker)
+    fake = {  # built at run time so that the source holds no token-shaped string
+        "private_key": ("-----BEGIN OPENSSH " + "PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH " + "PRIVATE KEY-----", "b3BlbnNzaC1rZXktdjEAAAAA"),
+        "aws_access_key": ("AKIA" + "IOSFODNN7EXAMPLE", "IOSFODNN7EXAMPLE"),
+        "github_token": ("gh" + "p_" + "a1B2" * 9, "a1B2" * 9),
+        "github_pat": ("github" + "_pat_11ABCDEFG0123456789_abcdefghijKLMNOP", "11ABCDEFG0123456789"),
+        "anthropic_key": ("sk-" + "ant-api03-" + "x7" * 15, "x7" * 15),
+        "openai_key": ("sk-" + "proj-" + "Ab1" * 10, "Ab1" * 10),
+        "slack_token": ("xo" + "xb-1234567890-abcdefghij", "1234567890-abcdefghij"),
+        "google_api_key": ("AI" + "za" + "B9" * 17 + "C", "B9" * 17),
+        "npm_token": ("np" + "m_" + "c4" * 18, "c4" * 18),
+        "jwt": ("ey" + "JhbGciOiJIUzI1NiJ9.ey" + "JzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N", "dozjgNryP4J3jVmNHl0w5N"),
+        "bearer": ("Authorization: Bearer abc.def-ghi", "abc.def-ghi"),
+        "url_password": ("https://user:hunter2pass@example.com/r.git", "hunter2pass"),
+        "assignment": ("GITHUB_TOKEN=s3cr3tvalue; password: 'p@ss w'", "s3cr3tvalue"),
+    }
+    for kind, (text, secret) in fake.items():
+        total += 1
+        masked, kinds = masker.mask(f"before {text} after")
+        if f"[MASKED:{kind}]" not in masked or secret in masked or kind not in kinds or not masked.startswith("before "):
+            failures.append(f"secret_mask {kind}: got {masked!r} {kinds}")
+    for text in ("commit 4b825dc642cb6eb9a060e54bf8d69288fbee4904", "sha256 " + hashlib.sha256(b"").hexdigest(),
+                 "max_tokens=4096 author=Bob PWD=/home/x", "Authorization: Bearer [MASKED:jwt]"):
+        total += 1
+        if masker.mask(text) != (text, []):
+            failures.append(f"secret_mask changed text with no new secret: {text!r} -> {masker.mask(text)}")
+    for text, want_exit, want_out in (("id " + fake["aws_access_key"][0], 1, "FOUND aws_access_key\nSECRETS: 1 kind(s)\n"),
+                                      ("plain text", 0, "SECRETS: 0 kind(s)\n")):
+        total += 1
+        done = subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "secret_mask.py"), "--check"], input=text,
+                              capture_output=True, encoding="utf-8")
+        if (done.returncode, done.stdout) != (want_exit, want_out):
+            failures.append(f"secret_mask --check {text!r}: exit {done.returncode} {done.stdout!r}")
+    total += 1
+    done = subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "secret_mask.py")], input="k: " + fake["github_token"][0] + "\n",
+                          capture_output=True, encoding="utf-8")
+    if (done.returncode, done.stdout) != (0, "k: [MASKED:github_token]\n"):
+        failures.append(f"secret_mask stdin: exit {done.returncode} {done.stdout!r}")
+    # determinism: the same input twice gives the same bytes; the rules in reverse order give the same result
+    reverse = tmp / "rules_reversed.json"
+    reverse.write_text(json.dumps({**rules, "rules": rules["rules"][::-1]}), encoding="utf-8")
+    for call, profile in ((bash("git push --force"), "worker"), (bash("rm x && gh pr create"), "director"),
+                          (bash("gh pr create && rm x"), "director"), (tool("mcp__shop__buy_and_send"), "director"),
+                          (write(rules_path), "director")):
+        runs = [hook(call, profile), hook(call, profile), hook(call, profile, reverse)]
+        total += 1
+        if len({(d.returncode, d.stdout, d.stderr) for d in runs}) != 1:
+            failures.append(f"hook_guard rules not deterministic for {call} [{profile}]: "
+                            f"{[(d.returncode, d.stdout + d.stderr) for d in runs]}")
+    check("two ask rules: the lowest id wins", bash("gh pr create && rm x"), "director", "ask:G10")
+    check("deny beats ask whatever the order", tool("mcp__shop__buy_and_send"), "director", "deny:G30")
+    # a broken rules file stops the hook with exit 1, which "onFailure": "block" turns into a block
+    broken = {"not json": "{", "no rules": json.dumps({"schema_version": 1, "rules": []}),
+              "bad decision": json.dumps({**rules, "rules": [{**rules["rules"][0], "decision": {"worker": "maybe", "director": "deny"}}]}),
+              "angle brackets": json.dumps({**rules, "rules": [{**rules["rules"][0], "reason": "ask <someone>"}]}),
+              "duplicate id": json.dumps({**rules, "rules": [rules["rules"][0], rules["rules"][0]]}),
+              "reserved id": json.dumps({**rules, "rules": [{**rules["rules"][0], "id": "G00"}]}),
+              "bad regex": json.dumps({**rules, "rules": [{**rules["rules"][0], "match": {"kind": "shell", "cmd": ["git"], "flags": ["("]}}]}),
+              "unknown kind": json.dumps({**rules, "rules": [{**rules["rules"][0], "match": {"kind": "url", "cmd": ["x"]}}]}),
+              "bad cmd regex": json.dumps({**rules, "rules": [{**rules["rules"][0], "match": {"kind": "shell", "cmd": ["git("]}}]}),
+              "bare not a bool": json.dumps({**rules, "rules": [{**rules["rules"][0], "match": {"kind": "shell", "cmd": ["env"], "bare": "yes"}}]}),
+              "shell_write not a bool": json.dumps({**rules, "rules": [{**rules["rules"][0], "match": {"kind": "path", "tools": ["Write"], "globs": ["**/x"], "shell_write": 1}}]}),
+              "path_args not globs": json.dumps({**rules, "rules": [{**rules["rules"][0], "match": {"kind": "shell", "cmd": ["cat"], "path_args": ".env"}}]}),
+              "bad arg_search": json.dumps({**rules, "rules": [{**rules["rules"][0], "match": {"kind": "shell", "cmd": ["echo"], "arg_search": ["[$"]}}]})}
+    for name, text in broken.items():
+        bad = tmp / f"rules_{name.replace(' ', '_')}.json"
+        bad.write_text(text, encoding="utf-8")
+        check(f"bad rules file: {name}", bash("git status"), "worker", "bad", rules_file=bad)
+    check("bad rules file: missing", bash("git status"), "worker", "bad", rules_file=tmp / "no_such_rules.json")
+
+    # setup --guard-profile: report, apply, rerun, permissions, switching profile, the Director's worktree
+    repo = tmp / "guarded"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    (repo / ".git" / "info" / "exclude").write_text(".claude/settings.local.json\n", encoding="utf-8")
+    settings = repo / ".claude" / "settings.local.json"
+    settings.parent.mkdir()
+    settings.write_text(json.dumps({"permissions": {"deny": ["Read(./private/**)"], "allow": ["Bash(git status)"]}}), encoding="utf-8")
+    setup = ("--repo", repo, "--only-this")
+    expect("guard profile missing", "setup_project_settings.py", 1, *setup, "--guard-profile", "worker",
+           says=["MISSING", "hooks.PreToolUse", "permissions.deny"])
+    expect("guard profile written and tested", "setup_project_settings.py", 0, *setup, "--guard-profile", "worker", "--apply",
+           says=["SET", "guard_profile=worker", "(hook test: allow=0 block=2 block-rule=2)"])
+    expect("guard profile kept on rerun", "setup_project_settings.py", 0, *setup, "--guard-profile", "worker", says="OK")
+    expect("plain --hooks keeps the installed profile", "setup_project_settings.py", 0, *setup, "--hooks", says=["OK", "block-rule=2"])
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    entry = data["hooks"]["PreToolUse"]
+    wanted_deny = [p for r in rules["rules"] if r["decision"]["worker"] == "deny" for p in r.get("permissions", [])]
+    total += 1
+    if (len(entry) != 1 or entry[0]["matcher"] != "*" or entry[0]["hooks"][0].get("onFailure") != "block"
+            or "--profile worker" not in entry[0]["hooks"][0]["command"] or "--rules" not in entry[0]["hooks"][0]["command"]):
+        failures.append(f"setup --guard-profile worker: PreToolUse is {entry}")
+    total += 1
+    if (data["permissions"]["deny"][0] != "Read(./private/**)" or data["permissions"]["allow"] != ["Bash(git status)"]
+            or any(p not in data["permissions"]["deny"] for p in wanted_deny) or data["permissions"].get("ask")):
+        failures.append(f"setup --guard-profile worker: permissions are {data['permissions']}")
+    expect("another profile is not OK", "setup_project_settings.py", 1, *setup, "--guard-profile", "director",
+           says=["hooks.PreToolUse matcher", "permissions.deny", "permissions.ask"])
+    expect("switching to director", "setup_project_settings.py", 0, *setup, "--guard-profile", "director", "--apply", says="SET")
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    total += 1
+    if ("Bash(rm *)" in data["permissions"]["deny"] or "Bash(rm *)" not in data["permissions"]["ask"]
+            or "Bash(git push *)" not in data["permissions"]["deny"] or "Read(./private/**)" not in data["permissions"]["deny"]
+            or len(data["hooks"]["PreToolUse"]) != 1 or "--profile director" not in data["hooks"]["PreToolUse"][0]["hooks"][0]["command"]):
+        failures.append(f"setup --guard-profile director after worker: {data['permissions']} {data['hooks']}")
+    expect("the Director's worktree keeps the director profile", "setup_project_settings.py", 0, *setup, "--guard-profile",
+           "worker", "--director-worktree", repo, says="OK")
+    director = tmp / "guarded_DIRECTOR"
+    (director / "orders").mkdir(parents=True)
+    expect("guard profile with --protect-director", "setup_project_settings.py", 0, *setup, "--guard-profile", "worker",
+           "--protect-director", director, "--apply", says=["SET", "block-write=2", "block-rule=2"])
+    command = json.loads(settings.read_text(encoding="utf-8"))["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    total += 1
+    if "--protect" not in command or "--profile worker" not in command:
+        failures.append(f"setup --guard-profile --protect-director: command is {command!r}")
+    expect("an unknown profile is refused", "setup_project_settings.py", 2, *setup, "--guard-profile", "admin")
 
 
 def test_evidence(tmp):
@@ -1849,6 +2237,854 @@ def test_trusted_isolation(tmp):
         failures.append("isolation: the rerun wrote build.txt in REPO instead of the copy")
 
 
+def test_pause(tmp):
+    """1.1.0 item 2: pause_ctl on/off/status/procs and hook_guard --pause-flag. While paused only reading, reporting,
+    progress files and the pause status run; a call the pause lets through still meets the rules; setup gives workers
+    the flag and the Director's worktree none."""
+    global total
+    rules_path = TOOLS / "guard_rules.json"
+    director = tmp / "pause_DIRECTOR"
+    (director / "orders").mkdir(parents=True)
+    flag, log = director / "PAUSE", director / "DIRECTOR_LOG.md"
+    log.write_text("# DIRECTOR_LOG\n", encoding="utf-8")
+
+    def hook(call, profile="worker", rules_file=rules_path):
+        args = ["--rules", str(rules_file)] if rules_file else []
+        return subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), *args, "--profile", profile,
+                               "--pause-flag", str(flag)], capture_output=True, encoding="utf-8", input=json.dumps(call))
+
+    def check(name, call, want, profile="worker"):
+        global total
+        total += 1
+        done = hook(call, profile)
+        rule = re.match(r"BLOCKED by hook_guard \[(G\d+)\]", done.stderr)
+        if done.returncode == 0 and not done.stdout and not done.stderr:
+            got = "silent"
+        elif done.returncode == 2 and re.match(r"PAUSED by Director at \S+: CPU \(full\) for the batch; \S", done.stderr):
+            got = "paused"
+        elif done.returncode == 2 and rule:
+            got = "deny:" + rule.group(1)
+        else:
+            got = f"other({done.returncode} {done.stdout.strip()[:80]} {done.stderr.strip()[:120]})"
+        if got != want:
+            failures.append(f"pause {name} [{profile}]: expected {want}, got {got}")
+        elif re.search(r"<[^>]*>", done.stderr):
+            failures.append(f"pause {name} [{profile}]: the message has a <...> placeholder")
+
+    bash = lambda command, **kw: {"tool_name": "Bash", "tool_input": {"command": command, **kw}}
+    shell = lambda command: {"tool_name": "PowerShell", "tool_input": {"command": command}}
+    tool = lambda name, **kw: {"tool_name": name, "tool_input": kw}
+    script = (TOOLS / "pause_ctl.py").as_posix()
+    ctl = f"python -I -X utf8 {script}"
+    check("flag off: a build runs", bash("python -m build"), "silent")
+    expect("pause on", "pause_ctl.py", 0, "on", "--director", director, "--reason", "CPU <full> for the batch",
+           says="PAUSE: on by Director at ")
+    total += 1
+    if not re.fullmatch(r"# DIRECTOR_LOG\nPAUSE on by=Director at=\S+ reason=CPU \(full\) for the batch\n", log.read_text(encoding="utf-8")):
+        failures.append(f"pause on: DIRECTOR_LOG is {log.read_text(encoding='utf-8')!r}")
+    expect("pause status shows the reason", "pause_ctl.py", 0, "status", "--director", director,
+           says=["PAUSE: on by Director at ", ": CPU (full) for the batch"], lacks="<")
+    for name, call in [("a build", bash("python -m build")), ("git status in the background", bash("git status", run_in_background=True)),
+                       ("Agent", tool("Agent", prompt="x")), ("Monitor", tool("Monitor", command="x")),
+                       ("Write", tool("Write", file_path=str(tmp / "a.py"))), ("NotebookEdit", tool("NotebookEdit", notebook_path=str(tmp / "a.ipynb"))),
+                       ("worker pause_ctl off", bash(f"{ctl} off --director {director.as_posix()}")),
+                       ("python -c before pause_ctl", bash(f'python -c "import os" {script} status')),
+                       ("an allowed command and another", bash("git status && make")), ("git log --output", bash("git log --output=x.txt")),
+                       ("git -c", bash("git -c core.pager=x log")), ("Stop-Process after Get-Process", shell("Get-Process python | Stop-Process")),
+                       ("an MCP write", tool("mcp__shop__create_item")), ("start_session", tool("mcp__ccd_session__start_session")),
+                       ("cat of a credential file", bash("cat .env")),
+                       # batch 1 acceptance (11-07) 4: an allowed command that writes a file through a redirect
+                       ("git log > a.py", bash("git log > a.py")), ("git log >> a.py", bash("git log >> a.py")),
+                       ("git status 2> a.txt", bash("git status 2> a.txt")), ("git log &> a.txt", bash("git log &> a.txt")),
+                       ("git log >& a.txt", bash("git log >& a.txt")), ("git log >| a.py", bash("git log >| a.py")),
+                       ("git log >a.py", bash("git log >a.py")), ("> a.py git log", bash("> a.py git log")),
+                       ("redirect inside $() in quotes", bash('git log "$(git status > a.py)"')),
+                       ("process substitution", bash("git diff >(cat > a.py)")),
+                       ("PowerShell *> a.txt", shell("git status *> a.txt")), ("PowerShell 2> a.txt", shell("git status 2> a.txt")),
+                       ("Get-Process > a.txt", shell("Get-Process > a.txt")), ("pause_ctl status > a.txt", bash(f"{ctl} status > a.txt"))]:
+        check(f"{name} is paused", call, "paused")
+    for name, call in [("Read", tool("Read", file_path="README.md")), ("Grep", tool("Grep", pattern="x")), ("git status", bash("git status")),
+                       ("git -C dir log", bash("git -C D:/x log --oneline -3")),
+                       ("pause_ctl status", bash(f"{ctl} status --director {director.as_posix()}")),
+                       ("pause_ctl procs", bash(f"{ctl} procs --root 4242")),
+                       ("Get-Process sorted", shell("Get-Process | Sort-Object CPU -Descending | Select-Object -First 5")),
+                       ("tasklist", bash('tasklist /FI "IMAGENAME eq python.exe"')), ("SendMessage", tool("SendMessage", to="x", message="stopped")),
+                       ("an MCP read", tool("mcp__shop__list_items")), ("Write RESUME_STATE.md", tool("Write", file_path=str(tmp / "RESUME_STATE.md"))),
+                       ("Edit a TASK REPORT", tool("Edit", file_path=str(tmp / "TASK_REPORT_item2.md"))),
+                       ("git status 2>&1", bash("git status 2>&1")), ("git log >&2", bash("git log --oneline -3 >&2")),
+                       ("PowerShell git status 2>&1", shell("git status 2>&1")), ("a quoted >", bash('git log --format="%h -> %s"')),
+                       ("tasklist 2>&1 | findstr", bash("tasklist 2>&1 | findstr python"))]:
+        check(f"{name} runs while paused", call, "silent")
+    check("the Director's pause_ctl off runs", bash(f"{ctl} off --director {director.as_posix()}"), "silent", "director")
+    check("a read the pause lets through still meets G50", tool("Read", file_path=".env"), "deny:G50")
+    expect("pause off", "pause_ctl.py", 0, "off", "--director", director, says="PAUSE: off by Director at ")
+    total += 1
+    if flag.exists() or not re.search(r"\nPAUSE off by=Director at=\S+\n$", log.read_text(encoding="utf-8")):
+        failures.append(f"pause off: flag {flag.exists()}, DIRECTOR_LOG {log.read_text(encoding='utf-8')!r}")
+    check("flag off again: the build runs", bash("python -m build"), "silent")
+    expect("pause status off", "pause_ctl.py", 0, "status", "--director", director, says="PAUSE: off")
+    expect("pause off when it was not on", "pause_ctl.py", 0, "off", "--director", director, says="PAUSE: off (it was not on)")
+    expect("pause on needs a reason", "pause_ctl.py", 2, "on", "--director", director)
+    # --pause-flag with no rules file, rules with no pause section, or a bad pause section stop the hook (exit 1)
+    data = json.loads(rules_path.read_text(encoding="utf-8"))
+    no_pause = tmp / "rules_no_pause.json"
+    no_pause.write_text(json.dumps({k: v for k, v in data.items() if k != "pause"}), encoding="utf-8")
+    bad_pause = tmp / "rules_bad_pause.json"
+    bad_pause.write_text(json.dumps({**data, "pause": {**data["pause"], "allow_shell": {"worker": ["("], "director": []}}}), encoding="utf-8")
+    for name, rules_file in (("no rules file", None), ("no pause section", no_pause), ("bad pause regex", bad_pause)):
+        total += 1
+        done = hook(bash("git status"), rules_file=rules_file)
+        if done.returncode != 1 or not done.stderr.startswith("hook_guard: "):
+            failures.append(f"pause {name}: expected exit 1, got {done.returncode} {done.stderr.strip()[:120]}")
+    # procs: a busy root with an idle child, and an idle root that has already ended; only test-owned PIDs are ended
+    busy = subprocess.Popen([sys.executable, "-I", "-c", "import subprocess, sys\n"
+                             "c = subprocess.Popen([sys.executable, '-I', '-c', 'import time; time.sleep(300)'])\n"
+                             "print(c.pid, flush=True)\nwhile True: pass"], stdout=subprocess.PIPE, encoding="utf-8")
+    idle = subprocess.Popen([sys.executable, "-I", "-c", "import time; time.sleep(300)"])
+    child = None
+    try:
+        child = int(busy.stdout.readline())
+        idle.kill()
+        idle.wait()
+        roots = ("--root", busy.pid, "--root", idle.pid)
+        total += 1
+        code, out = run("pause_ctl.py", "procs", *roots, "--sample", "1")
+        rows = re.findall(r"^ +(\d+) +\d+ +[\d.]+  ", out, re.M)
+        if (code != 1 or not re.search(rf"^STOPPED\n  {idle.pid}\nREMAINING", out, re.M) or rows != [str(busy.pid), str(child)]
+                or "PROCS: stopped=1 remaining=2 busy=1" not in out):
+            failures.append(f"pause_ctl procs with a live tree: exit {code}: {out.strip()[-400:]}")
+        busy.kill()
+        busy.wait()
+        os.kill(child, signal.SIGTERM)
+        expect("pause_ctl procs after the stop", "pause_ctl.py", 0, "procs", *roots, "--sample", "0.2",
+               says="PROCS: stopped=2 remaining=0 busy=0")
+    finally:
+        for proc in (busy, idle):
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+        if child:
+            try:
+                os.kill(child, signal.SIGTERM)
+            except OSError:
+                pass
+    pids = tmp / "pids.txt"
+    pids.write_text("# none of these\nabc\n", encoding="utf-8")
+    expect("pause_ctl procs refuses a bad PID file", "pause_ctl.py", 1, "procs", "--pids-file", pids)
+    # setup: the worker hook gets --pause-flag DIR/PAUSE; the Director's worktree gets none
+    repo = tmp / "paused_repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    (repo / ".git" / "info" / "exclude").write_text(".claude/settings.local.json\n", encoding="utf-8")
+    settings = repo / ".claude" / "settings.local.json"
+    setup = ("--repo", repo, "--only-this", "--protect-director", director)
+    expect("setup: the worker hook gets the pause flag", "setup_project_settings.py", 0, *setup, "--guard-profile", "worker", "--apply",
+           says=["SET", "block-rule=2"])
+    command = json.loads(settings.read_text(encoding="utf-8"))["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    total += 1
+    if f'--pause-flag "{(director / "PAUSE").as_posix()}"' not in command:
+        failures.append(f"setup worker: no --pause-flag DIR/PAUSE in {command!r}")
+    expect("setup: the same rerun is OK", "setup_project_settings.py", 0, *setup, "--guard-profile", "worker", says="OK")
+    expect("setup: another pause flag is not OK", "setup_project_settings.py", 1, *setup, "--guard-profile", "worker",
+           "--pause-flag", tmp / "OTHER_PAUSE", says="MISSING")
+    expect("setup: the Director's worktree has no pause flag", "setup_project_settings.py", 0, *setup, "--guard-profile", "worker",
+           "--director-worktree", repo, "--apply", says="SET")
+    command = json.loads(settings.read_text(encoding="utf-8"))["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    total += 1
+    if "--pause-flag" in command or "--profile director" not in command:
+        failures.append(f"setup director worktree: command is {command!r}")
+
+
+def test_auto_pause(tmp):
+    """1.1.0 batch 2: the 5th worker deny within 600 s writes the pause flag; older denies, the Director and a state
+    file that cannot be written never pause; bad auto_pause settings are refused."""
+    global total
+    rules_path = TOOLS / "guard_rules.json"
+    folder = tmp / "auto_pause"
+    folder.mkdir()
+    flag = folder / "PAUSE"
+    state = folder / "PAUSE.denies"
+
+    def hook(call, profile="worker", rules_file=rules_path, flag_file=flag):
+        return subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), "--rules", str(rules_file),
+                               "--profile", profile, "--pause-flag", str(flag_file)],
+                              capture_output=True, encoding="utf-8", input=json.dumps(call))
+
+    def check(name, ok, detail=""):
+        global total
+        total += 1
+        if not ok:
+            failures.append(f"auto-pause {name}: {detail}")
+
+    push = {"tool_name": "Bash", "tool_input": {"command": "git push origin main"}}
+    dotenv = {"tool_name": "Read", "tool_input": {"file_path": ".env"}}
+    first_four = [hook(push if i % 2 == 0 else dotenv) for i in range(4)]
+    check("4 denies: still denies, no flag", all(d.returncode == 2 and "AUTO-PAUSED" not in d.stderr for d in first_four)
+          and not flag.exists(), " | ".join(d.stderr.strip()[:80] for d in first_four))
+    fifth = hook(push)
+    text = flag.read_text(encoding="utf-8") if flag.exists() else ""
+    check("5th deny writes the flag with the rule IDs", fifth.returncode == 2 and "AUTO-PAUSED by hook_guard: auto: 5 denies in 600s" in fifth.stderr
+          and re.match(r"PAUSE by hook_guard at \S+: auto: 5 denies in 600s \(G02 G50 G02 G50 G02\)\n$", text)
+          and not re.search(r"<[^>]*>", fifth.stderr), fifth.stderr + text)
+    check("state file cleared after the pause", state.exists() and state.read_text(encoding="utf-8") == "")
+    expect("auto-paused flag reads as a pause", "pause_ctl.py", 0, "status", "--director", folder, says="PAUSE: on by hook_guard at")
+    ctl = f"python -I -X utf8 {(TOOLS / 'pause_ctl.py').as_posix()}"
+    status = hook({"tool_name": "Bash", "tool_input": {"command": f"{ctl} status --director {folder.as_posix()}"}})
+    off = hook({"tool_name": "Bash", "tool_input": {"command": f"{ctl} off --director {folder.as_posix()}"}})
+    check("auto-paused worker: pause_ctl status runs, off does not", status.returncode == 0 and off.returncode == 2
+          and off.stderr.startswith("PAUSED by hook_guard at "), status.stderr + off.stderr)
+    env = hook(dotenv)
+    check("while paused a rule deny is not counted again", env.returncode == 2 and env.stderr.startswith("BLOCKED by hook_guard [G50]")
+          and "AUTO-PAUSED" not in env.stderr and state.read_text(encoding="utf-8") == "", env.stderr)
+    flag.unlink()
+    old = time.time() - 601
+    state.write_text("".join(f"{old:.3f} G02\n" for _ in range(4)), encoding="utf-8")
+    once = hook(push)
+    check("denies older than the window are not counted", once.returncode == 2 and not flag.exists(), once.stderr)
+    state.write_text("", encoding="utf-8")
+    for _ in range(6):
+        boss = hook(push, profile="director")
+    check("director: no auto-pause", not flag.exists() and "AUTO-PAUSED" not in boss.stderr
+          and state.read_text(encoding="utf-8") == "", boss.stderr)
+    blocked_dir = tmp / "auto_pause_blocked"
+    blocked_dir.mkdir()
+    (blocked_dir / "PAUSE.denies").mkdir()  # a folder where the state file should be: every write fails
+    tries = [hook(push, flag_file=blocked_dir / "PAUSE") for _ in range(6)]
+    check("state file cannot be written: plain deny, no pause, no traceback",
+          all(d.returncode == 2 and d.stderr.startswith("BLOCKED by hook_guard [G02]") and "Traceback" not in d.stderr for d in tries)
+          and not (blocked_dir / "PAUSE").exists(), tries[-1].stderr)
+    data = json.loads(rules_path.read_text(encoding="utf-8"))
+    for name, value in (("missing director", {"worker": {"denies": 5, "window_s": 600}}),
+                        ("zero denies", {"worker": {"denies": 0, "window_s": 600}, "director": None}),
+                        ("text window", {"worker": {"denies": 5, "window_s": "600"}, "director": None})):
+        bad = folder / f"bad_{name.replace(' ', '_')}.json"
+        bad.write_text(json.dumps(dict(data, auto_pause=value)), encoding="utf-8")
+        done = hook(push, rules_file=bad, flag_file=folder / "unused_PAUSE")
+        check(f"bad auto_pause ({name}) is refused", done.returncode == 1 and "auto_pause" in done.stderr, done.stderr)
+
+
+def test_audit(tmp):
+    """audit_log.py: the chain, its breaks, anchors (also from a commit), cited ranges, Bash output masking,
+    hook_guard decision lines and setup --audit-log."""
+    global total
+    folder = tmp / "audit"
+    folder.mkdir()
+    log = folder / "a.jsonl"
+    script = str(TOOLS / "audit_log.py")
+    spec = importlib.util.spec_from_file_location("audit_log_under_test", TOOLS / "audit_log.py")
+    audit = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(audit)
+    fake_key = "gh" + "p_" + "Q7w" * 12  # built at run time: nothing key-shaped in the source
+
+    def check(name, ok, detail=""):
+        global total
+        total += 1
+        if not ok:
+            failures.append(f"audit {name}: {detail}")
+
+    def feed(call, path=log):
+        return subprocess.run([sys.executable, "-I", "-X", "utf8", script, "append", "--log", str(path)],
+                              input=json.dumps(call), capture_output=True, encoding="utf-8")
+
+    def lines(path=log):
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+    def write(path, entries):
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:  # Path.write_text(newline=) needs 3.10
+            fh.write("".join(audit.canonical(e) + "\n" for e in entries))
+
+    def copy(name, change=None):
+        target = folder / name
+        entries = lines()
+        if change:
+            entries = change(entries)
+        write(target, entries)
+        return target
+
+    def anchor_of(path):
+        return subprocess.run([sys.executable, "-I", "-X", "utf8", script, "head", "--log", str(path)],
+                              capture_output=True, encoding="utf-8").stdout.strip()
+
+    bash = {"hook_event_name": "PostToolUse", "session_id": "s1", "tool_name": "Bash", "tool_use_id": "t1",
+            "tool_input": {"command": f"echo {fake_key}"}, "duration_ms": 15,
+            "tool_response": {"stdout": "RAW-OUTPUT-MARKER-77 " + fake_key, "stderr": "", "interrupted": False, "isImage": False}}
+    done = feed(bash)
+    reply = json.loads(done.stdout) if done.stdout.strip() else {}
+    out = reply.get("hookSpecificOutput", {}).get("updatedToolOutput", {})
+    check("Bash output with a secret comes back masked, same fields", done.returncode == 0
+          and out.get("stdout") == "RAW-OUTPUT-MARKER-77 [MASKED:github_token]"
+          and sorted(out) == ["interrupted", "isImage", "stderr", "stdout"], done.stdout + done.stderr)
+    done = feed(dict(bash, tool_use_id="t2", tool_response={"stdout": "plain", "stderr": "", "interrupted": False, "isImage": False}))
+    check("Bash output with nothing to mask prints nothing", done.returncode == 0 and not done.stdout.strip(), done.stdout)
+    done = feed({"hook_event_name": "PostToolUseFailure", "tool_name": "Read", "tool_use_id": "t3",
+                 "tool_input": {"file_path": "missing.txt"}, "error": "File does not exist."})
+    check("failure call appended", done.returncode == 0, done.stderr)
+    text = log.read_text(encoding="utf-8")
+    check("no raw output and no secret in the log", "RAW-OUTPUT-MARKER-77" not in text and fake_key not in text
+          and "[MASKED:github_token]" in text, text[:300])
+    entries = lines()
+    check("failure input gives kind=failure", entries[2]["kind"] == "failure" and entries[2]["result"]["status"] == "error",
+          json.dumps(entries[2]))
+    expect("audit verify after 3 appends", "audit_log.py", 0, "verify", "--log", log, says=["entries=3", "head_seq=3", " OK"])
+    done = subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), "--rules", str(TOOLS / "guard_rules.json"),
+                           "--profile", "worker", "--audit", str(log)],
+                          input=json.dumps({"tool_name": "Bash", "tool_input": {"command": "git push origin main"}}),
+                          capture_output=True, encoding="utf-8")
+    last = lines()[-1]
+    check("hook_guard deny is on the chain with its rule", done.returncode == 2 and last["kind"] == "decision"
+          and last["result"] == {"status": "deny"} and last["rule"] == "G02", json.dumps(last))
+    expect("audit verify with the decision line", "audit_log.py", 0, "verify", "--log", log, says=["entries=4", " OK"])
+    head = anchor_of(log)
+    anchors = folder / "DIRECTOR_LOG.md"
+    anchors.write_text(f"# LOG\n- 01:00 gate {head}\n", encoding="utf-8")
+    expect("audit verify with its anchor", "audit_log.py", 0, "verify", "--log", log, "--anchor-log", anchors, says=["anchors=1", " OK"])
+    done = subprocess.run([sys.executable, "-I", "-X", "utf8", script, "cite", "--log", str(log), "--from", "2", "--to", "3"],
+                          capture_output=True, encoding="utf-8")
+    cite = done.stdout.strip()
+    check("cite prints AUDIT_RANGE", done.returncode == 0 and cite.startswith("AUDIT_RANGE file=") and " seq=2..3 " in cite, cite)
+    expect("audit verify --cite", "audit_log.py", 0, "verify", "--cite", cite, says="cite=checked")
+
+    def edit_two(entries):
+        entries[1]["input"] = entries[1]["input"].replace("echo", "ECHO")
+        return entries
+    tampered = copy("tampered.jsonl", edit_two)
+    expect("audit one changed character", "audit_log.py", 1, "verify", "--log", tampered, says="BROKEN seq=2:")
+    dropped = copy("dropped.jsonl", lambda e: e[:1] + e[2:])
+    expect("audit a deleted line", "audit_log.py", 1, "verify", "--log", dropped, says="BROKEN seq=3: comes after seq=1")
+    swapped = copy("swapped.jsonl", lambda e: [e[0], e[2], e[1], e[3]])
+    expect("audit two lines swapped", "audit_log.py", 1, "verify", "--log", swapped, says="BROKEN seq=3:")
+    whole = copy("cut.jsonl")
+    cut_anchor = folder / "cut_LOG.md"
+    cut_anchor.write_text(anchor_of(whole) + "\n", encoding="utf-8")
+    write(whole, lines(whole)[:-1])
+    expect("audit a cut tail passes alone", "audit_log.py", 0, "verify", "--log", whole, says="entries=3")
+    expect("audit a cut tail is caught by the anchor", "audit_log.py", 1, "verify", "--log", whole, "--anchor-log", cut_anchor,
+           says="anchor seq=4: not in the log")
+
+    def rewrite(entries):  # every hash recomputed: the chain alone cannot tell
+        prev = audit.GENESIS
+        for entry in edit_two(entries):
+            entry["prev"] = prev
+            entry["hash"] = prev = audit.digest(entry)
+        return entries
+    fake = copy("fake.jsonl")
+    fake_anchor = folder / "fake_LOG.md"
+    fake_anchor.write_text(anchor_of(fake) + "\n", encoding="utf-8")
+    fake_cite = cite.replace(log.as_posix(), fake.as_posix())
+    write(fake, rewrite(lines(fake)))
+    expect("audit a recomputed chain passes alone", "audit_log.py", 0, "verify", "--log", fake, says=" OK")
+    expect("audit a recomputed chain is caught by the anchor", "audit_log.py", 1, "verify", "--log", fake, "--anchor-log", fake_anchor,
+           says="anchor seq=4: hash differs")
+    expect("audit a cited range that changed", "audit_log.py", 1, "verify", "--cite", fake_cite, says="not the ones cited")
+    expect("audit anchor file without a line for this log", "audit_log.py", 1, "verify", "--log", fake, "--anchor-log", anchors,
+           says="no AUDIT_HEAD line for this log")
+    # --anchor-rev: the anchor as committed; an edited working copy of the LOG does not help
+    repo = folder / "director_repo"
+    repo.mkdir()
+
+    def git(*args):
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args], cwd=repo, check=True, capture_output=True)
+    git("init", "-q", "-b", "main")
+    (repo / "DIRECTOR_LOG.md").write_text(fake_anchor.read_text(encoding="utf-8"), encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "anchor")
+    rev = ("--anchor-rev", "HEAD", "--anchor-path", "DIRECTOR_LOG.md", "--repo", repo)
+    expect("audit committed anchor vs a recomputed chain", "audit_log.py", 1, "verify", "--log", fake, *rev, says="hash differs")
+    (repo / "DIRECTOR_LOG.md").write_text(anchor_of(fake) + "\n", encoding="utf-8")
+    expect("audit edited working LOG fools --anchor-log", "audit_log.py", 0, "verify", "--log", fake, "--anchor-log", repo / "DIRECTOR_LOG.md")
+    expect("audit edited working LOG does not fool --anchor-rev", "audit_log.py", 1, "verify", "--log", fake, *rev, says="hash differs")
+    expect("audit anchor commit that does not exist", "audit_log.py", 2, "verify", "--log", fake, "--anchor-rev", "0" * 40,
+           "--anchor-path", "DIRECTOR_LOG.md", "--repo", repo, says="NOT_RUN anchor commit")
+    expect("audit missing log", "audit_log.py", 2, "verify", "--log", folder / "nope.jsonl", says="NOT_RUN")
+    empty = folder / "empty.jsonl"
+    empty.write_text("", encoding="utf-8")
+    expect("audit empty log", "audit_log.py", 0, "verify", "--log", empty, says=["entries=0", " OK"])
+    broken = folder / "broken.jsonl"
+    broken.write_text(log.read_text(encoding="utf-8").splitlines()[0] + "\n{not json\n", encoding="utf-8")
+    expect("audit a line that is not JSON", "audit_log.py", 1, "verify", "--log", broken, says="BROKEN line=2: not JSON")
+    # 8 processes x 20 lines at once: 160 lines, one chain
+    busy = folder / "busy.jsonl"
+    code = ("import importlib.util, sys\n"
+            "spec = importlib.util.spec_from_file_location('a', sys.argv[1]); a = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(a)\n"
+            "for i in range(20): a.append_entry(sys.argv[2], a.hook_entry({'tool_name': 'Bash', 'tool_input': {'n': i}}))\n")
+    procs = [subprocess.Popen([sys.executable, "-I", "-X", "utf8", "-c", code, script, str(busy)]) for _ in range(8)]
+    codes = [p.wait(timeout=120) for p in procs]
+    check("8 writers at once all finish", codes == [0] * 8, str(codes))
+    expect("audit 160 lines from 8 writers", "audit_log.py", 0, "verify", "--log", busy, says=["entries=160", " OK"])
+    # setup --audit-log: Post hooks, hook_guard --audit, and the hook test leaves the log alone
+    wt = folder / "wt"
+    wt.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=wt, check=True)
+    (wt / ".git" / "info" / "exclude").write_text(".claude/settings.local.json\n", encoding="utf-8")
+    per = folder / "logs" / "{worktree}.jsonl"
+    setup = ("--repo", wt, "--only-this", "--audit-log", per)
+    expect("setup audit hooks missing", "setup_project_settings.py", 1, *setup, says=["MISSING", "hooks.PostToolUse", "hooks.PostToolUseFailure"])
+    expect("setup audit hooks written", "setup_project_settings.py", 0, *setup, "--apply", says=["SET", "block=2"])
+    data = json.loads((wt / ".claude" / "settings.local.json").read_text(encoding="utf-8"))
+    wanted = (folder / "logs" / "wt.jsonl").as_posix()
+    posts = [data["hooks"][e][0]["hooks"][0]["command"] for e in ("PostToolUse", "PostToolUseFailure")]
+    check("setup Post hooks run audit_log append on the worktree's log",
+          all("audit_log.py" in c and f'append --log "{wanted}"' in c for c in posts)
+          and f'--audit "{wanted}"' in data["hooks"]["PreToolUse"][0]["hooks"][0]["command"], json.dumps(data["hooks"]))
+    check("setup hook test wrote nothing into the log", not (folder / "logs" / "wt.jsonl").exists())
+    expect("setup audit hooks kept on rerun", "setup_project_settings.py", 0, *setup, says="OK")
+    expect("setup plain --hooks keeps --audit", "setup_project_settings.py", 0, "--repo", wt, "--only-this", "--hooks", says="OK")
+
+
+FAKE_CLAUDE = '''import json, os, sys, time
+mode = os.environ.get("FAKE_REVIEW_MODE", "block")
+with open(os.environ["FAKE_REVIEW_LOG"], "a", encoding="utf-8") as out:
+    out.write(json.dumps({"argv": sys.argv[1:], "guard": os.environ.get("DW_HOOK_REVIEW")}) + "\\n")
+if mode == "sleep":
+    time.sleep(8)
+if mode == "exit1":
+    sys.exit(1)
+if mode == "garbage":
+    print("I think this is fine")
+    sys.exit(0)
+answer = {"verdict": "no_objection" if mode == "ok" else "block", "reason": "looks <risky>\\n   to me"}
+if mode == "extra":
+    answer["also"] = 1
+print(json.dumps({"type": "result", "result": json.dumps(answer)}))
+'''
+
+
+def test_review(tmp):
+    """1.1.0 batch 2: hook_guard --review shows asks of the review categories to a second model (a fake claude here,
+    never the real one); it can only turn an ask into a deny, and setup --guard-review installs the switch."""
+    global total
+    rules_path = TOOLS / "guard_rules.json"
+    folder = tmp / "review"
+    folder.mkdir()
+    fake = folder / "fake_claude.py"
+    fake.write_text(FAKE_CLAUDE, encoding="utf-8")
+    calls_log = folder / "calls.jsonl"
+    empty_path = folder / "no_programs"
+    empty_path.mkdir()
+    fake_key = "gh" + "p_" + "R8t" * 12  # built at run time: nothing key-shaped in the source
+    data = json.loads(rules_path.read_text(encoding="utf-8"))
+
+    def rules_copy(name, **change):
+        path = folder / f"{name}.json"
+        changed = dict(data, **change)
+        for key in [k for k, v in change.items() if v is None]:
+            del changed[key]
+        path.write_text(json.dumps(changed), encoding="utf-8")
+        return path
+
+    def calls():
+        return [json.loads(line) for line in calls_log.read_text(encoding="utf-8").splitlines()] if calls_log.exists() else []
+
+    def hook(call, mode="block", profile="director", review=True, rules_file=rules_path, extra=(), **env_change):
+        env = {k: v for k, v in os.environ.items() if k not in ("DW_HOOK_REVIEW", "CLAUDE_CODE_EXECPATH")}
+        env.update(CLAUDE_CODE_EXECPATH=str(fake), FAKE_REVIEW_MODE=mode, FAKE_REVIEW_LOG=str(calls_log))
+        env.update(env_change)
+        argv = [sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), "--rules", str(rules_file),
+                "--profile", profile] + (["--review"] if review else []) + [str(x) for x in extra]
+        return subprocess.run(argv, capture_output=True, encoding="utf-8", input=json.dumps(call), env=env)
+
+    def check(name, ok, detail=""):
+        global total
+        total += 1
+        if not ok:
+            failures.append(f"review {name}: {detail}")
+
+    def asked(done):
+        try:
+            out = json.loads(done.stdout)["hookSpecificOutput"]
+        except (ValueError, KeyError, TypeError):
+            return ""
+        return out["permissionDecisionReason"] if out.get("permissionDecision") == "ask" else ""
+
+    remove = {"tool_name": "Bash", "tool_input": {"command": "rm -rf build"}}
+    done = hook(remove)
+    check("block turns the director's G10 ask into a deny", done.returncode == 2 and done.stdout == ""
+          and done.stderr.startswith("BLOCKED by hook_guard [G10]: second-model review: looks (risky) to me")
+          and not re.search(r"<[^>]*>", done.stderr), done.stderr)
+    seen = calls()
+    argv = seen[-1]["argv"] if seen else []
+    check("the review runs claude -p with no hooks and no tools, marked against recursion", len(seen) == 1
+          and argv[:3] == ["-p", "--model", "haiku"] and argv[argv.index("--settings") + 1] == '{"disableAllHooks":true}'
+          and argv[argv.index("--tools") + 1] == "" and "--no-session-persistence" in argv
+          and argv[argv.index("--output-format") + 1] == "json" and seen[-1]["guard"] == "1"
+          and "rm -rf build" in argv[-1] and "Rule G10" in argv[-1], json.dumps(seen))
+    hook({"tool_name": "Bash", "tool_input": {"command": f"gh pr comment 3 --body {fake_key}"}})
+    prompt = calls()[-1]["argv"][-1] if len(calls()) == 2 else ""
+    check("the prompt has the tool input masked", "[MASKED:" in prompt and fake_key not in prompt and "Rule G20" in prompt, prompt)
+    done = hook(remove, mode="ok")
+    check("no_objection keeps the ask and says so", done.returncode == 0
+          and asked(done).startswith("[G10] ") and "(second-model review: no objection: looks (risky) to me)" in asked(done), done.stdout)
+    for mode, says in (("garbage", "reply is not the agreed JSON"), ("exit1", "exit 1"), ("extra", "reply is not the agreed JSON")):
+        done = hook(remove, mode=mode)
+        check(f"{mode} reply keeps the ask as unavailable", done.returncode == 0
+              and f"(second-model review unavailable: {says})" in asked(done), done.stdout + done.stderr)
+    quick = rules_copy("quick", review=dict(data["review"], timeout_s=1))
+    started = time.time()
+    done = hook(remove, mode="sleep", rules_file=quick)
+    check("a review past timeout_s keeps the ask", done.returncode == 0 and "unavailable: timed out" in asked(done)
+          and time.time() - started < 7, f"{time.time() - started:.1f}s {done.stdout}")
+    done = hook(remove, CLAUDE_CODE_EXECPATH="", PATH=str(empty_path))
+    check("no claude at all keeps the ask", done.returncode == 0 and "unavailable: no claude executable" in asked(done),
+          done.stdout + done.stderr)
+    before = len(calls())
+    worker = hook(remove, profile="worker")
+    allowed = hook({"tool_name": "Bash", "tool_input": {"command": "git status"}})
+    plain = hook(remove, review=False)
+    narrow = hook(remove, rules_file=rules_copy("narrow", review=dict(data["review"], categories=["push"])))
+    inner = hook(remove, DW_HOOK_REVIEW="1")
+    check("never reviewed: a deny, a silent pass, no --review, another category, a review's own calls",
+          len(calls()) == before and worker.returncode == 2 and worker.stderr.startswith("BLOCKED by hook_guard [G10]: ")
+          and "second-model" not in worker.stderr and allowed.returncode == 0 and allowed.stdout == ""
+          and all(asked(d).startswith("[G10] ") and "second-model" not in asked(d) for d in (plain, narrow, inner)),
+          " | ".join(d.stdout + d.stderr for d in (worker, allowed, plain, narrow, inner)))
+    done = hook(remove, rules_file=rules_copy("no_review", review=None))
+    check("--review without a review section is refused", done.returncode == 1 and "review section" in done.stderr, done.stderr)
+    for name, value in (("zero timeout", dict(data["review"], timeout_s=0)), ("no categories", dict(data["review"], categories=[])),
+                        ("odd model", dict(data["review"], model="haiku; rm -rf /"))):
+        done = hook(remove, rules_file=rules_copy(name.replace(" ", "_"), review=value))
+        check(f"bad review section ({name}) is refused", done.returncode == 1 and "bad rules file" in done.stderr
+              and "review" in done.stderr, done.stderr)
+    log = folder / "audit.jsonl"
+    hook(remove, extra=("--audit", log))
+    hook(remove, mode="ok", extra=("--audit", log))
+    lines = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()] if log.exists() else []
+    check("--audit says what the review did and which claude ran it",
+          [(e["result"]["status"], e["rule"]) for e in lines] == [("deny", "G10 review=block via=CLAUDE_CODE_EXECPATH"),
+                                                                  ("ask", "G10 review=no_objection via=CLAUDE_CODE_EXECPATH")],
+          json.dumps(lines))
+    expect("review audit chain verifies", "audit_log.py", 0, "verify", "--log", log, says=["entries=2", " OK"])
+    # setup --guard-review: the switch goes on the guarded entry; the hook test never starts a review
+    wt = folder / "wt"
+    wt.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=wt, check=True)
+    (wt / ".git" / "info" / "exclude").write_text(".claude/settings.local.json\n", encoding="utf-8")
+    setup = ("--repo", wt, "--only-this", "--guard-profile", "director")
+    expect("setup without review", "setup_project_settings.py", 0, *setup, "--apply", says="SET")
+    expect("setup review missing", "setup_project_settings.py", 1, *setup, "--guard-review", says="MISSING")
+    expect("setup review written and tested", "setup_project_settings.py", 0, *setup, "--guard-review", "--apply",
+           says=["SET", "guard_review=on", "block-rule=2"])
+    command = json.loads((wt / ".claude" / "settings.local.json").read_text(encoding="utf-8"))["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    check("setup puts --review on the guarded command", command.endswith(" --review") and "--profile director" in command, command)
+    expect("setup review kept on rerun without the option", "setup_project_settings.py", 0, *setup, says="OK")
+
+
+def test_doctor(tmp):
+    """1.1.0 batch 2: setup --runtime-guard writes what templates/settings.runtime-guard.json shows; doctor.py reports
+    what is in force (fake claude executables, settings layers in temp folders, never the real claude)."""
+    global total
+    folder = tmp / "doctor"
+    folder.mkdir()
+    main_repo, wt, home, empty_root = folder / "main", folder / "wt", folder / "home", folder / "root"
+    for path in (main_repo, home / ".claude", empty_root, folder / "audit"):
+        path.mkdir(parents=True)
+
+    def git_in(repo, *args):
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args], cwd=repo, check=True,
+                       capture_output=True)
+
+    git_in(main_repo, "init", "-q")
+    git_in(main_repo, "commit", "-q", "--allow-empty", "-m", "init")
+    git_in(main_repo, "worktree", "add", "-q", "--detach", str(wt))
+    (main_repo / ".git" / "info" / "exclude").write_text(".claude/settings.local.json\n", encoding="utf-8")
+
+    def fake(name, version):
+        path = folder / f"{name}.py"
+        path.write_text("import sys\nprint('" + version + " (Claude Code)' if sys.argv[1:] == ['--version'] else 'no')\n",
+                        encoding="utf-8")
+        return path
+
+    new, old, mid = fake("claude_new", "2.1.317"), fake("claude_old", "2.1.291"), fake("claude_mid", "2.1.300")
+    fake_token = "".join(["dw", "fake", "Q7x" * 10])  # built at run time: a value that must never be printed
+    spec = importlib.util.spec_from_file_location("doctor_for_test", TOOLS / "doctor.py")
+    doctor = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(doctor)
+    clean_env = {k: v for k, v in os.environ.items() if not doctor.CREDENTIAL_NAME.search(k) and not doctor.PROXY_NAME.match(k)
+                 and k not in ("CLAUDE_CODE_EXECPATH", "CLAUDE_PID", "CLAUDE_CODE_GIT_BASH_PATH")}
+    outputs = []
+
+    def doc(*args, repo=wt, path_claude=(new,), env_change=None, fs_root=empty_root):
+        env = dict(clean_env, CLAUDE_CODE_EXECPATH=str(new))
+        env.update(env_change or {})
+        env = {k: v for k, v in env.items() if v is not None}
+        argv = [sys.executable, "-I", "-X", "utf8", str(TOOLS / "doctor.py"), "--repo", str(repo), "--home", str(home),
+                "--managed", str(folder / "managed.json"), "--fs-root", str(fs_root)]
+        argv += [x for p in path_claude for x in ("--path-claude", str(p))] + [str(x) for x in args]
+        done = subprocess.run(argv, capture_output=True, encoding="utf-8", env=env)
+        outputs.append(done.stdout + done.stderr)
+        return done
+
+    def check(name, ok, detail=""):
+        global total
+        total += 1
+        if not ok:
+            failures.append(f"doctor {name}: {detail[-600:]}")
+
+    def line(done, name):
+        found = [x for x in done.stdout.splitlines() if re.match(r"\w+ +" + re.escape(name) + ":", x)]
+        return found[0] if found else ""
+
+    # setup --runtime-guard
+    log = folder / "audit" / "wt.jsonl"
+    pause = folder / "PAUSE"
+    setup = ("--repo", wt, "--only-this", "--pause-flag", pause)
+    expect("setup plain first", "setup_project_settings.py", 0, *setup, "--apply", says="SET")
+    expect("setup --runtime-guard default log is in the git common dir", "setup_project_settings.py", 1, *setup,
+           "--runtime-guard", says=["runtime_guard=on", "guard_profile=worker", "director-audit/{worktree}.jsonl",
+                                    "env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"])
+    guard = setup + ("--runtime-guard", "--audit-log", (folder / "audit" / "{worktree}.jsonl").as_posix())
+    expect("setup --runtime-guard written and tested", "setup_project_settings.py", 0, *guard, "--apply",
+           says=["SET", "block-rule=2"])
+    expect("setup --runtime-guard rerun is OK", "setup_project_settings.py", 0, *guard, says="OK")
+    settings_file = wt / ".claude" / "settings.local.json"
+    written = json.loads(settings_file.read_text(encoding="utf-8"))
+    backups = list((main_repo / ".git" / "director-settings-backup").glob("*.settings.local.json"))
+    check("one entry per hook event and a backup of the file before", [len(written["hooks"][e]) for e in
+          ("PreToolUse", "PostToolUse", "PostToolUseFailure")] == [1, 1, 1] and len(backups) == 1, json.dumps(written["hooks"]))
+    template = (TEMPLATES / "settings.runtime-guard.json").read_text(encoding="utf-8")
+    template = template.replace("<PYTHON>", pathlib.Path(sys.executable).as_posix()).replace("<DW>/tools", TOOLS.as_posix())
+    template = json.loads(template.replace("<PAUSE_FLAG>", pause.resolve().as_posix()).replace("<AUDIT_LOG>", log.resolve().as_posix()))
+    check("the template is what setup --runtime-guard writes", template == {"hooks": written["hooks"],
+          "permissions": written["permissions"], "env": {"CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": written["env"].get("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB")}},
+          json.dumps(template)[:300] + " | " + json.dumps(written)[:300])
+    good = settings_file.read_text(encoding="utf-8")
+
+    # the full set
+    done = doc()
+    check("full set: hook, Monitor and worktree ENFORCED, log not yet written, isolation NOT_ENFORCED", done.returncode == 1
+          and line(done, "hook_guard").startswith("ENFORCED") and "onFailure block, claude 2.1.317" in line(done, "hook_guard")
+          and line(done, "Monitor commands").startswith("ENFORCED") and line(done, "audit_log").startswith("CONFIGURED_NOT_VERIFIED")
+          and line(done, "permissions").startswith("CONFIGURED_NOT_VERIFIED") and line(done, "env_scrub").startswith("CONFIGURED_NOT_VERIFIED")
+          and line(done, "isolation").startswith("NOT_ENFORCED") and line(done, "worktree").startswith("ENFORCED")
+          and "INFO                     pause: off" in done.stdout and "review:" not in done.stdout
+          and "DOCTOR: enforced=" in (done.stdout.splitlines() or [""])[-1], done.stdout + done.stderr)
+    subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), "--rules", str(TOOLS / "guard_rules.json"),
+                    "--profile", "worker", "--audit", str(log)], input=json.dumps({"tool_name": "Bash", "tool_input":
+                    {"command": "git push"}}), capture_output=True, encoding="utf-8")
+    done = doc()
+    check("a log that verifies is ENFORCED", line(done, "audit_log").startswith("ENFORCED") and "entries=1" in line(done, "audit_log"), done.stdout)
+    log.write_text(log.read_text(encoding="utf-8").replace("git push", "git pull"), encoding="utf-8")
+    done = doc()
+    check("a broken log chain is NOT_ENFORCED", line(done, "audit_log").startswith("NOT_ENFORCED"), done.stdout)
+    log.unlink()
+
+    # versions
+    done = doc(path_claude=(new, old))
+    check("versions: effective via CLAUDE_CODE_EXECPATH, every PATH claude listed, an old one is a WARN",
+          "effective 2.1.317 via CLAUDE_CODE_EXECPATH" in done.stdout and "PATH 2.1.291" in done.stdout
+          and line(done, "old claude on PATH").startswith("WARN") and "warn=1" in done.stdout, done.stdout)
+    done = doc(path_claude=(old, new), env_change={"CLAUDE_CODE_EXECPATH": None})
+    check("without CLAUDE_CODE_EXECPATH the first PATH claude is the effective one", "effective 2.1.291 via PATH" in done.stdout
+          and line(done, "hook_guard").startswith("NOT_ENFORCED") and "< 2.1.295" in line(done, "hook_guard")
+          and line(done, "Monitor commands").startswith("NOT_ENFORCED"), done.stdout)
+    done = doc(path_claude=(old,), env_change={"CLAUDE_CODE_EXECPATH": None, "CLAUDE_PID": str(os.getpid())})
+    check("CLAUDE_PID names the effective executable", "via CLAUDE_PID" in done.stdout
+          and pathlib.Path(sys.executable).name.lower() in done.stdout.lower(), done.stdout)
+    done = doc(env_change={"CLAUDE_CODE_EXECPATH": str(mid), "CLAUDE_CODE_GIT_BASH_PATH": ""})
+    check("2.1.300: Monitor NOT_ENFORCED; on Windows without Git Bash the hook item too",
+          line(done, "Monitor commands").startswith("NOT_ENFORCED") and line(done, "hook_guard").startswith("ENFORCED")
+          and (os.name != "nt" or line(done, "hook without Git Bash").startswith("NOT_ENFORCED")), done.stdout)
+    if os.name == "nt":
+        done = doc(env_change={"CLAUDE_CODE_EXECPATH": str(mid), "CLAUDE_CODE_GIT_BASH_PATH": str(new)})
+        check("2.1.300 with Git Bash found", line(done, "hook without Git Bash").startswith("ENFORCED"), done.stdout)
+
+    # settings layers
+    user_settings = home / ".claude" / "settings.json"
+    for layer, path in (("user", user_settings), ("managed", folder / "managed.json")):
+        path.write_text('{"disableAllHooks": true}', encoding="utf-8")
+        done = doc()
+        check(f"disableAllHooks in the {layer} layer turns the hooks off", line(done, "hook_guard").startswith("NOT_ENFORCED")
+              and f"in the {layer} settings" in line(done, "hook_guard") and line(done, "audit_log").startswith("NOT_ENFORCED"), done.stdout)
+        path.unlink()
+    user_settings.write_text(json.dumps({"hooks": written["hooks"]}), encoding="utf-8")
+    settings_file.write_text(json.dumps({k: v for k, v in written.items() if k != "hooks"}), encoding="utf-8")
+    done = doc()
+    check("hooks in the user layer count for the worktree", line(done, "hook_guard").startswith("ENFORCED"), done.stdout)
+    user_settings.unlink()
+    (wt / ".claude" / "settings.json").write_text('{"env": {"CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": "1"}}', encoding="utf-8")
+    settings_file.write_text(json.dumps(dict(written, env={"CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": "0"})), encoding="utf-8")
+    done = doc()
+    check("an env key in the local layer wins over the project layer", line(done, "env_scrub").startswith("MISSING"), done.stdout)
+    (wt / ".claude" / "settings.json").unlink()
+
+    # broken or partial hooks
+    def variant(name, change, status, says):
+        data = json.loads(good)
+        change(data)
+        settings_file.write_text(json.dumps(data), encoding="utf-8")
+        done = doc()
+        check(name, done.returncode == 1 and line(done, says[0]).startswith(status) and all(s in done.stdout for s in says[1:]), done.stdout)
+
+    def pre(data):
+        return data["hooks"]["PreToolUse"][0]
+
+    variant("a matcher that is not * is MISSING", lambda d: pre(d).update(matcher="Bash"), "MISSING", ["hook_guard", "matcher 'Bash'"])
+    variant("no onFailure is MISSING", lambda d: pre(d)["hooks"][0].pop("onFailure"), "MISSING", ["hook_guard", "onFailure None"])
+    variant("a hook_guard.py that is not there is NOT_ENFORCED", lambda d: pre(d)["hooks"][0].update(
+        command=pre(d)["hooks"][0]["command"].replace("tools/hook_guard.py", "gone/hook_guard.py")), "NOT_ENFORCED",
+        ["hook_guard", "did not answer"])
+    variant("no PostToolUse is MISSING", lambda d: d["hooks"].pop("PostToolUse"), "MISSING", ["audit_log", "PostToolUse"])
+    variant("a missing deny rule is MISSING", lambda d: d["permissions"]["deny"].pop(), "MISSING", ["permissions", "1 of permissions.deny"])
+    variant("defaultMode bypassPermissions is a WARN", lambda d: d["permissions"].update(defaultMode="bypassPermissions"),
+            "WARN", ["permission mode"])
+    settings_file.write_text(good, encoding="utf-8")
+
+    # names only, never values
+    fake_name = "DW_FAKE_TOKEN"
+    fake_env = {fake_name: fake_token, "HTTPS_PROXY": "http://u" + ":" + fake_token + "@proxy.invalid:8080"}
+    done = doc("--probe", env_change=fake_env)
+    check("--probe lists credential-like names and a proxy with a password, not their values",
+          line(done, "env_scrub").startswith("NOT_ENFORCED") and "DW_FAKE_TOKEN" in done.stdout and "HTTPS_PROXY" in done.stdout, done.stdout)
+    done = doc("--probe")
+    check("--probe with no credential-like names is ENFORCED", line(done, "env_scrub").startswith("ENFORCED"), done.stdout)
+
+    # isolation, worktree, pause, review
+    container = folder / "container"
+    (container / "proc" / "1").mkdir(parents=True)
+    (container / "proc" / "1" / "cgroup").write_text("0::/docker/0123abcd\n", encoding="utf-8")
+    done = doc(fs_root=container)
+    check("a container cgroup without --probe is CONFIGURED_NOT_VERIFIED", line(done, "isolation").startswith("CONFIGURED_NOT_VERIFIED"), done.stdout)
+    closed = socket.socket()
+    closed.bind(("127.0.0.1", 0))
+    port = closed.getsockname()[1]
+    closed.close()
+    done = doc("--probe", "--director", folder, "--egress", f"127.0.0.1:{port}", fs_root=container,
+               env_change={fake_name: fake_token})
+    check("container --probe: a writable root and DIRECTOR and a credential name fail, a refused connection passes",
+          line(done, "isolation").startswith("NOT_ENFORCED") and "root read-only FAIL" in done.stdout
+          and "DIRECTOR read-only FAIL" in done.stdout and f"no connection to 127.0.0.1:{port} ok" in done.stdout
+          and "no credential names FAIL" in done.stdout, done.stdout)
+    (empty_root / ".dockerenv").write_text("", encoding="utf-8")
+    done = doc()
+    check("/.dockerenv means a container", line(done, "isolation").startswith("CONFIGURED_NOT_VERIFIED"), done.stdout)
+    (empty_root / ".dockerenv").unlink()
+    done = doc(repo=main_repo)
+    check("the main checkout is not a worker's worktree", line(done, "worktree").startswith("NOT_ENFORCED")
+          and line(done, "hook_guard").startswith("MISSING"), done.stdout)
+    pause.write_text("paused by the selftest\n", encoding="utf-8")
+    done = doc()
+    check("the pause flag is shown", "pause: on: paused by the selftest" in done.stdout, done.stdout)
+    pause.unlink()
+    expect("setup --runtime-guard --guard-review", "setup_project_settings.py", 0, *guard, "--guard-review", "--apply", says="SET")
+    done = doc()
+    check("review on is shown with its quota use", "review: on" in done.stdout and "quota" in done.stdout
+          and line(done, "hook_guard").startswith("ENFORCED"), done.stdout)
+    done = doc(repo=folder)
+    check("outside a git repo exit 2", done.returncode == 2 and "not inside a git repo" in done.stderr, done.stderr)
+    check("no doctor run printed the fake credential value", all(fake_token not in out for out in outputs), "value leaked")
+
+
+def test_container(tmp):
+    """1.1.0 batch 2: tools/container files without Docker. run_worker.sh --dry-run prints the docker command; the
+    Dockerfile pins the base image and Claude Code; init_firewall.sh allows only the listed hosts. Docker itself is
+    tested by hand (TASK REPORT), not here."""
+    global total
+    box = TOOLS / "container"
+    folder = tmp / "container"
+    wt, director, linked = folder / "wt", folder / "DIRECTOR", folder / "wt-w1"
+    gitc = wt / ".git"
+    for path in (director, gitc / "worktrees" / "w1", gitc / "hooks", linked):
+        path.mkdir(parents=True)
+    (gitc / "config").write_text("[core]\n", encoding="utf-8")
+    (linked / ".git").write_text(f"gitdir: {gitc.as_posix()}/worktrees/w1\n", encoding="utf-8")
+
+    def check(name, ok, detail=""):
+        global total
+        total += 1
+        if not ok:
+            failures.append(f"container {name}: {detail[-600:]}")
+
+    texts = {p.name: p.read_bytes() for p in box.iterdir() if p.is_file()}
+    check("container files have no CR (they run in Linux)", all(b"\r" not in t for t in texts.values()), str(list(texts)))
+    attrs = (TOOLS.parent / ".gitattributes").read_text(encoding="utf-8")
+    check(".gitattributes keeps *.sh and the Dockerfile LF", "*.sh text eol=lf" in attrs and "tools/container/Dockerfile text eol=lf" in attrs, attrs)
+    docker_file = texts["Dockerfile"].decode("utf-8")
+    check("Dockerfile pins the base image by digest",
+          re.search(r"^FROM python:3\.12-slim-bookworm@sha256:[0-9a-f]{64}$", docker_file, re.M) is not None, docker_file[:300])
+    check("Dockerfile pins the Claude Code version and turns off the updater",
+          re.search(r"^ARG CLAUDE_VERSION=\d+\.\d+\.\d+$", docker_file, re.M) is not None and "DISABLE_AUTOUPDATER=1" in docker_file, docker_file)
+    firewall = texts["init_firewall.sh"].decode("utf-8")
+    check("init_firewall.sh: default allowlist is api.anthropic.com only, then REJECT, policy DROP",
+          'ALLOW="${DW_ALLOW_DOMAINS:-api.anthropic.com}"' in firewall and "iptables -P OUTPUT DROP" in firewall
+          and firewall.rstrip().count("-j REJECT") == 1, firewall)
+    check("init_firewall.sh puts /usr/sbin on PATH (iptables is there on Debian; the image PATH has no sbin)",
+          re.search(r'^export PATH="/usr/sbin:/sbin:\$PATH"', firewall, re.M) is not None, firewall[:400])
+    entry = texts["entrypoint.sh"].decode("utf-8")
+    check("entrypoint drops to dw with no capabilities", "--reuid=dw" in entry and "--bounding-set=-all" in entry and "--no-new-privs" in entry, entry)
+
+    spec = importlib.util.spec_from_file_location("doctor_for_container_test", TOOLS / "doctor.py")
+    doctor = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(doctor)
+    bash = doctor.git_bash() if os.name == "nt" else shutil.which("bash")
+    if not bash:
+        print("SKIP run_worker.sh --dry-run cases: no bash (Git Bash on Windows)")
+        return
+
+    def run(*args):
+        argv = [bash, (box / "run_worker.sh").as_posix(), "--dry-run", *[str(a) for a in args]]
+        return subprocess.run(argv, capture_output=True, encoding="utf-8")
+
+    base = ("--worktree", wt.as_posix(), "--director", director.as_posix(), "--git-common", gitc.as_posix())
+    done = run(*base)
+    words = shlex.split(done.stdout) if done.returncode == 0 else []
+    check("--dry-run prints a docker run command", done.returncode == 0 and words[:2] == ["docker", "run"], done.stdout + done.stderr)
+    for flag in ("--rm", "--init", "--read-only", "no-new-privileges"):
+        check(f"docker command has {flag}", flag in words, done.stdout)
+    check("--cap-drop ALL, and only NET_ADMIN NET_RAW SETUID SETGID SETPCAP added (root firewall step; setpriv drops all)",
+          "ALL" in words and words[words.index("--cap-drop") + 1] == "ALL"
+          and sorted(words[i + 1] for i, w in enumerate(words) if w == "--cap-add") == ["NET_ADMIN", "NET_RAW", "SETGID", "SETPCAP", "SETUID"], done.stdout)
+    mounts = [words[i + 1] for i, w in enumerate(words) if w == "-v"]
+    check("main checkout: worktree rw, DIRECTOR ro, its .git/hooks, .git/config and .git/worktrees ro, the Claude volume",
+          mounts == [f"{wt.as_posix()}:/work", f"{director.as_posix()}:/director:ro",
+                     f"{gitc.as_posix()}/hooks:/work/.git/hooks:ro", f"{gitc.as_posix()}/config:/work/.git/config:ro",
+                     f"{gitc.as_posix()}/worktrees:/work/.git/worktrees:ro", "dw-claude-home:/home/dw/.claude"], str(mounts))
+    home_dir = pathlib.Path.home().as_posix()
+    check("no host home, .ssh or gh config is mounted",
+          not any(m.startswith(home_dir + ":") or "/.ssh" in m or "/.config/gh" in m for m in mounts), str(mounts))
+    names = sorted(words[i + 1].split("=")[0] for i, w in enumerate(words) if w == "-e")
+    check("only the listed environment variables, and no GIT_DIR / GIT_WORK_TREE (they would send every git to this repo)",
+          names == ["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", "DW_ALLOW_DOMAINS",
+                    "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_VALUE_1",
+                    "XDG_CACHE_HOME"] and "--env-file" not in words, str(names))
+    check("default allowlist is api.anthropic.com; git never auto-gcs or prunes worktrees",
+          "DW_ALLOW_DOMAINS=api.anthropic.com" in words and "GIT_CONFIG_KEY_0=gc.auto" in words and "GIT_CONFIG_VALUE_0=0" in words
+          and "GIT_CONFIG_KEY_1=gc.worktreePruneExpire" in words and "GIT_CONFIG_VALUE_1=never" in words, done.stdout)
+    linked_base = ("--worktree", linked.as_posix(), "--director", director.as_posix(), "--git-common", gitc.as_posix())
+    done = run(*linked_base, "--login", "--worktree-name", "w1", "--", "claude", "-p", "hi")
+    words = shlex.split(done.stdout) if done.returncode == 0 else []
+    mounts = [words[i + 1] for i, w in enumerate(words) if w == "-v"]
+    def generated(target):  # the text of the generated file run_worker mounts read-only at target
+        source = next((m[:-len(target)] for m in mounts if m.endswith(target)), "")
+        if source and os.name == "nt":
+            source = subprocess.run([bash, "-c", 'cygpath -w "$1"', "-", source], capture_output=True, encoding="utf-8").stdout.strip()
+        return pathlib.Path(source).read_text(encoding="utf-8") if source and pathlib.Path(source).is_file() else None
+    check("linked worktree: .git at /repo-git with hooks/, config and worktrees/ ro, its own record rw",
+          mounts[2:7] == [f"{gitc.as_posix()}:/repo-git", f"{gitc.as_posix()}/hooks:/repo-git/hooks:ro",
+                          f"{gitc.as_posix()}/config:/repo-git/config:ro", f"{gitc.as_posix()}/worktrees:/repo-git/worktrees:ro",
+                          f"{gitc.as_posix()}/worktrees/w1:/repo-git/worktrees/w1"] and len(mounts) == 10, str(mounts))
+    check("linked worktree: a ro /work/.git file points at worktrees/w1, whose ro gitdir points back at /work/.git",
+          generated(":/work/.git:ro") == "gitdir: /repo-git/worktrees/w1\n"
+          and generated(":/repo-git/worktrees/w1/gitdir:ro") == "/work/.git\n", str(mounts))
+    check("--login adds the sign-in hosts; the command comes last",
+          "DW_ALLOW_DOMAINS=api.anthropic.com claude.ai platform.claude.com console.anthropic.com" in words
+          and words[-4:] == ["dw-worker:1.1.0", "claude", "-p", "hi"], done.stdout + done.stderr)
+    done = run(*base, "--worktree-name", "w1")
+    check("--worktree-name on a main checkout exits 2", done.returncode == 2 and "linked worktree" in done.stderr, done.stderr)
+    done = run("--worktree", linked.as_posix(), "--director", director.as_posix(), "--git-common", gitc.as_posix())
+    check("a linked worktree without --worktree-name exits 2", done.returncode == 2 and "<worktree>/.git" in done.stderr, done.stderr)
+    done = run(*base, "--offline")
+    check("--offline: --network none and no allowlist", "--network none" in done.stdout and "DW_ALLOW_DOMAINS" not in done.stdout, done.stdout)
+    done = run(*linked_base, "--worktree-name", "nope")
+    check("an unknown --worktree-name exits 2", done.returncode == 2 and "no worktree named nope" in done.stderr, done.stderr)
+    done = run("--worktree", wt.as_posix(), "--git-common", gitc.as_posix())
+    check("no --director exits 2", done.returncode == 2 and "--director" in done.stderr, done.stderr)
+    bare = folder / "bare.git"
+    bare.mkdir()
+    done = run("--worktree", wt.as_posix(), "--director", director.as_posix(), "--git-common", bare.as_posix())
+    check("a .git without hooks/ and config exits 2 (docker would create them as root)",
+          done.returncode == 2 and "hooks/ and config" in done.stderr, done.stderr)
+
+
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="director_work_selftest_")).resolve()
@@ -1869,11 +3105,19 @@ def main():
         test_scope(tmp)
         test_submodule_ignore(tmp)
         test_shared_code()
+        test_py39_newline()
         test_vocabulary()
         test_must_read_size()
         test_must_read_reasons()
         test_hook(tmp)
         test_hook_protect(tmp)
+        test_hook_rules(tmp)
+        test_pause(tmp)
+        test_auto_pause(tmp)
+        test_audit(tmp)
+        test_review(tmp)
+        test_doctor(tmp)
+        test_container(tmp)
         test_evidence(tmp)
         test_order_checks(tmp)
         test_preflight(tmp)

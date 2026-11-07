@@ -1,0 +1,254 @@
+{
+  "schema_version": 1,
+  "about": "Rules for hook_guard.py --rules. Each rule: id, category, decision per profile (deny / ask / none), reason (no angle brackets), match (one object or a list; any one matching is enough), example_block, example_allow (hook inputs; selftest runs every one under both profiles), optional permissions (Claude Code permission rules that setup_project_settings.py --guard-profile writes into permissions.deny or permissions.ask for that profile). The strictest decision wins; between equal decisions the lowest id wins, so the order of rules never changes a result. G00 is built in: Write / Edit of the rules file in use, of this file or of hook_guard.py.",
+  "internal_report_tools": ["SendMessage", "mcp__ccd_session_mgmt__send_message"],
+  "read_only_mcp_prefixes": ["get", "list", "read", "search", "query", "status"],
+  "auto_pause": {
+    "about": "hook_guard.py --pause-flag: this many denies within window_s seconds write the pause flag (the deny count is kept in the flag path + .denies); null is off",
+    "worker": {"denies": 5, "window_s": 600},
+    "director": null
+  },
+  "review": {
+    "about": "hook_guard.py --review (off unless given): asks of these rule categories go to a second model first (claude -p, no tools, no hooks); block turns the ask into a deny, anything else keeps the ask",
+    "model": "haiku",
+    "timeout_s": 45,
+    "categories": ["push", "delete", "send", "config"]
+  },
+  "pause": {
+    "about": "hook_guard.py --pause-flag: while the flag file exists only these calls run; the Director's list adds pause_ctl.py off",
+    "reason": "only reading, reporting and progress files run while paused; report where you stopped and wait for the Director to run pause_ctl.py off",
+    "allow_tools": ["Read", "Grep", "Glob", "NotebookRead", "TaskList", "TaskGet", "TaskOutput", "ToolSearch", "ReadNotifications", "mcp__ccd_turn__update_plan", "mcp__ccd_turn__wrap_up"],
+    "allow_mcp_read_only": true,
+    "allow_write": ["**/RESUME_STATE.md", "**/TASK_REPORT*.md"],
+    "allow_shell": {
+      "worker": ["git(?-i: -C \\S+| --no-pager)* (?:status|log|diff|show|rev-parse)(?!.*--output)(?: .*)?", "(?:tasklist|get-process|gps|ps)(?: .*)?", "(?:select-object|sort-object|format-table|format-list|measure-object|head|tail|wc|grep|findstr)(?: .*)?", "(?:py|python[0-9.]*)(?-i: -[IuBEsS]+| -X \\S+)* \\S*pause_ctl\\.py (?:status|procs)(?: .*)?"],
+      "director": ["git(?-i: -C \\S+| --no-pager)* (?:status|log|diff|show|rev-parse)(?!.*--output)(?: .*)?", "(?:tasklist|get-process|gps|ps)(?: .*)?", "(?:select-object|sort-object|format-table|format-list|measure-object|head|tail|wc|grep|findstr)(?: .*)?", "(?:py|python[0-9.]*)(?-i: -[IuBEsS]+| -X \\S+)* \\S*pause_ctl\\.py (?:status|procs)(?: .*)?", "(?:py|python[0-9.]*)(?-i: -[IuBEsS]+| -X \\S+)* \\S*pause_ctl\\.py off(?: .*)?"]
+    }
+  },
+  "rules": [
+    {
+      "id": "G01",
+      "category": "force_push",
+      "decision": {"worker": "deny", "director": "deny"},
+      "reason": "force push, mirror push and deleting a remote ref rewrite shared history; only the PO runs them (docs/08)",
+      "match": {"kind": "shell", "cmd": ["git"], "args": [["push"]],
+                "flags": ["--force.*", "--force-with-lease.*", "--force-if-includes", "--mirror", "--delete", "--prune", "-[a-z]*[fd][a-z]*", "\\+.*", ":.*"]},
+      "example_block": {"tool_name": "Bash", "tool_input": {"command": "git push --force origin main"}},
+      "example_allow": {"tool_name": "Bash", "tool_input": {"command": "git log --oneline -3"}}
+    },
+    {
+      "id": "G02",
+      "category": "push",
+      "decision": {"worker": "deny", "director": "deny"},
+      "reason": "pushing needs the PO's approval (docs/08); the PO runs the push",
+      "match": [
+        {"kind": "shell", "cmd": ["git"], "args": [["push", "send-pack", "http-push"]]},
+        {"kind": "shell", "cmd": ["git-push", "git-send-pack", "git-http-push"]},
+        {"kind": "shell", "cmd": ["git"], "arg_search": ["(?i)^(--config-env=)?alias\\.[^=]*="]},
+        {"kind": "shell", "cmd": ["git"], "args": [["config"]], "arg_search": ["(?i)^alias\\."],
+         "not_flags": ["--get.*", "-l", "--list", "--unset.*", "--remove-section"]},
+        {"kind": "shell", "cmd": ["gh"], "args": [["repo"], ["sync"]]}
+      ],
+      "example_block": [{"tool_name": "Bash", "tool_input": {"command": "git push origin main"}},
+                        {"tool_name": "Bash", "tool_input": {"command": "gh repo sync"}},
+                        {"tool_name": "Bash", "tool_input": {"command": "git send-pack origin HEAD"}},
+                        {"tool_name": "Bash", "tool_input": {"command": "git -c alias.p=push p"}},
+                        {"tool_name": "Bash", "tool_input": {"command": "git config alias.p push"}}],
+      "example_allow": [{"tool_name": "Bash", "tool_input": {"command": "git status"}},
+                        {"tool_name": "Bash", "tool_input": {"command": "git config --get alias.p"}},
+                        {"tool_name": "Bash", "tool_input": {"command": "git -c core.autocrlf=false status"}}],
+      "permissions": ["Bash(git push *)", "PowerShell(git push *)", "Bash(git send-pack *)", "PowerShell(git send-pack *)",
+                      "Bash(git http-push *)", "PowerShell(git http-push *)", "Bash(gh repo sync *)", "PowerShell(gh repo sync *)"]
+    },
+    {
+      "id": "G10",
+      "category": "delete",
+      "decision": {"worker": "deny", "director": "ask"},
+      "reason": "deleting files is the cleaner's job (docs/08); send a deletable list (path, size, why) to the Director or the cleaner",
+      "match": [
+        {"kind": "shell", "cmd": ["rm", "rmdir", "rd", "del", "erase", "unlink", "shred", "remove-item", "ri", "clear-recyclebin"]},
+        {"kind": "shell", "cmd": ["find"], "flags": ["-delete"]}
+      ],
+      "example_block": [{"tool_name": "Bash", "tool_input": {"command": "rm -rf build"}},
+                        {"tool_name": "PowerShell", "tool_input": {"command": "Remove-Item -Recurse build"}}],
+      "example_allow": [{"tool_name": "Bash", "tool_input": {"command": "git rm --cached notes.txt"}},
+                        {"tool_name": "Bash", "tool_input": {"command": "grep -rn rm docs"}}],
+      "permissions": ["Bash(rm *)", "Bash(rmdir *)", "Bash(unlink *)", "Bash(shred *)", "PowerShell(Remove-Item *)"]
+    },
+    {
+      "id": "G11",
+      "category": "delete",
+      "decision": {"worker": "deny", "director": "ask"},
+      "reason": "deleting through an MCP tool is the cleaner's job (docs/08); send a deletable list (what, where, why) to the Director or the cleaner",
+      "match": {"kind": "mcp", "words": ["delete", "trash", "destroy", "purge", "wipe", "erase", "uninstall"]},
+      "example_block": {"tool_name": "mcp__files__trash_file", "tool_input": {"id": "x"}},
+      "example_allow": {"tool_name": "mcp__files__get_file_metadata", "tool_input": {"id": "x"}},
+      "permissions": ["mcp__*__delete_*", "mcp__*__trash_*"]
+    },
+    {
+      "id": "G20",
+      "category": "send",
+      "decision": {"worker": "deny", "director": "ask"},
+      "reason": "publishing or sending outside this machine needs the PO's approval (docs/08); report what you would send instead",
+      "match": [
+        {"kind": "shell", "cmd": ["gh"], "args": [["pr"], ["create", "merge", "comment", "review", "close", "reopen", "edit", "ready"]]},
+        {"kind": "shell", "cmd": ["gh"], "args": [["issue"], ["create", "comment", "close", "reopen", "edit", "delete", "transfer"]]},
+        {"kind": "shell", "cmd": ["gh"], "args": [["release", "gist"], ["create", "upload", "edit", "delete"]]},
+        {"kind": "shell", "cmd": ["gh"], "args": [["repo"], ["create", "edit", "delete", "rename", "archive", "fork"]]},
+        {"kind": "shell", "cmd": ["gh"], "args": [["api"]],
+         "flags": ["-X(post|put|patch|delete)", "--method=(post|put|patch|delete)", "post", "put", "patch", "delete", "-f", "--field.*", "--raw-field.*", "--input.*"]},
+        {"kind": "shell", "cmd": ["npm", "pnpm", "yarn", "cargo"], "args": [["publish"]]},
+        {"kind": "shell", "cmd": ["twine"], "args": [["upload"]]},
+        {"kind": "shell", "cmd": ["docker", "podman"], "args": [["push"]]},
+        {"kind": "shell", "cmd": ["gem"], "args": [["push"]]}
+      ],
+      "example_block": [{"tool_name": "Bash", "tool_input": {"command": "gh pr create --fill"}},
+                        {"tool_name": "Bash", "tool_input": {"command": "gh api -X POST repos/o/r/issues"}}],
+      "example_allow": [{"tool_name": "Bash", "tool_input": {"command": "gh pr view 12"}},
+                        {"tool_name": "Bash", "tool_input": {"command": "gh api repos/o/r/pulls"}}],
+      "permissions": ["Bash(gh pr create *)", "Bash(gh pr merge *)", "Bash(gh pr comment *)", "Bash(gh issue create *)",
+                      "Bash(gh issue comment *)", "Bash(gh release *)", "Bash(gh repo create *)", "Bash(npm publish *)",
+                      "Bash(cargo publish *)", "Bash(twine upload *)", "Bash(docker push *)"]
+    },
+    {
+      "id": "G21",
+      "category": "send",
+      "decision": {"worker": "deny", "director": "ask"},
+      "reason": "sending or publishing through an MCP tool needs the PO's approval (docs/08); report to the Director with SendMessage instead",
+      "match": {"kind": "mcp", "words": ["send", "post", "publish", "share", "reply", "comment", "merge", "create_pr",
+                                          "create_pull_request", "deploy", "deployment", "promote", "upload", "tweet"]},
+      "example_block": [{"tool_name": "mcp__chat__send_message", "tool_input": {"text": "x"}},
+                        {"tool_name": "mcp__github__createPullRequest", "tool_input": {"title": "x"}}],
+      "example_allow": [{"tool_name": "mcp__ccd_session_mgmt__send_message", "tool_input": {"to": "x", "message": "x"}},
+                        {"tool_name": "SendMessage", "tool_input": {"to": "x", "message": "x"}},
+                        {"tool_name": "mcp__github__list_pull_requests", "tool_input": {}}]
+    },
+    {
+      "id": "G30",
+      "category": "pay",
+      "decision": {"worker": "deny", "director": "deny"},
+      "reason": "paying, buying, ordering or transferring is the PO's (docs/08); report the item and price instead",
+      "match": {"kind": "mcp", "words": ["buy", "purchase", "checkout", "payment", "pay", "order", "subscribe", "transfer", "renew"]},
+      "example_block": {"tool_name": "mcp__vendor__buy_domain", "tool_input": {"name": "x"}},
+      "example_allow": [{"tool_name": "mcp__vendor__get_order", "tool_input": {"id": "x"}},
+                        {"tool_name": "mcp__vendor__get_domain_order", "tool_input": {"id": "x"}},
+                        {"tool_name": "mcp__vendor__get_purchase_quote", "tool_input": {"id": "x"}},
+                        {"tool_name": "mcp__vendor__list_billing_charges", "tool_input": {}}],
+      "permissions": ["mcp__*__buy_*", "mcp__*__purchase_*", "mcp__*__checkout*"]
+    },
+    {
+      "id": "G40",
+      "category": "config",
+      "decision": {"worker": "deny", "director": "ask"},
+      "reason": "Claude Code settings, credentials and CLAUDE.md files are set by the PO or the Director; report the change you need",
+      "match": {"kind": "path", "tools": ["Write", "Edit", "MultiEdit", "NotebookEdit"],
+                "globs": ["**/.claude/settings*.json", "**/managed-settings.json", "**/managed-settings.d/**", "**/.claude/.credentials.json",
+                          "**/CLAUDE.md", "**/CLAUDE.local.md", "~/.claude.json", "**/.mcp.json"],
+                "except": ["~/.claude/projects/*/memory/**", "~/.claude/plans/**"], "shell_write": true},
+      "example_block": {"tool_name": "Edit", "tool_input": {"file_path": "~/.claude/settings.json", "old_string": "a", "new_string": "b"}},
+      "example_allow": [{"tool_name": "Bash", "tool_input": {"command": "cat CLAUDE.md"}},
+                        {"tool_name": "Write", "tool_input": {"file_path": "~/.claude/projects/p/memory/note.md", "content": "x"}},
+                        {"tool_name": "Write", "tool_input": {"file_path": "~/.claude/plans/plan.md", "content": "x"}},
+                        {"tool_name": "Edit", "tool_input": {"file_path": "docs/settings.md", "old_string": "a", "new_string": "b"}}],
+      "permissions": ["Edit(~/.claude/settings*.json)", "Edit(//**/.claude/settings*.json)", "Edit(//**/managed-settings.json)",
+                      "Edit(//**/CLAUDE.md)", "Edit(//**/CLAUDE.local.md)", "Edit(~/.claude.json)", "Edit(//**/.mcp.json)"]
+    },
+    {
+      "id": "G41",
+      "category": "config",
+      "decision": {"worker": "deny", "director": "ask"},
+      "reason": "machine-wide or user-wide settings are the PO's; report the change you need",
+      "match": [
+        {"kind": "shell", "cmd": ["git"], "args": [["config"]], "flags": ["--global", "--system"]},
+        {"kind": "shell", "cmd": ["claude"], "args": [["config", "mcp"], ["set", "add", "remove", "add-json"]]},
+        {"kind": "shell", "cmd": ["setx"]},
+        {"kind": "shell", "cmd": ["reg"], "args": [["add", "delete", "import", "copy", "restore", "load"]]},
+        {"kind": "shell", "cmd": ["set-itemproperty", "sp", "new-itemproperty", "remove-itemproperty", "rp", "new-item", "ni"],
+         "flags": ["(-path:?)?(hklm|hkcu|hkey_[a-z_]+|registry::).*"]}
+      ],
+      "example_block": [{"tool_name": "Bash", "tool_input": {"command": "git config --global user.name x"}},
+                        {"tool_name": "PowerShell", "tool_input": {"command": "Set-ItemProperty -Path HKCU:\\Software\\x -Name a -Value 1"}}],
+      "example_allow": [{"tool_name": "Bash", "tool_input": {"command": "git config user.name x"}},
+                        {"tool_name": "PowerShell", "tool_input": {"command": "Set-ItemProperty -Path .\\notes.txt -Name IsReadOnly -Value 1"}}],
+      "permissions": ["Bash(git config --global *)", "Bash(git config --system *)", "Bash(setx *)", "PowerShell(setx *)"]
+    },
+    {
+      "id": "G42",
+      "category": "config",
+      "decision": {"worker": "deny", "director": "ask"},
+      "reason": "changing settings or the permission mode through an MCP tool is the PO's; report the change you need",
+      "match": {"kind": "mcp", "words": ["setting", "settings", "permission_mode"]},
+      "example_block": {"tool_name": "mcp__ccd_settings__set_setting", "tool_input": {"key": "x"}},
+      "example_allow": {"tool_name": "mcp__ccd_settings__get_settings", "tool_input": {}}
+    },
+    {
+      "id": "G50",
+      "category": "secret",
+      "decision": {"worker": "deny", "director": "deny"},
+      "reason": "credential files are not read in a session (docs/08); if the task needs a credential, report which one and why to the Director",
+      "match": [
+        {"kind": "path", "tools": ["Read", "Grep", "Glob", "NotebookRead"],
+         "globs": ["**/.env", "**/.env.*", "**/.envrc", "**/*.pem", "**/*.key", "**/*.p12", "**/*.pfx", "**/id_rsa*", "**/id_ecdsa*", "**/id_ed25519*", "**/.ssh/**", "**/.aws/credentials", "**/.config/gh/hosts.yml", "**/.config/gh", "**/GitHub CLI/hosts.yml", "**/GitHub CLI", "**/.git-credentials", "**/.npmrc", "**/.pypirc", "**/.netrc", "**/_netrc", "**/.claude/.credentials.json", "**/credentials.json", "**/secrets.*"],
+         "except": ["**/.env.example", "**/.env.sample", "**/.env.template", "**/.env.dist", "**/*.pub", "**/.ssh/known_hosts*", "**/.ssh/config"]},
+        {"kind": "shell", "cmd": ["cat", "tac", "nl", "more", "less", "bat", "head", "tail", "sed", "awk", "gawk", "grep", "egrep", "fgrep", "rg", "findstr", "select-string", "sls", "get-content", "gc", "type", "cp", "copy", "copy-item", "cpi", "scp", "rsync", "base64", "certutil", "xxd", "od", "hexdump", "strings", "format-hex", "fhx", "import-csv", "get-filehash"],
+         "path_args": ["**/.env", "**/.env.*", "**/.envrc", "**/*.pem", "**/*.key", "**/*.p12", "**/*.pfx", "**/id_rsa*", "**/id_ecdsa*", "**/id_ed25519*", "**/.ssh/**", "**/.aws/credentials", "**/.config/gh/hosts.yml", "**/.config/gh", "**/GitHub CLI/hosts.yml", "**/GitHub CLI", "**/.git-credentials", "**/.npmrc", "**/.pypirc", "**/.netrc", "**/_netrc", "**/.claude/.credentials.json", "**/credentials.json", "**/secrets.*"],
+         "path_except": ["**/.env.example", "**/.env.sample", "**/.env.template", "**/.env.dist", "**/*.pub", "**/.ssh/known_hosts*", "**/.ssh/config"]}
+      ],
+      "example_block": [{"tool_name": "Read", "tool_input": {"file_path": ".env"}},
+                        {"tool_name": "Bash", "tool_input": {"command": "cat ~/.ssh/id_ed25519"}}],
+      "example_allow": [{"tool_name": "Read", "tool_input": {"file_path": ".env.example"}},
+                        {"tool_name": "Bash", "tool_input": {"command": "cat README.md"}}],
+      "permissions": ["Read(//**/.env)", "Read(//**/.env.local)", "Read(//**/.env.production)", "Read(//**/*.pem)", "Read(//**/*.key)",
+                      "Read(//**/*.p12)", "Read(//**/*.pfx)", "Read(//**/id_rsa)", "Read(//**/id_ed25519)", "Read(~/.ssh/**)",
+                      "Read(~/.aws/credentials)", "Read(~/.config/gh/hosts.yml)", "Read(~/AppData/Roaming/GitHub CLI/hosts.yml)", "Read(~/.git-credentials)", "Read(~/.netrc)",
+                      "Read(~/.claude/.credentials.json)"]
+    },
+    {
+      "id": "G51",
+      "category": "secret",
+      "decision": {"worker": "deny", "director": "deny"},
+      "reason": "printing the environment or a secret variable puts credentials in the transcript (docs/08); use the variable without printing it, or report what you need to the Director",
+      "match": [
+        {"kind": "shell", "cmd": ["env", "printenv", "set", "export"], "bare": true},
+        {"kind": "shell", "cmd": ["env"], "flags": ["-.*", "\\w+=.*"]},
+        {"kind": "shell", "cmd": ["export"], "flags": ["-p"]},
+        {"kind": "shell", "cmd": ["declare", "typeset"], "flags": ["-[a-z]*[px][a-z]*"]},
+        {"kind": "shell", "cmd": ["printenv"], "arg_search": ["(?i)(token|secret|passw(or)?d|passphrase|credential|api_?key|access_?key|private_?key|(?<![a-z])key|auth(?!or))"]},
+        {"kind": "shell", "cmd": ["get-childitem", "gci", "dir", "ls", "get-item", "gi", "get-itemproperty", "gp", "get-content", "gc", "cat", "type"],
+         "flags": ["(-path:|-literalpath:)?(env|variable):.*"]},
+        {"kind": "shell", "cmd": ["echo", "echo.", "printf", "print", "write-output", "write", "write-host", "write-information", "out-host", "say"],
+         "arg_search": ["(?i)[$%][{(]?(env:)?\\w*(token|secret|passw(or)?d|passphrase|credential|api_?key|access_?key|private_?key|(?<![a-z])key|auth(?!or))"]},
+        {"kind": "shell", "cmd": ["[$%].*(token|secret|passw(or)?d|passphrase|credential|api_?key|access_?key|private_?key|(?<![a-z])key|auth(?!or)).*", "\\[(system\\.)?environment\\]::getenvironmentvariables?.*"]}
+      ],
+      "example_block": [{"tool_name": "Bash", "tool_input": {"command": "printenv"}},
+                        {"tool_name": "Bash", "tool_input": {"command": "echo $GITHUB_TOKEN"}},
+                        {"tool_name": "PowerShell", "tool_input": {"command": "Get-ChildItem env:"}}],
+      "example_allow": [{"tool_name": "Bash", "tool_input": {"command": "echo $HOME"}},
+                        {"tool_name": "Bash", "tool_input": {"command": "set -e"}},
+                        {"tool_name": "Bash", "tool_input": {"command": "printenv PATH"}}]
+    },
+    {
+      "id": "G52",
+      "category": "secret",
+      "decision": {"worker": "deny", "director": "deny"},
+      "reason": "commands that print a token or a stored password put it in the transcript (docs/08); report what you need the credential for to the Director",
+      "match": [
+        {"kind": "shell", "cmd": ["gh"], "args": [["auth"], ["token"]]},
+        {"kind": "shell", "cmd": ["gh"], "args": [["auth"], ["status"]], "flags": ["--show-token", "-t"]},
+        {"kind": "shell", "cmd": ["git"], "args": [["credential"], ["fill"]]},
+        {"kind": "shell", "cmd": ["git"], "args": [["credential-manager", "credential-manager-core", "credential-store", "credential-cache", "credential-wincred", "credential-osxkeychain", "credential-libsecret"], ["get"]]},
+        {"kind": "shell", "cmd": ["aws"], "args": [["configure"], ["get", "export-credentials"]]},
+        {"kind": "shell", "cmd": ["aws"], "args": [["sts"], ["get-session-token"]]},
+        {"kind": "shell", "cmd": ["az"], "args": [["account"], ["get-access-token"]]},
+        {"kind": "shell", "cmd": ["gcloud"], "args": [["auth"], ["print-access-token", "print-identity-token"]]},
+        {"kind": "shell", "cmd": ["gcloud"], "args": [["auth"], ["application-default"], ["print-access-token"]]},
+        {"kind": "shell", "cmd": ["kubectl"], "args": [["config"], ["view"]], "flags": ["--raw"]},
+        {"kind": "shell", "cmd": ["security"], "args": [["find-generic-password", "find-internet-password"]], "flags": ["-w", "-g"]}
+      ],
+      "example_block": [{"tool_name": "Bash", "tool_input": {"command": "gh auth token"}},
+                        {"tool_name": "Bash", "tool_input": {"command": "git credential fill"}}],
+      "example_allow": [{"tool_name": "Bash", "tool_input": {"command": "gh auth status"}},
+                        {"tool_name": "Bash", "tool_input": {"command": "aws configure list"}}]
+    }
+  ]
+}

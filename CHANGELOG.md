@@ -6,6 +6,44 @@
 - **MINOR**：新增規則、文件、工具或選項，舊檔案照樣通過。
 - **PATCH**：修正文字、修 bug，規則不變。
 
+## 1.1.0 — 2026-11-07
+
+執行期防護：worker 的每個工具呼叫先過規則檔，危險動作擋下或等人點頭，機密不讀、輸出遮罩，每個動作記進可驗證的紀錄，可以一鍵暫停；`doctor.py` 照實報哪些真的生效。另提供在 WSL docker 容器裡跑 worker 的腳本。全部是新工具和選項，不加參數時舊行為不變，照本檔政策是 MINOR。這是防手滑，不是安全邊界（README「執行期防護」一節）。
+
+- `hook_guard.py --rules tools/guard_rules.json --profile worker|director`：每個工具呼叫比對規則檔（shell 的 argv，含 wrapper 和 `bash -c` / `cmd /c` / `powershell -c`；Write / Edit 的路徑 glob；MCP 的動作字，get/list/read/search/query/status 一律不擋）。deny 是 exit 2，ask 回 PreToolUse 的 ask JSON；取最嚴的結果，同級取最小 ID，規則順序不影響結果。規則檔壞了 exit 1。內建 G00 保護規則檔和 `hook_guard.py` 本身（含 Bash / PowerShell 的寫入、`sed -i`、重導向）。`setup_project_settings.py --guard-profile` 裝 matcher `*` 的 hook，並把規則寫進 `permissions.deny` / `permissions.ask`。
+- 規則：G02 擋 `git send-pack`、`http-push`、`git-*` 執行檔和設定 alias（`-c alias.*=`、`--config-env=alias.*`、`git config alias.*`）；G40 擋 Write / Edit 和 shell 寫入（`sed -i`、`tee`、`cp` 目的地、`Set-Content`、`>`、`[IO.File]::Write*`）設定檔、憑證、CLAUDE.md、`.mcp.json`；重導向目標從原始指令行讀，`{}>` 這類寫法藏不住。
+- 機密：G50 擋讀憑證檔（Read / Grep / Glob 和讀檔指令，含 Windows 的 `%APPDATA%/GitHub CLI/hosts.yml`），G51 擋印出環境變數或機密變數，G52 擋印 token 的指令。`secret_mask.py` 把 key、token、JWT、bearer、URL 密碼和機密賦值遮成 `[MASKED:種類]`，`--check` 只列種類。
+- 暫停：`pause_ctl.py on|off|status` 寫或刪 `DIRECTOR/PAUSE`，記 `PAUSE` 行進 `DIRECTOR_LOG.md`；`procs` 依 CPU 變化列出程序樹裡還在跑的 PID，從不結束程序。`hook_guard --pause-flag` 暫停時只放行規則檔 `pause` 段列的讀取和回報動作；allowlist 裡的 shell 行有輸出重導向就不放行。worker 600 秒內 5 次 deny 自動暫停（總監不開），`pause_ctl.py off` 解除。
+- 動作紀錄：`audit_log.py` 當 PostToolUse / PostToolUseFailure hook，每個工具呼叫寫一行 JSONL（輸入遮罩後取 500 字，輸出只記 sha256 和長度），前後雜湊串成鏈；`verify` 找第一個斷點，可用 `DIRECTOR_LOG.md` 已 commit 的錨點比對；`head` 印 `AUDIT_HEAD`，`cite` 印給 TASK_REPORT 的 `AUDIT_RANGE`。`hook_guard --audit` 另記 deny / ask / 暫停的決定。
+- `hook_guard --review`（預設關）：規則分類是 push、delete、send、config 的 ask，先給 `claude -p`（無工具、無 hook）看遮罩後的輸入；只有回 block 才把 ask 改成 deny，其他回答、逾時、錯誤一律維持 ask。只會多擋。
+- `doctor.py`：實際生效的 claude 版本和 PATH 上每一個 claude、合併後的設定層、實跑一次 hook_guard、`audit_log verify`、permissions、子程序環境清洗、隔離（`--probe` 查四項，只印憑證類變數的名稱）、worktree。每項標 ENFORCED / CONFIGURED_NOT_VERIFIED / NOT_ENFORCED / MISSING。
+- `setup_project_settings.py --runtime-guard`：一次寫入 worker profile、`--pause-flag`、動作紀錄（預設放 git common dir 下）和 `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`；`templates/settings.runtime-guard.json` 是同一組的範本，selftest 檢查兩者相同。hook 實測不帶 `--pause-flag`、`--audit`、`--review`，測試的 deny 不會算進真 worker 的自動暫停。
+- `tools/container/`：Dockerfile（base 以 digest 鎖定、Claude Code 鎖版本、不自動更新）、entrypoint（以 root 設防火牆後 `setpriv` 成 `dw`，丟掉所有 capability、no_new_privs）、`init_firewall.sh`（只放行 `DW_ALLOW_DOMAINS` 名稱的 443，啟動時解析；IPv6 全擋）、`run_worker.sh`（worktree 可寫、DIRECTOR 唯讀、`.git` 的 `hooks/`、`config`、`worktrees/` 唯讀，不設 GIT_DIR，`gc.auto=0`）。
+- README 新增「執行期防護：哪些真的擋、哪些只是提醒」一節；`docs/10` 加第 23 條（只印環境變數名稱，不印值）；`docs/11` 補容器 worker 的開法。
+- `selftest.py` 加上面各項的正反案例（524 → 1,326 項）。
+- 修正：Python 3.9 相容。`Path.write_text(newline=)` 要 3.10，3.9 的自動暫停會崩潰；四處改用 `open(..., newline="\n")`，selftest 靜態掃 `tools/*.py` 不得再出現。
+
+對齊初衷：
+1. 幫到誰：worker 在 bypass 模式下能做的事太多，PO 看不到它做了什麼。批次 1 交付後總監的對抗測試找到的繞路（git alias、send-pack、shell 寫規則檔、Windows 的 gh hosts.yml、暫停中的重導向、`{}>`）先重現才修，修完重跑。
+2. Desktop：在 Desktop Code 分頁的 worker session 實作，Python 3.11 跑 selftest 1,326/1,326。容器在 WSL docker 的拋棄式 clone 上實測：繞路探測 35/35 擋下，容器裡 selftest 1,304/1,304（Windows 專屬案例 SKIP），doctor 在 linked worktree 報 enforced=5、not_enforced=0。`--review` 只用假的 claude 測過、Monitor 沒有實際取樣，兩項 NOT_VERIFIED；容器登入（C6）和真實工單（C7）還沒做。
+3. 服務：PO 不用盯細節（3）：危險動作擋下或等人點頭，事後有可驗證的紀錄。成品要真的對（5）：doctor 照實報，沒生效的不說生效。零成本（7）：只用標準函式庫；容器只用免費的 docker 和公開 image。
+4. 核心：每輪必讀不變。Direct 不多步驟：全部是選用參數。PO 不多操作：容器第一次 `/login` 要 PO 做一次。
+5. 舊檔案和舊指令：不加新參數時輸出不變，已通過的不會變不通過。裝了 `--runtime-guard` 的 worker 會被擋下以前放行的動作（設計如此）。
+
+遷移：
+1. 把 `tools/` 整個重新複製到 `DIRECTOR/tools/`。
+2. 要用執行期防護：`setup_project_settings.py --runtime-guard --protect-director <DIRECTOR> --director-worktree <總監的 worktree> --apply`，再在 worker 資料夾跑 `tools/doctor.py`。原生 Windows 上隔離一項永遠是 NOT_ENFORCED，所以 doctor 一定 exit 1。
+3. 要在容器裡跑 worker：照 `tools/README.md` 的 container 一節在 WSL 裡 build 和開；同一個 repo 一次只開一個容器 worker（K6）。
+
+沒做：
+- 容器登入（C6，要 PO 用 account B 做第一次 `/login`）和真實工單試跑（C7）。
+- `--review` 和 Monitor 的指令沒有實際取樣，NOT_VERIFIED。
+- WSL2 sandbox 範本拿掉（要另裝 bubblewrap 和 socat 才能實測）；依使用者決定不啟用 `blockWritesOutsideWorkingDirectories`、不縮小 gh token scope。
+- 容器的 DNS 對 resolver 放行，資料能藏在 DNS 查詢送出；這版沒有白名單 resolver。
+- 容器裡 `.git` 除了 `hooks/`、`config`、`worktrees/` 都可寫（K1）：worker 能動別的 branch 的 ref 和 tag，總監用 `git rev-parse` 取候選。容器裡不能 `git worktree add`，有別的 worktree 時 `git gc` exit 128。
+- 容器的動作紀錄一律叫 `work.jsonl`，同 repo 兩個容器 worker 會撞（K6）。
+- 0.12.0「沒做」裡的 `doctor` 指令這版做了；那段是當時的紀錄，不改。
+
 ## 1.0.0 — 2026-11-06
 
 正式版。程式、規則和遷移步驟都與 1.0.0-rc.1 相同，只改版號（`VERSION`）。Owner 2026-11-06 確認發布。從 0.12.x 升級照下方 1.0.0-rc.1 段的「遷移」做。

@@ -228,9 +228,45 @@ ANSWER:
 | `director_work.example.json` | 工具設定範例 | 建置時 |
 | `VERSION`、`CHANGELOG.md` | 版本號、各版改了什麼、升級怎麼遷移 | 建置時記版本；升級時 |
 
+## 執行期防護（1.1.0）：哪些真的擋、哪些只是提醒
+
+`tools/hook_guard.py`、`audit_log.py`、`pause_ctl.py`、`doctor.py` 和 `templates/settings.runtime-guard.json` 是一組防手滑的機制，**不是安全邊界**，不要當成和 VM、容器或平台級 agent 一樣安全。裝好後在 worker 的資料夾跑 `tools/doctor.py`，它會逐項標 ENFORCED / CONFIGURED_NOT_VERIFIED / NOT_ENFORCED / MISSING（見 `tools/README.md`）。
+
+| 項目 | 等級 | 理由 |
+|---|---|---|
+| deny 規則（hook exit 2 ＋ `permissions.deny`） | **擋**，但不是安全邊界 | Claude Code 執行工具前一定先跑 hook；但指令文字可以繞：`eval`、先寫腳本再跑、變數拼字、編碼 |
+| ask 規則（只有總監的 profile 有） | **擋到有人點頭** | `permissions.ask` 在 bypass 模式也會問；hook 回 ask 在 bypass 模式下的行為 NOT_VERIFIED |
+| 暫停開關 | **擋 Claude 發起的新動作** | 已經在跑的程序不會停，要另外依 PID 停整棵程序樹 |
+| 自動暫停（worker 600 秒內 5 次 deny） | **擋之後的新動作** | 只算 hook 的 deny；總監不開 |
+| 動作紀錄 | **可驗證、不能防竄改** | 能寫檔的人可以整條重寫；有錨點才抓得到；不含使用者自己打的 `!` 指令和 hook 以外的行為 |
+| 機密讀取 | **擋常見寫法** | 清單以外的檔名、間接讀法擋不到 |
+| 機密遮罩 | **擋常見格式** | 沒見過的 token 格式遮不到 |
+| 獨立審查 `--review` | **只會多擋**；NOT_VERIFIED | 預設關。selftest 只用假的 claude 測過，沒有用真的 `claude -p` 取樣；模型判斷不穩定，不能當主閘門 |
+| Monitor 的指令 | 要 claude ≥ 2.1.314 才經過 hook；NOT_VERIFIED | 欄位格式照官方文件假設，沒有在真的 Monitor 上取樣。doctor 依版本報 |
+| worktree 隔離 | **檢查** | doctor 報告，不強制 |
+| OS 層隔離 | 原生 Windows：**沒有**（NOT_ENFORCED） | 指令和 Claude Code 同權限跑，能動到整台機器的檔案；也沒有網路出口管制。doctor 在原生 Windows 上永遠報這一項，所以一定 exit 1 |
+| 容器裡的 worker（`tools/container/`） | **擋**：根目錄和 DIRECTOR 唯讀、沒有 capability、只能連 `api.anthropic.com:443` | 實測 35 案繞路探測都擋下；`.git` 仍可寫（K1）、DNS 外洩擋不到。doctor `--probe --director` 在容器裡查四項 |
+
+刻意沒做、或依使用者決定不做的：
+
+| 落差 | 現況 |
+|---|---|
+| WSL2 sandbox 範本 | 拿掉。要在 WSL2 裡另裝 bubblewrap 和 socat 才能實測，不裝就永遠是 NOT_VERIFIED；不提供一份沒跑過的範本。隔離改走容器 |
+| 工作目錄外寫入 | 依使用者決定不啟用 `blockWritesOutsideWorkingDirectories`；範本不放，hook_guard 不做替代檢查，doctor 不查 |
+| gh token scope | token scope 維持 repo/read:org/gist/workflow，依使用者決定不縮小；防護改靠擋讀取 token 的指令和容器內不放 token |
+| 子程序憑證清洗 | `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1` 依官方設計**保留** `GITHUB_TOKEN`、`GH_TOKEN`、proxy 帳密和 `GIT_CONFIG_*`；原生 Windows 上的行為未證實，`doctor.py --probe` 只列名稱 |
+| OTEL 的 `safety_event` | 2.1.312 起官方不再送，DW 不依賴 |
+| 容器隔離 | 只有用 `tools/container/run_worker.sh` 開的 worker 有；Desktop 開的 session 不在容器裡 |
+| 容器裡的 `.git` | 整個可寫（`hooks/`、`config`、`worktrees/` 除外）：worker 能動別的 branch 的 ref 和 tag。總監用 `git rev-parse` 取候選 commit |
+| 容器的 DNS | 對 resolver 的 DNS 放行，所以資料可以藏在 DNS 查詢裡送出去；這版沒有白名單 resolver |
+| hook 可以被關掉 | 任一設定層 `disableAllHooks: true` 就全部失效；DW 不能、也不該鎖使用者的設定，doctor 會報 NOT_ENFORCED |
+| 憑證代理 | 沒有。憑證仍在環境變數和檔案裡，DW 只擋「讀」的常見寫法 |
+| 紀錄的外部見證 | 沒有。只有雜湊鏈加上從 commit 取的錨點 |
+
 ## 已知限制
 
 - 派工後沒有 ACK 的閒置監看（`NO_ACK` 狀態）：規則和三個測試案例的規格寫在 `docs/06b`，`tools/` 這版沒有監看工具，要自己做或等之後的版本。
+- 執行期防護的落差見上一節。
 - 其他沒做的項目見 `CHANGELOG.md` 各版的「沒做」。
 
 ## 原則
