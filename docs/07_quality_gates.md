@@ -75,6 +75,7 @@
 
 - 總監和 worker **絕不自稱最終通過**（例如 ART_PASS、OWNER_PASS、RELEASE_READY）。總監最高只寫「建議 PO 驗收」。
 - 審查系統本身沒驗證、審查失敗、或沒跑，都要照實寫，不可以說檢查通過。
+- PO 的回覆要綁到 PO 看的那個成品：候選 ID、commit、入口檔、manifest SHA-256 和訊息編號，寫成 `PO_PRODUCT_REVIEW` 或 `PO_ACCEPTANCE.json`（`docs/02`）。綁不到的回覆不能拿來說「PO 看過這一版」。初衷卡改過之後，舊版的「看過」不算看過新條件。
 
 ### 7. 新增閘門與來源資料
 

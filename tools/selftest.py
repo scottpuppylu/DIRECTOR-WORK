@@ -110,6 +110,34 @@ def expect(name, tool, code, *args, cwd=None, says=None, lacks=None):
         failures.append(f"{name}: expected exit {code} with {says!r} and without {lacks!r}, got {got}: {out.strip()[-300:]}")
 
 
+# 2.1 (report 5 F-1): the rules pack must verify without git (ZIP download, minimal machine). A test group that builds
+# git fixtures is skipped, by name, only when no git program is on PATH; with git, a fixture error still fails.
+GIT = shutil.which("git")
+skipped = []
+# Groups that build git fixtures (found by a run with git off PATH, 2026-11-08); guarded() skips them by name
+# without git, and also skips any other group that dies on a missing program, so a new git test cannot crash the run.
+GIT_GROUPS = {
+    "test_scope", "test_submodule_ignore", "test_hook", "test_hook_protect", "test_hook_rules", "test_session_profiles",
+    "test_pause", "test_audit", "test_audit_names", "test_review", "test_guard_modes", "test_doctor",
+    "test_doctor_launch", "test_worker_clone", "test_preflight", "test_trusted_rerun", "test_rerun_binding",
+    "test_trusted_isolation",
+}
+
+
+def skip(group, why="needs git, none on PATH"):
+    skipped.append(f"{group} ({why})")
+    print(f"SKIP {group}: {why}")
+
+
+def git_fixture(folder):
+    """A fresh repo with one commit, for tests that need a real worktree (never the DW checkout itself, F-1)."""
+    folder.mkdir(parents=True, exist_ok=True)
+    for argv in (["init", "-q"], ["add", "-A"], ["-c", "user.name=selftest", "-c", "user.email=selftest@example.invalid",
+                                                 "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "fixture"]):
+        subprocess.run(["git", *argv], cwd=folder, check=True, capture_output=True)
+    return folder
+
+
 def gate(tmp, name, kind, text, code, says=None):
     file = tmp / f"{name}.md"
     file.write_text(text, encoding="utf-8")
@@ -967,6 +995,21 @@ def test_purpose():
             failures.append(f"CHANGELOG {version}: no 對齊初衷 line (PURPOSE.md, 改規則前的檢查)")
 
 
+def test_readme_prompt_first():
+    """2.1.0 (PO, via the Director): README opens with the start prompt; its text block comes before "## 這是什麼",
+    and the two versioned guard sections are one section whose heading has no version."""
+    global total
+    text = (TOOLS.parent / "README.md").read_text(encoding="utf-8")
+    total += 1
+    prompt = text.find("```text\n你是這個專案的「總監」")
+    what = text.find("\n## 這是什麼")
+    if prompt < 0 or what < 0 or prompt > what:
+        failures.append("README: the start prompt text block must come before '## 這是什麼'")
+    total += 1
+    if "\n## 防護：哪些真的擋、哪些只提醒\n" not in text or re.search(r"^#+ .*（\d+\.\d+\.\d+）", text, re.M):
+        failures.append("README: one guard section '## 防護：哪些真的擋、哪些只提醒' without a version in the heading")
+
+
 def test_chat_to_product(tmp):
     """2.0.0 (PURPOSE aim 8): mode choice first, a locked BRIEF that orders trace to, and a choice page for A/B picks."""
     global total
@@ -977,7 +1020,13 @@ def test_chat_to_product(tmp):
               ("templates/BRIEF.md", "只有使用者能改這張卡"), ("templates/BRIEF.md", "| B-1 |"),
               ("templates/WORK_ORDER.md", "B-2"), ("templates/choice_page.html", "<title>"),
               ("templates/choice_page.html", 'collection("decisions")'), ("templates/choice_page.html", 'collection("notes")'),
-              ("templates/choice_page.html", 'doc("brief/current")'), ("templates/choice_page.html", "總監建議")]
+              ("templates/choice_page.html", 'doc("brief/current")'), ("templates/choice_page.html", "總監建議"),
+              ("templates/choice_page.html", "sendToClaude"), ("templates/choice_page.html", "canSendToClaude"),
+              ("templates/choice_page.html", "seenAt"), ("templates/choice_page.html", '"comments":{}'),
+              ("templates/choice_page.html", "S.drafts[d.id]"),
+              ("docs/12_chat_to_product.md", "### 六、選擇頁不漏讀"), ("docs/12_chat_to_product.md", '"comments": {}'),
+              ("docs/12_chat_to_product.md", "seenAt"), ("docs/12_chat_to_product.md", "ArtifactComments"),
+              ("docs/03_communication.md", "選擇頁"), ("docs/06_resume_lossless.md", "選擇頁")]
     for path, needle in wanted:
         total += 1
         if needle not in (root / path).read_text(encoding="utf-8"):
@@ -1002,6 +1051,92 @@ def test_chat_to_product(tmp):
            says="## 沒有工單的需求\n- B-1\n", lacks="- B-2\n")
 
 
+def test_onboarding_v210(tmp):
+    """2.1.0 W3 (題3 P-1~P-4, 題2 P-5, 題1 P-3): beginner talks requirements in the mode-choice round, one reply confirms the
+    BRIEF and authorizes the start, the choice page is always asked first, and trace uses two --decisions files."""
+    global total
+    root = TOOLS.parent
+    two = "--decisions <WS>/DIRECTOR/BRIEF.md --decisions <WS>/DIRECTOR/DECISION_REGISTER.md"
+    ask = "需要我把選擇題和圖片放在你自己的 Claude 頁面，讓你點選嗎？直接在這裡回答也可以。"
+    consent = "卡片對，請開一位 AI 助手做這一批"
+    first_q = "這是給誰用的？第一版讓他做成哪一件事就有用？"
+    docs = {name: (root / name).read_text(encoding="utf-8") for name in (
+        "BOOTSTRAP.md", "README.md", "docs/11_claude_desktop.md", "docs/12_chat_to_product.md", "templates/BRIEF.md",
+        "templates/PO_PENDING.md", "tools/README.md")}
+    wanted = [("BOOTSTRAP.md", "### 小白快速路徑"), ("BOOTSTRAP.md", first_q), ("BOOTSTRAP.md", ask), ("BOOTSTRAP.md", two),
+              ("BOOTSTRAP.md", "--only-this"), ("BOOTSTRAP.md", "get_usage"), ("BOOTSTRAP.md", "`GUARDS.md`"),
+              ("BOOTSTRAP.md", consent), ("BOOTSTRAP.md", "不是 git repo、認不出是哪個專案"),
+              ("docs/11_claude_desktop.md", "## 選擇頁的授權與備援"), ("docs/11_claude_desktop.md", ask),
+              ("docs/11_claude_desktop.md", "備援 4 步"), ("docs/11_claude_desktop.md", "--only-this"),
+              ("docs/11_claude_desktop.md", consent), ("docs/11_claude_desktop.md", "選了小白模式不等於同意"),
+              ("docs/12_chat_to_product.md", consent), ("docs/12_chat_to_product.md", first_q), ("docs/12_chat_to_product.md", two),
+              ("docs/12_chat_to_product.md", "店員"), ("docs/12_chat_to_product.md", "不編 B 號"),
+              ("docs/12_chat_to_product.md", "只有 B 開頭的列算待排項目"), ("docs/12_chat_to_product.md", ask),
+              ("README.md", "選小白模式的話，它在同一則回覆就開始問你想做什麼"), ("README.md", consent), ("README.md", "同一輪就開始問我想做什麼"),
+              ("templates/BRIEF.md", "第一階段（選填）"), ("templates/BRIEF.md", "## 待預覽"), ("templates/BRIEF.md", two),
+              ("templates/PO_PENDING.md", "## 待預覽"), ("templates/PO_PENDING.md", "SOURCE:"), ("templates/PO_PENDING.md", "LOCK_AND_USER_ASKED"),
+              ("tools/README.md", two)]
+    for state in ("LOCK_ONLY", "NO_START", "LOCK_AND_USER_ASKED"):
+        wanted.append(("docs/12_chat_to_product.md", f"`{state}`"))
+    # tools/ does not exist on the quick path before the card is locked: the order check runs after locking
+    wanted += [("docs/12_chat_to_product.md", "貼卡前只備好首批工單草稿；鎖卡後、開第一位 worker 前，才跑 `gate_check --order` 和追溯核對"),
+               ("docs/12_chat_to_product.md", "建 `tools/`，跑 `gate_check --order` 和追溯核對"),
+               ("BOOTSTRAP.md", "貼卡前只備好首批工單草稿，`gate_check --order` 和追溯核對留到鎖卡後、開第一位 worker 前"),
+               ("BOOTSTRAP.md", "表中標「延後」的步驟到那時才做"),
+               ("README.md", "小白模式先讀 01、03、06、08、12，其餘最晚在派第一張工單前讀完；一般模式不變")]
+    for path, needle in wanted:
+        total += 1
+        if needle not in docs[path]:
+            failures.append(f"onboarding 2.1.0: {path} lacks {needle!r}")
+    # BOOTSTRAP step 6, docs/11 and docs/12 section 2 used to disagree (F-7): none may keep the old wording
+    stale = [("BOOTSTRAP.md", "小白模式直接用它當待決頁"), ("BOOTSTRAP.md", "一般模式要用，照第 1 點先問"),
+             ("BOOTSTRAP.md", "開線前用一句白話問使用者可不可以開始做"), ("docs/12_chat_to_product.md", "用選擇頁（下面第四節）"),
+             ("docs/11_claude_desktop.md", "會把專案內容放上 claude.ai，要先問 PO。 |")]
+    for path, needle in stale:
+        total += 1
+        if needle in docs[path]:
+            failures.append(f"onboarding 2.1.0: {path} still says {needle!r}, which contradicts the ask-first rule")
+    # all three places that decide whether the choice page may be used must say: asked first, agreed, and the chat fallback
+    for path in ("BOOTSTRAP.md", "docs/11_claude_desktop.md", "docs/12_chat_to_product.md"):
+        total += 1
+        text = docs[path]
+        if not ("PO_PENDING.md" in text and "聊天" in text and ("先問" in text or "一定先問" in text) and "同意" in text):
+            failures.append(f"onboarding 2.1.0: {path} must say the choice page is asked first, needs consent, and falls back to PO_PENDING.md and chat")
+    # the quick path sits between 先問模式 and step 0, so a beginner reads it before any build step
+    boot = docs["BOOTSTRAP.md"]
+    total += 1
+    order = [boot.find(h) for h in ("## 先問模式", "### 小白快速路徑", "## 0. 先確認環境", "## 7. 壓縮門檻", "## 14. 談需求")]
+    if -1 in order or order != sorted(order):
+        failures.append("onboarding 2.1.0: BOOTSTRAP.md headings 先問模式 / 小白快速路徑 / 0 / 7 / 14 are missing or out of order")
+    # the compaction threshold is set only before the first worker, and only for that worker's folder
+    total += 1
+    step7 = boot.split("## 7. 壓縮門檻")[1].split("## 8.")[0]
+    if "只在開第一位 worker 前設定" not in step7 or "--only-this" not in step7 or "--apply" not in step7:
+        failures.append("onboarding 2.1.0: BOOTSTRAP step 7 must set the threshold only before the first worker, with --only-this then --apply")
+    # trace with two --decisions files: B in the brief and DD in the register are both found; only B rows are work to schedule
+    folder = tmp / "onboarding"
+    for name in ("orders", "reports"):
+        (folder / name).mkdir(parents=True)
+    brief = (root / "templates/BRIEF.md").read_text(encoding="utf-8")
+    (folder / "BRIEF.md").write_text(brief, encoding="utf-8")
+    (folder / "REGISTER.md").write_text("| ID | 決定 |\n|---|---|\n| DD-1 | x |\n| DD-2 | y |\n| PO-01 | z |\n\n文字裡提到 DD-7，但不在表格。\n", encoding="utf-8")
+    order_file = folder / "orders" / "WO-001-parser.md"
+    order_file.write_text(TYPED_ORDER.format(base="abc123").replace("DD-1", "B-2, DD-1"), encoding="utf-8")
+    base = ("--orders", folder / "orders", "--reports", folder / "reports", "--config", root / "director_work.example.json")
+    both = base + ("--decisions", folder / "BRIEF.md", "--decisions", folder / "REGISTER.md")
+    expect("two --decisions files find B-2 in the brief and DD-1 in the register", "trace_report.py", 0, *both,
+           says="## TRACES_TO 找不到的編號\n- 無", lacks="- WO-001: B-2")
+    expect("only B rows are schedulable: unserved DD-2 and PO-01 are just listed, the 待預覽 text is never a requirement", "trace_report.py", 0, *both,
+           says=["## 沒有工單的需求\n- B-1\n", "- DD-2\n", "- PO-01\n"], lacks=["配色", "- B-2\n", "- DD-1\n"])
+    expect("the old single-file command still reads the same: DD-1 is not in the brief", "trace_report.py", 0, *base, "--decisions", folder / "BRIEF.md",
+           says=["## TRACES_TO 找不到的編號\n- WO-001: DD-1", "- B-1\n"], lacks="- WO-001: B-2")
+    order_file.write_text(TYPED_ORDER.format(base="abc123").replace("DD-1", "B-2, DD-7, B-9"), encoding="utf-8")
+    expect("an ID that is only in the register's prose, or in no file, is still reported missing", "trace_report.py", 0, *both,
+           says="## TRACES_TO 找不到的編號\n- WO-001: DD-7\n- WO-001: B-9\n")
+    expect("a --decisions path that does not exist stays exit 1", "trace_report.py", 1, *base, "--decisions", folder / "BRIEF.md",
+           "--decisions", folder / "none.md")
+
+
 def test_vocabulary():
     """vocabulary.json is the one source; the docs and templates that spell the lists out must still match it."""
     global total
@@ -1024,7 +1159,7 @@ def test_vocabulary():
             failures.append(f"vocabulary: {path} no longer contains {text!r}; change tools/vocabulary.json and the docs together")
 
 
-MUST_READ_LIMIT = 12392  # bytes of the 每輪必讀 docs on 2026-11-06 (v0.13 moved pure reasons to docs/10; +33 for the IN_FLIGHT fields kept in docs/06, review D01); every round re-reads them, so growth costs quota
+MUST_READ_LIMIT = 9550  # bytes of the 每輪必讀 docs on 2026-11-06 (v0.13 moved pure reasons to docs/10; +33 for the IN_FLIGHT fields kept in docs/06, review D01); 2.0.1 +48: PO 2026-11-08 the choice page counts as 待決頁 for no-miss reading (docs/03, docs/06 one clause each); every round re-reads them, so growth costs quota; 2.1.0 (reports 2 and 5) 12433 -> 9532: pure reasons to docs/10, details to docs/05 and docs/06b, one dispatch-plan line added to docs/01; the limit follows the new size so growth needs a reason again; +18 for the reading-side clause naming the choice page in docs/03 (Director W4 N1: the PO said the choice page must not be missed, so the reader must not rely on docs/06 alone)
 
 
 def test_must_read_size():
@@ -2199,6 +2334,325 @@ def test_order_binding(tmp):
     total += 1
     if (base / "out2").exists() or (base / "out3").exists():
         failures.append("run --order: a refused run still wrote a record")
+
+
+BRIEF_V1 = """# 專案初衷卡
+- 狀態：LOCKED
+- 版次：1
+
+| 編號 | 類別 | 內容（使用者的話） | 怎麼算做到 |
+|---|---|---|---|
+| B-1 | 給誰 | 給櫃台 | 打開就能看到表 |
+| B-2 | 一定要有 | 匯出姓名 | CSV 只有 name 欄 |
+
+## 不問使用者、由總監決定的事
+- DD-1 用標準函式庫
+"""
+BRIEF_V2 = BRIEF_V1.replace("版次：1", "版次：2").replace("匯出姓名 | CSV 只有 name 欄",
+                                                     "匯出姓名與總額 | CSV 必須有 name,total 兩欄")
+
+
+def brief_print(*cells):
+    """The fingerprint as WO-DW-210-W2 P-1 defines it, written here apart from gate_check.py."""
+    data = "brief-row-v1\n" + json.dumps(list(cells), ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(data.encode("utf-8")).hexdigest()
+
+
+B2_V1 = brief_print("B-2", "一定要有", "匯出姓名", "CSV 只有 name 欄")
+B2_V2 = brief_print("B-2", "一定要有", "匯出姓名與總額", "CSV 必須有 name,total 兩欄")
+
+
+def pinned_order(pins, rev=1, traces="B-2, DD-1", column=False, revision=1):
+    """TYPED_ORDER tracing brief rows and pinning their fingerprints (pins None: an order from before 2.1)."""
+    text = TYPED_ORDER.format(base="abc123").replace("TRACES_TO      = DD-1", f"TRACES_TO      = {traces}").replace(
+        "REVISION       = 1", f"REVISION       = {revision}")
+    if pins is not None:
+        text = text.replace(f"TRACES_TO      = {traces}\n", f"TRACES_TO      = {traces}\nBRIEF_REVISION = {rev}\n"
+                            f"BRIEF_FINGERPRINTS_V1 = {json.dumps(pins)}\n")
+    if column:
+        text = (text.replace("| ID | 類型 | 要求 | 驗證方法 | 預期 |\n|---|---|---|---|---|\n",
+                             "| ID | 類型 | 要求 | 驗證方法 | 預期 | 追溯 |\n|---|---|---|---|---|---|\n")
+                .replace("| exit 0 |\n", "| exit 0 | B-2 |\n").replace("| no WRONG answer |\n", "| no WRONG answer | B-1 |\n")
+                .replace("| PO says yes |\n", "| PO says yes | DD-1 |\n"))
+    return text
+
+
+def test_brief_fingerprint(tmp):
+    """2.1 (WO-DW-210-W2 P-1 / P-4, 題1 F-1 / F-3, shadow): an order pins the brief rows it answers with
+    BRIEF_FINGERPRINTS_V1; `--brief` makes a changed or removed row a `~ BRIEF_STALE` note and an unclear basis
+    `~ BRIEF_UNCONFIRMED` (依據未確認). The exit code never changes, and an order without the new fields passes as
+    before."""
+    global total
+    base = tmp / "brief_fingerprint"
+    base.mkdir()
+
+    def put(name, text, raw=False):
+        path = base / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(text if raw else text.encode("utf-8"))
+        return path
+
+    brief = put("BRIEF.md", BRIEF_V1)
+    code, out = run("gate_check.py", "--brief", brief)
+    total += 1
+    shown = re.search(r"^  BRIEF_FINGERPRINTS_V1 = (\{.*\})$", out, re.M)
+    if code != 0 or not shown or json.loads(shown.group(1)) != {
+            "B-1": brief_print("B-1", "給誰", "給櫃台", "打開就能看到表"), "B-2": B2_V1} or "  BRIEF_REVISION = 1" not in out:
+        failures.append(f"brief: --brief alone does not print the P-1 fingerprints: {code} {out.strip()[-300:]}")
+    spaced = put("spaced.md", BRIEF_V1.replace("| B-2 | 一定要有 |", "|  B-2  |  一定要有|").replace("\n", "\r\n"))
+    expect("brief: cell spaces and CRLF keep the fingerprint", "gate_check.py", 0, "--brief", spaced, says=B2_V1)
+    expect("brief: ** and backticks around the ID keep the fingerprint", "gate_check.py", 0, "--brief",
+           put("bold.md", BRIEF_V1.replace("| B-2 |", "| **`B-2`** |")), says=B2_V1)
+    expect("brief: without a 編號 table it fails", "gate_check.py", 1, "--brief", put("none.md", "# 初衷卡\n- 狀態：LOCKED\n"),
+           says="no table whose header starts with 編號")
+    expect("brief: a fenced example row is not a row", "gate_check.py", 0, "--brief",
+           put("fenced.md", BRIEF_V1 + "```\n| 編號 | 類別 | 內容 | 怎麼算做到 |\n| B-9 | x | y | z |\n```\n"), lacks='"B-9"')
+
+    old = put("WO-001-old.md", TYPED_ORDER.format(base="abc123"))
+    _, plain = run("gate_check.py", "--order", old)
+    expect("brief: an order from before 2.1 passes with --brief, no brief note", "gate_check.py", 0, "--order", old,
+           "--brief", put("BRIEF_V2.md", BRIEF_V2), says=plain.strip(), lacks=["BRIEF_STALE", "BRIEF_UNCONFIRMED"])
+
+    def case(name, order, brief_text, says=None, lacks=None, *extra):
+        expect(f"brief: {name}", "gate_check.py", 0, "--order", put(f"{name}/WO-001-parser.md", order), "--brief",
+               put(f"{name}/BRIEF.md", brief_text), *extra, says=["OK   order"] + ([says] if isinstance(says, str) else says or []),
+               lacks=lacks)
+
+    pins = {"B-2": B2_V1}
+    case("unchanged", pinned_order(pins), BRIEF_V1, None, ["BRIEF_STALE", "BRIEF_UNCONFIRMED"])
+    case("only the 版次 raised", pinned_order(pins), BRIEF_V1.replace("版次：1", "版次：2"), None, "BRIEF_STALE")
+    case("changed row (F-1)", pinned_order(pins), BRIEF_V2,
+         "~ BRIEF_STALE WO-001 B-2 WHOLE_ORDER: the brief row changed since the order pinned it (BRIEF_REVISION 1, brief "
+         "版次 2): 舊條件驗過，新條件待重驗", "同版內容有變")
+    case("changed row, 追溯 column", pinned_order(pins, column=True), BRIEF_V2, "~ BRIEF_STALE WO-001 B-2 AC-1: ")
+    case("changed row, same 版次 (F-3)", pinned_order(pins), BRIEF_V2.replace("版次：2", "版次：1"),
+         "同版內容有變: the 版次 was not raised: 舊條件驗過，新條件待重驗")
+    case("row removed", pinned_order(pins), BRIEF_V1.replace("| B-2 | 一定要有 | 匯出姓名 | CSV 只有 name 欄 |\n", ""),
+         "~ BRIEF_STALE WO-001 B-2 WHOLE_ORDER: B-2 is no longer in ")
+    case("row listed twice", pinned_order(pins), BRIEF_V1.replace("| B-2 |", "| B-2 | x | y | z |\n| B-2 |"),
+         "~ BRIEF_UNCONFIRMED WO-001 B-2: 依據未確認: ", "BRIEF_STALE")
+    case("row not 4 cells", pinned_order(pins), BRIEF_V1.replace("CSV 只有 name 欄 |", "CSV 只有 name 欄 | 多一格 |"),
+         "~ BRIEF_UNCONFIRMED WO-001 B-2: 依據未確認: ")
+    case("no pins but traces B-2", pinned_order(None), BRIEF_V1,
+         "~ BRIEF_UNCONFIRMED WO-001 B-2: 依據未確認: the order has no BRIEF_FINGERPRINTS_V1")
+    case("traced row without a pin", pinned_order(pins, traces="B-1, B-2, DD-1"), BRIEF_V1,
+         "~ BRIEF_UNCONFIRMED WO-001 B-1: 依據未確認: the order traces B-1 but BRIEF_FINGERPRINTS_V1 has no fingerprint")
+    case("malformed pins", pinned_order(None).replace("TRACES_TO      = B-2, DD-1\n", "TRACES_TO      = B-2, DD-1\n"
+         "BRIEF_REVISION = one\nBRIEF_FINGERPRINTS_V1 = {B-2: abc}\n"), BRIEF_V1,
+         ["~ BRIEF_FINGERPRINTS_V1: not a JSON object", "~ BRIEF_REVISION: not a number (one)", "依據未確認"])
+    case("a draft is noted", pinned_order(pins), BRIEF_V1.replace("LOCKED", "DRAFT"), "does not say 狀態：LOCKED")
+
+    # BRIEF_LOCKED and the snapshot (P-4): atomic, kept on a retry, a draft refused; a log's lock is the basis
+    hist = base / "lock" / "DIRECTOR" / "brief-history"
+    locked = put("lock/DIRECTOR/BRIEF.md", BRIEF_V1)
+    code, out = run("gate_check.py", "--brief", locked, "--snapshot", hist)
+    line = re.search(r"^  (BRIEF_LOCKED rev=1 sha=[0-9a-f]{64} snapshot=brief-history/1-[0-9a-f]{64}\.md)$", out, re.M)
+    snaps = list(hist.glob("*")) if hist.is_dir() else []
+    total += 1
+    if code != 0 or not line or len(snaps) != 1 or snaps[0].read_bytes() != BRIEF_V1.encode("utf-8") or "(written)" not in out:
+        failures.append(f"brief: --snapshot does not write one snapshot and print the BRIEF_LOCKED line: {code} {out.strip()[-300:]}")
+    expect("brief: --snapshot again keeps the file", "gate_check.py", 0, "--brief", locked, "--snapshot", hist,
+           says="(already there, kept)")
+    total += 1
+    if len(list(hist.glob("*"))) != 1:
+        failures.append("brief: a retried --snapshot left a temp file or a second snapshot")
+    expect("brief: --snapshot refuses a draft", "gate_check.py", 2, "--brief", put("lock/draft.md", BRIEF_V2.replace("LOCKED", "DRAFT")),
+           "--snapshot", hist)
+    log = put("lock/DIRECTOR/DIRECTOR_LOG.md", "# DIRECTOR_LOG\n2026-11-08 10:00 +08:00 | "
+              + (line.group(1) if line else "BRIEF_LOCKED") + " | PO locked 版次 1\n")
+    order = put("lock/WO-001-parser.md", pinned_order(pins))
+    put("lock/DIRECTOR/BRIEF.md", BRIEF_V2.replace("LOCKED", "DRAFT"))
+    expect("brief: a draft after BRIEF_LOCKED is not the basis: the locked snapshot is", "gate_check.py", 0, "--order", order,
+           "--brief", locked, "--dispatch-log", log, says=["is not the latest BRIEF_LOCKED", "compared with the locked snapshot"],
+           lacks="BRIEF_STALE")
+    put("lock/DIRECTOR/DIRECTOR_LOG2.md", "> " + (line.group(1) if line else "BRIEF_LOCKED") + "\n")
+    expect("brief: a quoted BRIEF_LOCKED is not a lock", "gate_check.py", 0, "--order", order, "--brief", locked,
+           "--dispatch-log", base / "lock/DIRECTOR/DIRECTOR_LOG2.md", says=["the log has no BRIEF_LOCKED line", "BRIEF_STALE"])
+    put("lock/DIRECTOR/DIRECTOR_LOG3.md", (line.group(1) if line else "BRIEF_LOCKED").replace("brief-history/", "gone/") + "\n")
+    expect("brief: a lock whose snapshot is missing is 依據待確認", "gate_check.py", 0, "--order", order, "--brief", locked,
+           "--dispatch-log", base / "lock/DIRECTOR/DIRECTOR_LOG3.md", says="BRIEF_UNCONFIRMED: ")
+    expect("brief: --order-history needs --match", "gate_check.py", 2, "--order", order, "--order-history", hist)
+    expect("brief: --snapshot needs --brief or --hash", "gate_check.py", 2, "--order", order, "--snapshot", hist)
+    code, out = run("gate_check.py", "--hash", order, "--snapshot", base / "lock" / "orders")
+    total += 1
+    if code != 0 or not list((base / "lock" / "orders").glob("WO-001-rev1-*.md")):
+        failures.append(f"brief: --hash --snapshot does not keep the order as <ID>-rev<n>-<sha>.md: {out.strip()[-200:]}")
+
+
+def test_brief_carry(tmp):
+    """2.1 (題1 F-4, shadow): --match with --brief: a Strict pass stays a pass with `~ BRIEF_STALE` on a changed row,
+    and evidence EVIDENCE_EQUIVALENT carries over is compared with the fingerprints the old order (--order-history,
+    found by hash) pinned. A verdict's optional ORDER_SHA256 / REPORT_SHA256 are compared with the files."""
+    head = "0123456789abcdef0123456789abcdef01234567"
+
+    def case(name, code, says=None, lacks=None, old_pins=None, new_pins=None, brief_text=BRIEF_V2, history=True,
+             equivalent=True, verdict=None):
+        folder = tmp / "brief_carry" / str(len(list((tmp / "brief_carry").glob("*"))) if (tmp / "brief_carry").is_dir() else 0)
+        (folder / "history").mkdir(parents=True)
+        def text_of(rev, pins):
+            return pinned_order(pins, column=True, revision=rev).replace("GOVERNANCE     = Standard", "GOVERNANCE     = Strict")
+        old_text, new_text = text_of(1, old_pins), text_of(2, new_pins)
+        old_sha, new_sha = (hashlib.sha256(t.encode("utf-8")).hexdigest() for t in (old_text, new_text))
+        if history:
+            (folder / "history" / f"WO-001-rev1-{old_sha}.md").write_bytes(old_text.encode("utf-8"))
+        path = folder / "WO-001-parser.md"
+        path.write_bytes(new_text.encode("utf-8"))
+        evidence_file(folder, "e.json", head, order={"id": "WO-001", "rev": 1 if equivalent else 2,
+                                                     "sha": old_sha if equivalent else new_sha})
+        (folder / "log.md").write_text(f"# DIRECTOR_LOG\nDISPATCH WO-001 rev=2 sha={new_sha}\n"
+                                       + (f"EVIDENCE_EQUIVALENT WO-001 rev=1 sha={old_sha} to rev=2\n" if equivalent else ""),
+                                       encoding="utf-8")
+        (folder / "BRIEF.md").write_text(brief_text, encoding="utf-8")
+        report = folder / "report.md"
+        report.write_text(match_report(list(ACCEPTANCE.values()), "PARTIAL", new_sha).replace(
+            "/ c / d0d0d0d / yes", f"/ c / {head} / yes", 1).replace("REVISION 1", "REVISION 2", 1), encoding="utf-8")
+        args = ["--match", report, path, "--evidence-dir", folder, "--dispatch-log", folder / "log.md", "--candidate", head,
+                "--brief", folder / "BRIEF.md"] + (["--order-history", folder / "history"] if history else [])
+        if verdict is not None:
+            (folder / "verdict.md").write_text(verdict(sha=new_sha, report=report), encoding="utf-8")
+            args += ["--verdict", folder / "verdict.md"]
+        expect(f"brief carry: {name}", "gate_check.py", code, *args, says=says, lacks=lacks)
+
+    v1, v2 = {"B-2": B2_V1}, {"B-2": B2_V2}
+    case("bound to this revision, brief changed: still a pass", 0, ["OK   match", "~ BRIEF_STALE WO-001 B-2 AC-1: "], "  - ",
+         old_pins=v1, new_pins=v1, equivalent=False)
+    case("carried over, old condition (F-4)", 0, ["OK   match",
+         "~ BRIEF_STALE WO-001 B-2 AC-1: e.json was recorded for REVISION 1 under the old condition of B-2 and carried over "
+         "by EVIDENCE_EQUIVALENT: 舊條件驗過，新條件待重驗"], "  - ", old_pins=v1, new_pins=v2)
+    case("carried over, same condition", 0, "OK   match", ["BRIEF_STALE", "沿用依據未確認", "  - "], old_pins=v2, new_pins=v2)
+    case("carried over, old order not kept", 0, ["OK   match", "沿用依據未確認"], "  - ", old_pins=v1, new_pins=v2,
+         history=False)
+    case("carried over, old order pinned nothing", 0, ["OK   match", "pinned no fingerprint for B-2: 沿用依據未確認"], "  - ",
+         old_pins=None, new_pins=v2)
+
+    def verdict_text(sha, report, order_sha=None, report_sha=None):
+        report_sha = report_sha or hashlib.sha256(report.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+        lines = (f"ORDER: WO-001-parser.md REVISION 2\nCANDIDATE_HEAD: {head}\nORDER_SHA256: {order_sha or sha}\n"
+                 f"REPORT_SHA256: {report_sha}\n")
+        return lines + VERDICT.format(verdict="PASS", step="REQUEST_OWNER_AUTHORIZATION")
+
+    case("verdict record matches", 0, "OK   verdict", "VERDICT_RECORD", old_pins=v2, new_pins=v2, verdict=verdict_text)
+    case("verdict record names another report", 0, ["OK   verdict", "~ VERDICT_RECORD: REPORT_SHA256 eeeeeeeeeeee is not the "
+         "report's hash now"], old_pins=v2, new_pins=v2,
+         verdict=lambda sha, report: verdict_text(sha, report, report_sha="e" * 64))
+
+
+def test_po_acceptance(tmp):
+    """2.1 (題4 P-2, shadow): PO_ACCEPTANCE.json binds the PO's reply to one product: candidate ID, commit, entry file,
+    manifest SHA-256 and the message refs. A record that does not bind is `~ UNBOUND_PO_REPLY`; the exit code is 0."""
+    base = tmp / "po_acceptance"
+    base.mkdir()
+    good = {"schema": "po-acceptance-v1", "candidate_id": "C-1", "commit": "a" * 40, "entry": "out/index.html",
+            "entry_sha256": "c" * 64, "manifest_sha256": "b" * 64, "offered_message_ref": "msg-10", "reply_ref": "msg-11",
+            "outcome": "accepted", "replied_at": "2026-11-08T10:00:00+08:00", "excerpt": "可以"}
+
+    def case(name, data, says, lacks=None, *extra):
+        path = base / f"{len(list(base.iterdir()))}.json"
+        path.write_text(data if isinstance(data, str) else json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        expect(f"po acceptance: {name}", "gate_check.py", 0, "--po-acceptance", path, *extra, says=says, lacks=lacks)
+
+    case("bound record", good, ["OK   po-acceptance", "~ PO_ACCEPTANCE C-1: aaaaaaaaaaaa out/index.html: 已驗收 (msg-11)"],
+         "UNBOUND_PO_REPLY")
+    case("bound record, --candidate", good, "~ PO_ACCEPTANCE C-1", "UNBOUND_PO_REPLY", "--candidate", "a" * 40)
+    case("records list, offered only", {"records": [dict(good, outcome=None, reply_ref=None)]}, "已送出，還沒回覆")
+    case("other candidate", good, "~ UNBOUND_PO_REPLY C-1: commit aaaaaaaaaaaa is not the --candidate", None,
+         "--candidate", "f" * 40)
+    case("no manifest", {k: v for k, v in good.items() if k != "manifest_sha256"},
+         "~ UNBOUND_PO_REPLY C-1: manifest_sha256 is not 64 hex digits")
+    case("outcome without reply", dict(good, reply_ref=""), "an outcome without reply_ref")
+    case("short commit", dict(good, commit="abc1234"), "commit is not 40 hex digits")
+    case("not JSON", "{", "~ UNBOUND_PO_REPLY file: not JSON")
+    expect("po acceptance: --candidate works with --po-acceptance only among the new flags", "gate_check.py", 2,
+           "--order", base / "none.md", "--candidate", "a" * 40)
+
+
+def test_trace_brief(tmp):
+    """2.1 (WO-DW-210-W2 P-2, 題1 F-1 / F-2, 題4 P-2): trace_report --brief adds 初衷卡三欄 (有人負責／這版有驗證紀錄／
+    你看過這個成品嗎) from the orders' fingerprints, the reports, PO_PRODUCT_REVIEW lines and PO_ACCEPTANCE records;
+    --decisions BRIEF.md alone no longer calls the brief's listed DD-1 missing. Without the new flags nothing changes."""
+    head = "0123456789abcdef0123456789abcdef01234567"
+    root = tmp / "trace_brief"
+    for name in ("orders", "reports"):
+        (root / name).mkdir(parents=True)
+
+    def put(name, text):
+        path = root / name
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    order = f"""# WO-001
+ISSUED_BY = Director 2026-11-08
+REVISION = 1
+TRACES_TO = B-2, DD-1, PO-01
+BRIEF_REVISION = 1
+BRIEF_FINGERPRINTS_V1 = {json.dumps({"B-2": B2_V1})}
+
+| ID | 類型 | 要求 | 驗證方法 | 預期 | 追溯 |
+|---|---|---|---|---|---|
+| AC-1 | AUTO | CSV 有姓名 | 跑檢查 | 有 name 欄 | B-2 |
+| AC-2 | PO | 檢視匯出成品 | 打開成品 | 使用者回覆 | B-2, PO-01 |
+"""
+    put("orders/WO-001.md", order)
+    put("reports/report.md", f"# TASK REPORT\nTASK_ID: WO-001 / export\nHEAD: {head}\nORDER: WO-001.md REVISION 1\n"
+        "RESULT: PARTIAL\nACCEPTANCE:\n| ID | 實際 | 證據 | 狀態 |\n|---|---|---|---|\n| AC-1 | exit 0 | e.json | PASS |\n"
+        "| AC-2 | waiting | — | PENDING_PO |\n")
+    brief = put("BRIEF.md", BRIEF_V1)
+    review = f"PO_PRODUCT_REVIEW WO-001 candidate={head[:12]} outcome=seen ref=msg-3 brief=B-2:{B2_V1}"
+    log = put("LOG.md", "# DIRECTOR_LOG\n2026-11-08 11:00 +08:00 | " + review + " | PO 看過匯出\n"
+              "PO_PRODUCT_REVIEW WO-001 candidate=zz outcome=maybe\n")
+    base = ("--orders", root / "orders", "--reports", root / "reports")
+    expect("trace brief: without --brief no brief section", "trace_report.py", 0, *base,
+           lacks=["初衷卡三欄", "BRIEF_STALE", "UNBOUND_PO_REPLY"])
+    expect("trace brief: three columns, brief as pinned", "trace_report.py", 0, *base, "--brief", brief, "--director-log", log,
+           says=["| 需求 | 內容 | 有人負責 | 這版有驗證紀錄 | 你看過這個成品嗎 |",
+                 "| B-1 | 給櫃台 | 沒有工單 | — | — |",
+                 "| B-2 | 匯出姓名 | WO-001 | WO-001：有（AC-1 PASS、AC-2 PENDING_PO） | WO-001：看過（msg-3） |",
+                 "## PO 回覆沒綁到成品（UNBOUND_PO_REPLY）\n- ", "candidate= is not a commit"], lacks="- BRIEF_STALE")
+    put("BRIEF.md", BRIEF_V2)
+    expect("trace brief: a changed row is not verified this version (F-1)", "trace_report.py", 0, *base, "--brief", brief,
+           "--director-log", log,
+           says=["| B-2 | 匯出姓名與總額 | WO-001 | WO-001：沒有：工單是照舊條件寫的，新條件待重驗 | "
+                 "WO-001：看過（msg-3），但當時是舊條件，新條件還沒看 |",
+                 "- BRIEF_STALE WO-001 B-2 AC-1,AC-2: "])
+    put("BRIEF.md", BRIEF_V1)
+    put("LOG2.md", review.replace(head[:12], "f" * 12) + "\n")
+    expect("trace brief: a review of another candidate is not this one", "trace_report.py", 0, *base, "--brief", brief,
+           "--director-log", root / "LOG2.md", says=f"WO-001：看過別的成品（ffffffffffff），這版（{head[:12]}）還沒看")
+    expect("trace brief: no review, no record", "trace_report.py", 0, *base, "--brief", brief, says="| WO-001：還沒看 |")
+    record = {"schema": "po-acceptance-v1", "candidate_id": "C-1", "commit": head, "entry": "out.csv", "manifest_sha256": "b" * 64,
+              "offered_message_ref": "msg-10", "reply_ref": "msg-11", "outcome": "accepted"}
+    put("ACC.json", json.dumps([record, dict(record, manifest_sha256="short")]))
+    expect("trace brief: a bound PO_ACCEPTANCE record answers 你看過", "trace_report.py", 0, *base, "--brief", brief,
+           "--acceptance", root / "ACC.json", says=["| WO-001：已接受（msg-11） |", "ACC.json #2：manifest_sha256 is not 64 hex"])
+    expect("trace brief: --acceptance alone lists unbound records", "trace_report.py", 0, *base, "--acceptance", root / "ACC.json",
+           says="## PO 回覆沒綁到成品（UNBOUND_PO_REPLY）\n- ", lacks="初衷卡三欄")
+    (root / "evidence").mkdir()
+    expect("trace brief: with --evidence-dir a PASS needs its evidence file", "trace_report.py", 0, *base, "--brief", brief,
+           "--evidence-dir", root / "evidence", says="WO-001：還沒有（AC-1 PASS 但證據檔找不到、AC-2 PENDING_PO）")
+    expect("trace brief: --director-log needs --brief", "trace_report.py", 2, *base, "--director-log", log)
+    expect("trace brief: a missing --brief file", "trace_report.py", 1, *base, "--brief", root / "gone.md", says="FAIL file not found")
+
+    # F-2: the brief lists the Director's decisions as `- DD-1 ...`; alone it no longer reports DD-1 missing
+    register = put("REGISTER.md", "| ID | 決定 |\n|---|---|\n| DD-1 | 用標準函式庫 |\n| PO-01 | 送出供使用者驗收 |\n")
+    expect("trace brief: --decisions BRIEF alone knows the listed DD-1 (F-2)", "trace_report.py", 0, *base, "--decisions", brief,
+           says=["## TRACES_TO 找不到的編號\n- WO-001: PO-01（--decisions 的表格沒有 PO 開頭的編號；",
+                 "請再加 --decisions DECISION_REGISTER.md）", "## 沒有工單的需求\n- B-1\n"],
+           lacks=["## TRACES_TO 找不到的編號\n- WO-001: DD-1", "## 沒有工單的需求\n- B-1\n- DD-1"])
+    expect("trace brief: --decisions BRIEF and the register find every ID", "trace_report.py", 0, *base, "--decisions", brief,
+           "--decisions", register, says="## TRACES_TO 找不到的編號\n- 無")
+    put("FENCED.md", "| 編號 | x |\n|---|---|\n| B-1 | a |\n```\n- DD-1 例子\n```\n")
+    expect("trace brief: a fenced list item is an example, not a decision", "trace_report.py", 0, *base, "--decisions",
+           root / "FENCED.md", says="- WO-001: DD-1（")
+
+    # the log's BRIEF_LOCKED is the basis: a draft after it is compared through the locked snapshot
+    hist = root / "brief-history"
+    _, out = run("gate_check.py", "--brief", brief, "--snapshot", hist)
+    line = re.search(r"^  (BRIEF_LOCKED .*)$", out, re.M)
+    put("LOG3.md", (line.group(1) if line else "BRIEF_LOCKED") + "\n")
+    put("BRIEF.md", BRIEF_V2.replace("LOCKED", "DRAFT"))
+    expect("trace brief: a draft after BRIEF_LOCKED is not the basis", "trace_report.py", 0, *base, "--brief", brief,
+           "--director-log", root / "LOG3.md", says=["compared with the locked snapshot", "| B-2 | 匯出姓名 | WO-001 | WO-001：有"],
+           lacks="- BRIEF_STALE")
 
 
 def test_trusted_rerun(tmp):
@@ -4414,11 +4868,15 @@ def test_status_gen(tmp):
               f"exit {done.returncode} (want {code}), {len(lines)} lines, missing {bad}: {done.stdout.strip()[-300:]}")
 
     full = d / "status_full.py"
+    # the git line is checked on a fixture repo, not on the DW folder, which may be an unpacked ZIP (report 5 F-1)
+    git_args = ("--git", git_fixture(tmp / "status_git")) if GIT else ()
+    if not GIT:
+        skip("test_status_gen git line")
     expect("status_gen writes", "status_gen.py", 0, "--out", full, "--name", "line-a", "--log", d / "run.log",
            "--hash-file", d / "hashes.txt", "--checksum", d / "hashes.txt", "--outputs", d / "out", "--disk", tmp,
-           "--disk-min-gib", "0.001", "--git", TOOLS.parent, says="WROTE")
+           "--disk-min-gib", "0.001", *git_args, says="WROTE")
     status("status.py full", full, 0, says=["STATUS line-a", "  line 99 of the run log", "HASH sha256 ", "  abc123  build.zip",
-                                            " OK", "GIT ", "OUT ", "2 files, newest 2", "b.png"])
+                                            " OK", "OUT ", "2 files, newest 2", "b.png"] + (["GIT "] if GIT else []))
     small = d / "status_small.py"
     expect("status_gen small cap", "status_gen.py", 0, "--out", small, "--log", d / "run.log", "--log-lines", "100",
            "--max-lines", "10", "--width", "40")
@@ -4720,66 +5178,415 @@ def test_poll_report(tmp):
     rep("a bad --since", 2, "--log", d / "a.jsonl", "--since", "last week", says=["not an ISO"])
 
 
+def page_script(text):
+    """The inline <script> of a page, read with html.parser (no script src)."""
+    from html.parser import HTMLParser
+
+    class Scripts(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.inside, self.parts = False, []
+
+        def handle_starttag(self, tag, attrs):
+            self.inside = tag == "script" and not dict(attrs).get("src")
+
+        def handle_endtag(self, tag):
+            if tag == "script":
+                self.inside = False
+
+        def handle_data(self, data):
+            if self.inside:
+                self.parts.append(data)
+
+    parser = Scripts()
+    parser.feed(text)
+    return "\n".join(parser.parts).replace("\r\n", "\n")
+
+
+def js_functions(script):
+    """Top-level function name -> its source, up to the next top-level function."""
+    marks = list(re.finditer(r"^(?:async )?function (\w+)\(", script, re.M))
+    return {m.group(1): script[m.start():marks[i + 1].start() if i + 1 < len(marks) else len(script)] for i, m in enumerate(marks)}
+
+
+def snapshot_line(script, target):
+    return next((line for line in script.split("\n") if target + ").onSnapshot(" in line), "")
+
+
+def choice_page_problems(text):
+    """2.1 choice page rules (docs/12 第四、六節): split redraws, no lost text, one write per question, three states."""
+    script, problems = page_script(text), []
+    fn = js_functions(script)
+    for name in ("renderOpenList", "renderAnsweredList", "renderClosedList", "renderNotesList", "captureDrafts", "restoreDrafts"):
+        if name not in fn:
+            problems.append(f"missing function {name}")
+    if "render" in fn:
+        problems.append("one render() redraws everything")
+    for target, allowed in (('doc("brief/current"', "renderBrief"), ('collection("notes"', "renderNotesList")):
+        line = snapshot_line(script, target)
+        if not line:
+            problems.append(f"no {target} subscription")
+        for call in re.findall(r"\b(render\w*)\(", line):
+            if call != allowed:
+                problems.append(f"{target} snapshot calls {call}")
+    body = fn.get("renderOpenList", "")
+    if not re.search(r"if\(S\.composing\)\{S\.deferOpen=true;return\}", body):
+        problems.append("open list redraws during IME composition")
+    if not ("captureDrafts()" in body and "restoreDrafts(" in body and body.index("captureDrafts()") < body.index("replaceChildren") < body.index("restoreDrafts(")):
+        problems.append("open list redraw does not keep value, selection and focus")
+    if "compositionend" not in script:
+        problems.append("no compositionend listener")
+    submit = fn.get("submitChoice", "")
+    if not submit.split("\n")[1].strip().startswith("if(S.inFlight[id])return"):
+        problems.append("submitChoice has no in-flight lock first")
+    if "S.decisions.find" not in submit or not re.search(r"if\(opts\.length&&!opt\)", submit):
+        problems.append("submitChoice does not check the option is still there")
+    first_await = submit.find("await ")
+    clear = submit.find("if(S.drafts[key]===raw)delete S.drafts[key]")
+    if clear < 0 or first_await < 0 or clear < first_await:
+        problems.append("draft cleared before the save, or cleared although it changed")
+    for field in ("submissionId", "revision:v.revision", "snapshotHash:v.snapshotHash", "selectedOptionSnapshot"):
+        if field not in submit:
+            problems.append(f"reply lacks {field}")
+    note = fn.get("sendNote", "")
+    if "if(S.noteBusy)return" not in note or "if(box.value===raw)" not in note:
+        problems.append("note box can send twice or clear new text")
+    for words in ("已儲存，等總監讀取", "總監已收件，處理中", "已交接／處理完成", "（沒收到）", "（收到但卡住）", "舊題，當時選項未留存"):
+        if words not in script:
+            problems.append(f"missing state text {words}")
+    if re.search(r"notify\([^)]*\b(?:note|raw|t)\b", script):
+        problems.append("notify carries the user's text")
+    if 'v.v2&&v.snap!=="ok"' not in fn.get("sendBlocked", "") or 'if(v.v2&&v.snap!=="ok")' not in submit:
+        problems.append("v2 question can be sent without its revision snapshot")
+    if '"loading"' not in fn.get("viewOf", "") or '"missing"' not in fn.get("viewOf", ""):
+        problems.append("viewOf does not tell a loading snapshot from a missing one")
+    safe = fn.get("safeUrl", "")
+    if not ("https:" in safe and "/_blob/" in safe and 'startsWith("//")' in safe):
+        problems.append("no safeUrl that only lets https:, /_blob/ and relative urls through")
+    for m in re.finditer(r"\.(?:src|href)=(?!url\b|safeUrl\()([^;]*)", script):
+        problems.append(f"url from db not checked by safeUrl: {m.group(0)[:40]}")
+    if "沒有人開始下一輪時不會被讀到" not in script:
+        problems.append("does not say nobody reads it without a next round (F-5)")
+    return problems
+
+
+def test_choice_page():
+    text = (TEMPLATES / "choice_page.html").read_text(encoding="utf-8")
+    problems = choice_page_problems(text)
+    check("choice page passes the 2.1 structure rules", not problems, "; ".join(problems))
+    mutations = (
+        ("brief snapshot redraws open cards", 'S.brief=snap.exists?snap.data():null;renderBrief()', 'S.brief=snap.exists?snap.data():null;renderDecisions()', "brief/current"),
+        ("notes snapshot redraws open cards", "S.notes=docs(snap);renderNotesList()", "S.notes=docs(snap);renderNotesList();renderOpenList()", "notes"),
+        ("no restore after redraw", "  restoreDrafts(saved)}", "  }", "keep value"),
+        ("no in-flight lock", "  if(S.inFlight[id])return;\n", "", "in-flight"),
+        ("draft cleared before save", "  const raw=S.drafts[key]||\"\"", "  if(S.drafts[key]===raw)delete S.drafts[key];const raw=S.drafts[key]||\"\"", "draft cleared"),
+        ("no IME guard", "  if(S.composing){S.deferOpen=true;return}\n", "", "IME"),
+        ("no stuck state", "（收到但卡住）", "（慢）", "收到但卡住"),
+        ("v2 sendable without its snapshot", '||(v.v2&&v.snap!=="ok")||', "||", "snapshot"),
+        ("db url straight into img.src", "i.src=url;", "i.src=im.url;", "safeUrl"),
+        ("F-5 not said plainly", "沒有人開始下一輪時不會被讀到", "", "F-5"),
+    )
+    for name, old, new, want in mutations:
+        changed = text.replace(old, new, 1)
+        problems = choice_page_problems(changed)
+        check(f"choice page check catches: {name}", old in text and any(want in p for p in problems), f"old found={old in text} problems={problems}")
+
+
+def test_choice_reconcile(tmp):
+    folder = tmp / "choice_reconcile"
+    folder.mkdir()
+    ledger = folder / "choice_inbox.sqlite3"
+    snap = {"questionId": "CH-05", "revision": 2, "title": "版面", "options": [{"key": "A", "label": "格狀"}, {"key": "B", "label": "清單"}]}
+    (folder / "snap.json").write_text(json.dumps(snap, ensure_ascii=False), encoding="utf-8")
+    expect("reconcile register", "choice_reconcile.py", 0, "register", "--db", ledger, "--snapshot", folder / "snap.json", says="REGISTERED CH-05 r2 snapshotHash=sha256:")
+    expect("reconcile register again is fine", "choice_reconcile.py", 0, "register", "--db", ledger, "--snapshot", folder / "snap.json")
+    changed = dict(snap, title="版面（改）")
+    (folder / "snap2.json").write_text(json.dumps(changed, ensure_ascii=False), encoding="utf-8")
+    expect("reconcile refuses a changed revision", "choice_reconcile.py", 1, "register", "--db", ledger, "--snapshot", folder / "snap2.json", says="REFUSED")
+    digest = run("choice_reconcile.py", "register", "--db", ledger, "--snapshot", folder / "snap.json")[1].strip().rsplit("=", 1)[-1]
+    reply = {"questionId": "CH-05", "revision": 2, "snapshotHash": digest, "choice": "B", "submissionId": "s1", "note": ""}
+    export = {"source": "art", "decisions": [
+        {"id": "CH-05", "status": "open", "revision": 2},
+        {"id": "CH-01", "status": "answered", "options": [{"key": "A"}], "answer": {"choice": "A", "at": "2026-11-08T00:00:00Z", "submissionId": "L1"}},
+        {"id": "CH-02", "status": "closed", "options": [{"key": "A"}], "answer": {"choice": "A", "at": "2026-11-01T00:00:00Z", "submissionId": "L2"}}],
+        "choiceReplies": [dict(reply, id="R1"), dict(reply, id="R2"), dict(reply, id="R3", submissionId="s2", choice="A"),
+                          dict(reply, id="R4", submissionId="s4", snapshotHash="sha256:0"), dict(reply, id="R5", submissionId="s5", choice="Z")],
+        "notes": [{"id": "N1", "text": "留言", "status": "new"}]}
+    (folder / "export.json").write_text(json.dumps(export, ensure_ascii=False), encoding="utf-8")
+    expect("reconcile ingest sorts every reply", "choice_reconcile.py", 0, "ingest", "--db", ledger, "--export", folder / "export.json",
+           says=["RECORDED art/choiceReplies/R1 CH-05 r2 ok", "R2 CH-05 r2 duplicate", "R3 CH-05 r2 conflict", "R4 CH-05 r2 bad-hash",
+                 "R5 CH-05 r2 bad-choice", "CH-01 r0 legacy", "CLOSED art/decisions/CH-02/L2 CH-02 r0 legacy-closed", "notes/N1", "shadow"])
+    expect("reconcile ingest twice adds nothing", "choice_reconcile.py", 0, "ingest", "--db", ledger, "--export", folder / "export.json", says="already=8")
+    plan = ("plan", "--db", ledger, "--question", "CH-05", "--revision", "2")
+    expect("reconcile plan gives a WO-ID", "choice_reconcile.py", 0, *plan, "--wo", "WO-041", says="PLANNED CH-05:r2 WO-041 from art/choiceReplies/R1")
+    expect("reconcile plan again keeps the same WO-ID", "choice_reconcile.py", 0, *plan, "--wo", "WO-042", says=["WO-041", "already", "kept the first one"])
+    expect("reconcile plan with nothing recorded", "choice_reconcile.py", 1, "plan", "--db", ledger, "--question", "CH-09", "--revision", "1", says="NOTHING")
+    move = ("advance", "--db", ledger, "--question", "CH-05", "--revision", "2")
+    expect("reconcile refuses a skipped step", "choice_reconcile.py", 2, *move, "--from", "PLANNED", "--to", "CLOSED", says="REFUSED")
+    expect("reconcile queue", "choice_reconcile.py", 0, *move, "--from", "PLANNED", "--to", "QUEUED", says="MOVED")
+    racers = [subprocess.Popen([sys.executable, "-I", "-X", "utf8", str(TOOLS / "choice_reconcile.py"), *map(str, move), "--from", "QUEUED",
+                                "--to", "CLAIMED", "--session", name], stdout=subprocess.PIPE, encoding="utf-8") for name in ("director-a", "director-b")]
+    outcomes = sorted((p.wait(timeout=60), p.stdout.read().strip()) for p in racers)
+    check("reconcile: of two Directors only one claims", [code for code, _ in outcomes] == [0, 1] and "LOST" in outcomes[1][1], repr(outcomes))
+    expect("reconcile status is shadow and names the stuck one", "choice_reconcile.py", 0, "status", "--db", ledger, "--now", "2030-01-01T00:00:00Z",
+           says=["CH-05:r2 CLAIMED WO-041", "收到但卡住", "沒交出去", "not_handed=1 stuck=1 receipts_pending=4 notes=1", "shadow"],
+           lacks=["CH-02", "notes/N1 RECORDED"])
+    expect("reconcile status fresh shows no stuck", "choice_reconcile.py", 0, "status", "--db", ledger, says="stuck=0")
+    expect("reconcile status without ledger", "choice_reconcile.py", 0, "status", "--db", folder / "none.sqlite3", says="no ledger")
+    for step in (("CLAIMED", "RECEIPT_PENDING"), ("RECEIPT_PENDING", "CLOSED")):
+        expect(f"reconcile {step[0]} -> {step[1]}", "choice_reconcile.py", 0, *move, "--from", step[0], "--to", step[1], "--result", "done")
+    expect("reconcile closed is not open", "choice_reconcile.py", 0, "status", "--db", ledger, "--json", lacks="CH-05:r2")
+    settle = ("settle", "--db", ledger, "--key")
+    expect("reconcile settle refuses an adopted reply", "choice_reconcile.py", 1, *settle, "art/choiceReplies/R1", "--to", "CLOSED", says="adopted")
+    expect("reconcile settle a read note", "choice_reconcile.py", 0, *settle, "art/notes/N1", "--to", "NOTED", says="SETTLED")
+    expect("reconcile settle a note only once", "choice_reconcile.py", 1, *settle, "art/notes/N1", "--to", "NOTED", says="not allowed")
+    for rid in ("R2", "R3", "R4", "R5"):
+        expect(f"reconcile settle {rid}", "choice_reconcile.py", 0, *settle, f"art/choiceReplies/{rid}", "--to", "CLOSED", "--result", "told the user")
+    legacy = ("--db", ledger, "--question", "CH-01", "--revision", "0")
+    expect("reconcile plan a 2.0 answer", "choice_reconcile.py", 0, "plan", *legacy, says="PLANNED CH-01:r0 WO-042")
+    for old, new in (("PLANNED", "QUEUED"), ("QUEUED", "CLAIMED"), ("CLAIMED", "RECEIPT_PENDING"), ("RECEIPT_PENDING", "CLOSED")):
+        expect(f"reconcile CH-01 {old} -> {new}", "choice_reconcile.py", 0, "advance", *legacy, "--from", old, "--to", new)
+    expect("reconcile status reaches all zero", "choice_reconcile.py", 0, "status", "--db", ledger, "--now", "2030-01-01T00:00:00Z",
+           says="open=0 not_handed=0 stuck=0 receipts_pending=0 notes=0")
+    (folder / "list.json").write_text("[1, 2]", encoding="utf-8")
+    (folder / "rows.json").write_text(json.dumps({"choiceReplies": ["not a row"]}), encoding="utf-8")
+    (folder / "broken.sqlite3").write_bytes(b"not a database at all, just text" * 40)
+    for name, args in (("unreadable export", ("ingest", "--db", ledger, "--export", folder / "none.json")),
+                       ("export not an object", ("ingest", "--db", ledger, "--export", folder / "list.json")),
+                       ("bad reply rows", ("ingest", "--db", ledger, "--export", folder / "rows.json")),
+                       ("bad --now", ("status", "--db", ledger, "--now", "yesterday")),
+                       ("broken ledger", ("status", "--db", folder / "broken.sqlite3")),
+                       ("missing folder", ("plan", "--db", folder / "no" / "such" / "x.sqlite3", "--question", "CH-01", "--revision", "1")),
+                       ("advance on a broken ledger", ("advance", "--db", folder / "broken.sqlite3", "--question", "CH-01", "--revision", "1",
+                                                       "--from", "QUEUED", "--to", "CLAIMED"))):
+        expect(f"reconcile shadow error: {name}", "choice_reconcile.py", 0, *args, says="CHOICE_RECONCILE: SHADOW_ERROR", lacks="Traceback")
+
+
+def nogit_env():
+    """os.environ with every PATH folder that holds a git program taken out: a ZIP install on a machine without git."""
+    names = ("git", "git.exe", "git.cmd", "git.bat")
+    keep = [folder for folder in os.environ.get("PATH", "").split(os.pathsep)
+            if folder and not any((pathlib.Path(folder) / name).is_file() for name in names)]
+    return {**os.environ, "PATH": os.pathsep.join(keep)}
+
+
+def test_no_git(tmp):
+    """2.1.0 (report 5): with no git on PATH, `evidence_record run` still writes its record (git fields null, a note on
+    stderr), the trusted rerun is refused NOT_RUN (exit 2, never a pass), and doctor says git is missing (exit 2)."""
+    env = nogit_env()
+    if shutil.which("git", path=env["PATH"]):
+        return skip("test_no_git", "git is still found after taking its folders off PATH")
+    root = tmp / "nogit"
+    work, out = root / "work", root / "records"
+    work.mkdir(parents=True)
+    py = sys.executable
+    (work / "check.py").write_text("print('checked')\n", encoding="utf-8")
+
+    def tool(name, *args):
+        done = subprocess.run([py, "-I", "-X", "utf8", str(TOOLS / name), *map(str, args)], capture_output=True,
+                              encoding="utf-8", env=env)
+        return done.returncode, done.stdout, done.stderr
+
+    code, stdout, stderr = tool("evidence_record.py", "run", "--out-dir", out, "--label", "AC-1", "--cwd", work, "--", py, "check.py")
+    records = sorted(out.glob("*-AC-1.json"))
+    data = json.loads(records[0].read_text(encoding="utf-8")) if records else {}
+    check("no git: evidence run exits 0 and says exit=0", code == 0 and "exit=0" in stdout, stdout + stderr)
+    check("no git: evidence run writes the record", len(records) == 1, f"{records} {stderr}")
+    check("no git: the record's git fields are null", data.get("git") == {"head": None, "dirty": None}, str(data.get("git")))
+    check("no git: evidence run says why the git fields are empty", "git metadata not available (git not found" in stderr, stderr)
+    if not records:
+        return
+    code, stdout, _ = tool("evidence_record.py", "verify", records[0])
+    check("no git: verify without --rerun still works", code == 0 and "EVIDENCE_VERIFY: OK" in stdout, stdout)
+    order = root / "WO-001-parser.md"
+    body = with_checks(TYPED_ORDER.format(base="0" * 40), f"AC-1: {json.dumps([py, 'check.py'])}")
+    order.write_text(body, encoding="utf-8")
+    log = root / "log.md"
+    log.write_text(f"DISPATCH WO-001 rev=1 sha={hashlib.sha256(body.encode('utf-8')).hexdigest()}\n", encoding="utf-8")
+    code, stdout, stderr = tool("evidence_record.py", "verify", records[0], "--rerun", "--order", order, "--dispatch-log", log,
+                                "--repo", work, "--candidate", "a" * 40)
+    check("no git: the trusted rerun is NOT_RUN exit 2, not a pass", code == 2 and "EVIDENCE_VERIFY: NOT_RUN git not found" in stdout
+          and "OK" not in stdout, stdout + stderr)
+    code, stdout, stderr = tool("doctor.py", "--repo", work)
+    check("no git: doctor exits 2 and says git is missing", code == 2 and "doctor: git not found" in stderr, stdout + stderr)
+
+
+def test_dispatch_plan_rule():
+    """2.1.0 (PO, L-057): docs/01 keeps the one dispatch-plan line and the Director's scope; docs/05 holds the details;
+    docs/03 holds the PO-reading lines word for word; docs/06b holds the rehearsal and the merged tool call."""
+    root = TOOLS.parent
+    read = lambda name: (root / name).read_text(encoding="utf-8")
+    one, three, five, ten, six_b = (read(f"docs/{name}.md") for name in
+                                    ("01_roles_authority", "03_communication", "05_models_effort", "10_lessons_learned",
+                                     "06b_on_demand_procedures"))
+    check("docs/01 has the dispatch-plan line", "- 每次派工前先做派工規劃，不把事情都攬在自己身上（`docs/05`「派工規劃」）。" in one)
+    check("docs/01 does not narrow the Director to dispatch only", "只派工" not in one)
+    check("docs/05 has the dispatch-plan section", "### 派工規劃" in five and "Single Writer" in five.split("### 派工規劃")[-1])
+    check("docs/10 has lesson L-057", "L-057" in ten)
+    check("docs/03 first step of each round, word for word (the reading side names the choice page, 總監 W4 N1)",
+          "1. **每輪第一步讀待決頁**（任何喚醒）：照待決頁程序（含選擇頁）讀回覆和新留言，同輪執行或派工並關閉；未能完成則寫續辦紀錄。" in three)
+    check("docs/03 end-of-round check, word for word",
+          "- 每輪結束前自查：待決頁已讀、本輪 PO 訊息已處理並登記、已回覆項目已關閉或留有續辦紀錄。" in three)
+    check("docs/06b has the hand-over rehearsal", "### 接手演練" in six_b and "metrics_report.py --run" in six_b)
+    check("docs/06b has the merged per-round tool call", "合併工具呼叫" in six_b)
+
+
+def test_status_po_hint(tmp):
+    """2.1.0 shadow (report 5 F-4): the PO filled ANSWER but left STATUS open; the Director status.py says so in one
+    line (the exit code does not change), and says nothing for an empty ANSWER or the template's <PO 填>."""
+    d = tmp / "status_po_hint"
+    d.mkdir(parents=True)
+    page = d / "PO_PENDING.md"
+    page.write_text("ID: OD-1\nSTATUS: open\nANSWER: A\n\nID: OD-2\nSTATUS: open\nANSWER: <PO 填>\n\nID: OD-3\nSTATUS: open\n"
+                    "ANSWER:\n\nID: OD-4\nSTATUS: answered\nANSWER: B\n", encoding="utf-8")
+    conf = d / "status.json"
+    conf.write_text(json.dumps({"schema_version": 1, "name": "director", "po_page": {"path": "PO_PENDING.md", "counts": [
+        {"label": "answered", "regex": r"^STATUS:\s*answered\b"}]}}), encoding="utf-8")
+    script = d / "status.py"
+    expect("status_gen writes the PO hint script", "status_gen.py", 0, "--out", script, "--config", conf, says="WROTE")
+    done = subprocess.run([sys.executable, "-I", str(script)], capture_output=True, encoding="utf-8")
+    check("status.py: open with an ANSWER gives one hint, exit unchanged", done.returncode == 0
+          and "answered=1" in done.stdout and "PO hint: 1 item(s) still STATUS open with an ANSWER filled in (OD-1)" in done.stdout,
+          done.stdout + done.stderr)
+    page.write_text("ID: OD-2\nSTATUS: open\nANSWER: <PO 填>\n", encoding="utf-8")
+    done = subprocess.run([sys.executable, "-I", str(script)], capture_output=True, encoding="utf-8")
+    check("status.py: no hint without a filled ANSWER", done.returncode == 0 and "PO hint" not in done.stdout, done.stdout)
+
+
+def test_metrics_run(tmp):
+    """2.1.0 (report 4 P-3/P-4): metrics_report --run counts one rehearsal run's events, --compare subtracts it from a
+    baseline; a repeated event_id counts once, a time without its zone is left out, a missing number is UNKNOWN."""
+    base, run_dir = tmp / "mrun" / "base", tmp / "mrun" / "t"
+    for folder in (base, run_dir):
+        (folder / "events").mkdir(parents=True)
+    event = lambda eid, type_, at, **extra: {"v": 1, "event_id": eid, "type": type_, "at": at, **extra}
+    ask = lambda eid, at, decision, topic, ask_id: event(eid, "asked", at, decision_id=decision, topic_id=topic, scope_id="S", ask_id=ask_id)
+    (run_dir / "run.json").write_text(json.dumps({"v": 1, "started_at": "2026-11-08T10:00:00+08:00"}), encoding="utf-8")
+    first = ask("e1", "2026-11-08T10:01:00+08:00", "D1", "T1", "A1")
+    (run_dir / "events" / "a.json").write_text(json.dumps([
+        first, first,  # the same event written twice counts once
+        ask("e2", "2026-11-08T10:05:00+08:00", "D1", "T1", "A2"),  # asked again: one re-ask
+        event("e3", "answer_received", "2026-11-08T10:06:00+08:00", decision_id="D1", ask_id="A2"),
+        ask("e4", "2026-11-08T10:07:00+08:00", "D2", "T2", "A3"),
+        event("e5", "po_action", "2026-11-08T10:08:00+08:00", kind="click", count=3),
+        event("e6", "po_action", "2026-11-08T02:09:00Z", kind="type"),
+        event("e7", "preview_ready", "2026-11-08T10:12:30+08:00"),
+        event("e8", "preview_ready", "2026-11-08T10:11:00")]), encoding="utf-8")  # no zone: left out
+    (base / "events" / "x.json").write_text(json.dumps([
+        event("b1", "run_started", "2026-11-07T09:00:00+08:00"),
+        event("b2", "po_action", "2026-11-07T09:10:00+08:00", kind="click", count=10),
+        event("b3", "preview_ready", "2026-11-07T09:30:00+08:00"),
+        ask("b4", "2026-11-07T09:01:00+08:00", "D1", "T1", "A1")]), encoding="utf-8")
+    expect("metrics --run counts the run", "metrics_report.py", 0, "--run", run_dir,
+           says=["事件 7 筆；重複 event_id 略過 1 筆；格式不對沒算 1 筆：a.json#9", "| 第一個可用預覽 | 12.5 分鐘 |",
+                 "| 決策 | 提出 2、已回覆 1、還在等 1、撤回 0 |", "| 重問 | 1 |", "| PO 操作 | 4（click 3、type 1） |"],
+           lacks="# 成效數字")
+    expect("metrics --compare subtracts from the baseline", "metrics_report.py", 0, "--run", run_dir, "--compare", base,
+           says=["| PO 操作 | 10 | 4 | 6（60%） |", "| 第一個可用預覽 | 30.0 分鐘 | 12.5 分鐘 | 17.5 分鐘 |", "| 重問 | 0 | 1 | -1 |"])
+    expect("metrics --compare: more operations than the baseline is a negative saving", "metrics_report.py", 0,
+           "--run", base, "--compare", run_dir, says="| PO 操作 | 4 | 10 | -6（-150%） |")
+    empty = tmp / "mrun" / "empty"
+    (empty / "events").mkdir(parents=True)
+    (empty / "events" / "x.json").write_text(json.dumps([ask("z1", "2026-11-08T10:01:00+08:00", "D1", "T1", "A1")]), encoding="utf-8")
+    expect("metrics --run: no start, no preview, no PO action", "metrics_report.py", 0, "--run", empty, "--compare", empty,
+           says=["UNKNOWN：沒有開始時間", "| PO 操作 | 0 |", "| PO 操作 | 0 | 0 | 0（百分比 UNKNOWN：基準是 0） |"])
+    director = tmp / "mrun" / "DIRECTOR"
+    director.mkdir()
+    expect("metrics --run with --director prints both", "metrics_report.py", 0, "--director", director,
+           "--run", run_dir, says=["# 成效數字", "# 接手演練數字"])
+    expect("metrics --run missing folder", "metrics_report.py", 1, "--run", tmp / "mrun" / "nope", says="FAIL run folder not found")
+    expect("metrics --compare needs --run", "metrics_report.py", 2, "--director", tmp / "mrun", "--compare", base)
+    expect("metrics needs --director or --run", "metrics_report.py", 2)
+
+
+def guarded(test, *args):
+    """Run one test group. Without git on PATH, a group that dies on a missing git program is a named skip, not a crash."""
+    global total
+    if GIT is None and test.__name__ in GIT_GROUPS:
+        return skip(test.__name__)
+    mark = (total, len(failures))
+    try:
+        test(*args)
+    except OSError as error:
+        if GIT is not None:
+            raise
+        total, failures[mark[1]:] = mark[0], []  # the group is git work: none of its partial results count
+        skip(test.__name__, f"needs git, none on PATH ({type(error).__name__} after it started)")
+
+
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="director_work_selftest_")).resolve()
     try:
-        test_gate(tmp)
-        test_acceptance(tmp)
-        test_table(tmp)
-        test_dispatch(tmp)
-        test_revision(tmp)
-        test_dispatch_events(tmp)
-        test_verdict_binding(tmp)
-        test_evidence_match(tmp)
-        test_candidate(tmp)
-        test_one_fault(tmp)
-        test_trace(tmp)
-        test_metrics(tmp)
-        test_purpose()
-        test_chat_to_product(tmp)
-        test_scope(tmp)
-        test_submodule_ignore(tmp)
-        test_shared_code()
-        test_py39_newline()
-        test_vocabulary()
-        test_must_read_size()
-        test_must_read_reasons()
-        test_hook(tmp)
-        test_hook_protect(tmp)
-        test_hook_rules(tmp)
-        test_session_profiles(tmp)
-        test_pause(tmp)
-        test_auto_pause(tmp)
-        test_audit(tmp)
-        test_audit_names(tmp)
-        test_report_vs_audit(tmp)
-        test_review(tmp)
-        test_guard_modes(tmp)
-        test_doctor(tmp)
-        test_doctor_launch(tmp)
-        test_container(tmp)
-        test_worker_clone(tmp)
-        test_dns_allow(tmp)
-        test_evidence(tmp)
-        test_order_checks(tmp)
-        test_preflight(tmp)
-        test_order_binding(tmp)
-        test_trusted_rerun(tmp)
-        test_rerun_binding(tmp)
-        test_trusted_isolation(tmp)
-        test_usage_mix(tmp)
-        test_status_gen(tmp)
-        test_status_director(tmp)
-        test_round_check(tmp)
-        test_test_request(tmp)
-        test_poll_hint(tmp)
-        test_poll_report(tmp)
+        guarded(test_gate, tmp)
+        guarded(test_acceptance, tmp)
+        guarded(test_table, tmp)
+        guarded(test_dispatch, tmp)
+        guarded(test_revision, tmp)
+        guarded(test_dispatch_events, tmp)
+        guarded(test_verdict_binding, tmp)
+        guarded(test_evidence_match, tmp)
+        guarded(test_candidate, tmp)
+        guarded(test_one_fault, tmp)
+        guarded(test_trace, tmp)
+        guarded(test_metrics, tmp)
+        guarded(test_purpose)
+        guarded(test_chat_to_product, tmp)
+        guarded(test_scope, tmp)
+        guarded(test_submodule_ignore, tmp)
+        guarded(test_shared_code)
+        guarded(test_py39_newline)
+        guarded(test_vocabulary)
+        guarded(test_onboarding_v210, tmp)
+        guarded(test_must_read_size)
+        guarded(test_must_read_reasons)
+        guarded(test_hook, tmp)
+        guarded(test_hook_protect, tmp)
+        guarded(test_hook_rules, tmp)
+        guarded(test_session_profiles, tmp)
+        guarded(test_pause, tmp)
+        guarded(test_auto_pause, tmp)
+        guarded(test_audit, tmp)
+        guarded(test_audit_names, tmp)
+        guarded(test_report_vs_audit, tmp)
+        guarded(test_review, tmp)
+        guarded(test_guard_modes, tmp)
+        guarded(test_doctor, tmp)
+        guarded(test_doctor_launch, tmp)
+        guarded(test_container, tmp)
+        guarded(test_worker_clone, tmp)
+        guarded(test_dns_allow, tmp)
+        guarded(test_evidence, tmp)
+        guarded(test_order_checks, tmp)
+        guarded(test_preflight, tmp)
+        guarded(test_order_binding, tmp)
+        guarded(test_brief_fingerprint, tmp)
+        guarded(test_brief_carry, tmp)
+        guarded(test_po_acceptance, tmp)
+        guarded(test_trace_brief, tmp)
+        guarded(test_trusted_rerun, tmp)
+        guarded(test_rerun_binding, tmp)
+        guarded(test_trusted_isolation, tmp)
+        guarded(test_usage_mix, tmp)
+        guarded(test_status_gen, tmp)
+        guarded(test_status_director, tmp)
+        guarded(test_round_check, tmp)
+        guarded(test_test_request, tmp)
+        guarded(test_poll_hint, tmp)
+        guarded(test_poll_report, tmp)
+        guarded(test_choice_page)
+        guarded(test_choice_reconcile, tmp)
+        guarded(test_no_git, tmp)
+        guarded(test_dispatch_plan_rule)
+        guarded(test_metrics_run, tmp)
+        guarded(test_status_po_hint, tmp)
+        guarded(test_readme_prompt_first)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     for failure in failures:
         print(f"FAIL {failure}")
-    print(f"selftest: {total - len(failures)}/{total} passed")
+    note = f"; skipped {len(skipped)} git group(s), see SKIP lines" if skipped else ""
+    print(f"selftest: {total - len(failures)}/{total} passed{note}")
     return 1 if failures else 0
 
 

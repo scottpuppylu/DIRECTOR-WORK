@@ -21,6 +21,11 @@
   - PO：只有 PO 能判。
   - worker 能填的狀態以 `tools/vocabulary.json` 為準：REVIEW 最多填 `READY_FOR_REVIEW`，PO 只填 `PENDING_PO`。
 - `TRACES_TO` 寫這張工單服務的需求或決定編號，沿用專案已有的編號；格式寫在 `director_work.json` 的 `trace_id_pattern`。
+- 初衷卡改了以後（2.1，shadow：只加 `~` 提示，不改 exit code；舊工單照樣通過）：
+  - 工單可以選填 `BRIEF_REVISION` 和 `BRIEF_FINGERPRINTS_V1`，值照抄 `gate_check.py --brief BRIEF.md` 印的兩行。每條 B 的指紋是 `brief-row-v1\n` 加上 [ID, 類別, 內容, 怎麼算做到] 精簡 JSON 的 sha256。
+  - `--order / --match / --preflight` 加 `--brief BRIEF.md`：工單記的那條 B 被改掉，印 `~ BRIEF_STALE <WO> <B> <受影響的 AC>`（舊條件驗過，新條件待重驗）；被刪掉是「需求已取消，待調整範圍」。同一編號出現兩次、欄數不對，或工單沒記指紋，印 `~ BRIEF_UNCONFIRMED`（依據未確認）。
+  - 初衷卡定版時跑 `gate_check.py --brief BRIEF.md --snapshot brief-history`：只收狀態 LOCKED、有版次的卡，原子寫入快照，印一行 `BRIEF_LOCKED rev=<n> sha=<雜湊> snapshot=<路徑>`，原樣寫進 `DIRECTOR_LOG`。之後加 `--dispatch-log` 時，以最新一行 BRIEF_LOCKED 為依據；定版後的草稿不算。
+  - 派工時用 `--hash 工單 --snapshot order-history` 留下工單原檔。工單改版、用 `EVIDENCE_EQUIVALENT` 沿用舊證據時，`--match ... --order-history order-history` 拿舊工單記的指紋比對；條件變了就印 `BRIEF_STALE`，找不到舊工單就印 `BRIEF_UNCONFIRMED`。
 - Worker 不改工單的驗收條件和規格。發現條件做不到、互相矛盾或有錯，回報 `BLOCKED` 並寫明原因，由總監裁決後改工單。
 - 總監改工單時 `REVISION` 加 1，在 H 節記一列（誰改、原因、影響的 AC）。派工時用 `gate_check.py --hash` 印出工單雜湊，把它印的 `DISPATCH <WO-ID> rev=<n> sha=<雜湊>` 那行原樣寫進 `DIRECTOR_LOG`（同一工單以最新一行為準）；worker 在報告填 `ORDER_SHA256`。審查時 `--match ... --dispatch-log DIRECTOR_LOG.md` 拿派工紀錄比對：工單被改過再重算雜湊也會被查出；DISPATCH 必須獨占一行，引用、縮排或圍欄裡的不算；沒有紀錄時各模式都失敗。這是事後查出，不是事前防止：誰都還是改得動工單。
 - 發工單前想清楚需求、現有結構、相依、邊界條件、測試方法，一次給完整。
@@ -44,6 +49,13 @@
 - 交接時用 `RESUME_STATE.md`（`docs/06`）；原 worker 先停在安全狀態，接手者先核對 repo 和交接資料一致，不重做已通過的工作。
 - TASK REPORT 可以加 `SESSION_ID:` 和 `RAN:`（一行一個實際跑過的指令，寫 exit 和時間）。總監用 `tools/report_vs_audit.py --report 報告 --log <動作紀錄>` 核對：報告說跑過的 selftest、Unity、Blender、雜湊檢查，動作紀錄裡有沒有、結果和時間對不對得上。它只核對有沒有跑，不代表跑的內容對。
 - 要看「哪個需求做到哪裡」時，用 `tools/trace_report.py` 從工單、報告和裁決產生追溯表（需求 → 工單 → AC → 證據 → 裁決），不另外人工維護。
+  - 加 `--brief BRIEF.md` 時，每條 B 多一列三欄：有人負責／這版有驗證紀錄／你看過這個成品嗎。
+  - `--director-log` 讀 PO 看過哪個成品，`--acceptance PO_ACCEPTANCE.json` 讀 PO 的驗收紀錄。
+  - 只給 `--decisions BRIEF.md` 時，初衷卡裡用清單列出的 DD 編號也算找得到；PO 編號再加 `--decisions DECISION_REGISTER.md`。
+- PO 看過成品要留下看的是哪一版（2.1，shadow）：
+  - 總監在 `DIRECTOR_LOG` 寫整行 `PO_PRODUCT_REVIEW <WO-ID> candidate=<commit> outcome=seen|changes|accepted ref=<訊息> [manifest=<64 位>] [brief=B-2:<指紋>]`。
+  - 要正式綁定時，寫 `PO_ACCEPTANCE.json`（schema `po-acceptance-v1`：candidate_id、commit、entry、manifest_sha256、offered_message_ref；有回覆時再加 reply_ref 和 outcome）。用 `gate_check.py --po-acceptance 檔 [--candidate <40 位>]` 檢查，少綁一項就印 `~ UNBOUND_PO_REPLY`。
+  - 裁決可以選填 `ORDER_SHA256:` 和 `REPORT_SHA256:`。之後檔案被改，`--match` 會印 `~ VERDICT_RECORD`。
 
 ### 重資源排程（有總管時）
 

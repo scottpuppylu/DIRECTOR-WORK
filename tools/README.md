@@ -14,7 +14,7 @@ Python 3.9 以上，只用標準函式庫。一律用 `python -I -X utf8 <tool> 
 | `round_check.py`（1.3.0） | 修正輪數：RESUME_STATE 的 `FIX_ROUNDS:` 到第 4 輪（之後每組）沒有根因研究就 FAIL | 不寫 | 不花 |
 | `report_vs_audit.py`（1.3.0） | 用動作紀錄核對 TASK REPORT：報告說跑過的指令（`RAN:` 和 TESTS / EVIDENCE / DONE 裡的 selftest、Unity、Blender、雜湊檢查）紀錄裡有沒有、exit 和時間對不對 | 不寫 | 不花 |
 | `trace_report.py` | 從工單、報告、裁決產生追溯表：需求 → 工單 → AC → 證據 → 裁決 | 不寫 | 不花 |
-| `metrics_report.py` | 從總監的檔案數出 `PURPOSE.md` 的成效數字：返工、中斷後重做、PO 介入、導入卡住，以及規格審查的花費 | 不寫 | 不花 |
+| `metrics_report.py` | 從總監的檔案數出 `PURPOSE.md` 的成效數字：返工、中斷後重做、PO 介入、導入卡住，以及規格審查的花費；`--run` 另數接手演練的決策、重問、PO 操作和第一個可用預覽的時間 | 不寫 | 不花 |
 | `vocabulary.json` | 判定、下一步、RESULT、治理模式、證據等級等固定用詞的唯一來源；`gate_check.py` 讀它 | — | — |
 | `scope_check.py` | 比對實際改動和工單的 SCOPE / FORBIDDEN | 不寫 | 不花 |
 | `evidence_record.py` | 跑驗收指令，留下 exit code、輸出結尾、產物 SHA-256；之後可重新比對 | `run` 寫一份小 JSON，不覆蓋舊的 | 不花 |
@@ -242,7 +242,7 @@ python -I -X utf8 doctor.py --probe --director <DIRECTOR>        # 容器裡：�
   - `MISSING`：沒設定。
   - `WARN`、`INFO`、`VERSION` 只是說明，不算失敗。
 - 啟動資料夾（1.3.0）：settings 只從 session 啟動的資料夾讀。doctor 從 `~/.claude/projects` 的對話紀錄數出最近 `--launch-days` 天（預設 30）各 worktree 啟動過幾個 session，印 `INFO launch:`。有防護、卻沒有 session 從那裡啟動，印 `settings unread`；session 從沒有防護的 worktree 啟動、別的 worktree 卻有，印 `WARN launch folder unguarded`。有 `--sessions` 檔時，權限一項取各角色最寬鬆的結論，並檢查檔案權限。
-- 最後一行 `DOCTOR: enforced=n not_verified=m not_enforced=k missing=j warn=w`；有 NOT_ENFORCED 或 MISSING 就 exit 1。不在 git repo 裡 exit 2。
+- 最後一行 `DOCTOR: enforced=n not_verified=m not_enforced=k missing=j warn=w`；有 NOT_ENFORCED 或 MISSING 就 exit 1。不在 git repo 裡 exit 2。沒有 git 程式（2.1.0）也是 exit 2，印 `doctor: git not found (...)` 和裝 Git 或放上 PATH 的提示，不再當掉；git 拒絕讀別人擁有的 repo（dubious ownership）時另外說明。
 - **原生 Windows 上 doctor 一定 exit 1**：`isolation: NOT_ENFORCED (native Windows, no OS-level isolation for shell)`。這是實話，不是設定錯。
 - claude 版本：
   - 生效的那個依序取 `CLAUDE_CODE_EXECPATH`、`CLAUDE_PID` 那個程序的執行檔、PATH 上第一個 claude。另外列出 PATH 上每一個，以及 `~/.local/bin` 和 npm 全域資料夾裡不在 PATH 上的（標 `other`）。版本來自 `<exe> --version`，只在本機印，不呼叫模型。
@@ -321,6 +321,13 @@ python -I -X utf8 gate_check.py --preflight <報告.md> <WO.md> --evidence-dir <
 - `--preflight 報告 工單`（可重複，只讀）：舊版本做的審查要照現在的 Strict 重審前，逐項列出缺什麼，一項一行 `LACKS`：報告 HEAD 不是 40 位（給 `--repo` 時在那個 checkout 解出完整 commit；解不出來就要 worker 重交）、報告 `ORDER:` 行沒寫 REVISION、LOG 沒有這一版的 DISPATCH 行、AUTO 條件沒有 CHECKS（要用核准重跑就要補）、證據紀錄沒有支援的 schema、git.head 不是 40 位或 `git.dirty` 不是 false（要重新收證）。沒給 `--evidence-dir` / `--dispatch-log` 的部分印 `NOT_CHECKED`。有缺就 exit 1。
 - `--hash`：派工時記下，交件時比對。**這是事後偵測，不是事前防止**：任何人都還是改得動工單，只是改了會被查出來；沒有派工紀錄就查不出「改完重算」。
 - 固定用詞（判定、下一步、RESULT、治理模式、證據等級）只在 `vocabulary.json` 定義；改用詞時改它，再改 selftest 點名的文件和範本。
+- **初衷卡與 PO 看過的紀錄（2.1，shadow：只加 `~` 提示，exit code 不變；沒有新欄位的舊工單照樣通過）**：
+  - `--brief BRIEF.md` 單獨用：印 `BRIEF_REVISION = <版次>` 和 `BRIEF_FINGERPRINTS_V1 = {"B-2": "<64 位>"}` 兩行，貼進工單表頭。指紋是 sha256(`brief-row-v1\n` + `[ID, 類別, 內容, 怎麼算做到]` 的精簡 JSON)；同一編號兩列或欄數不是 4，印 `~ BRIEF_UNCONFIRMED`（依據未確認），不給指紋。
+  - `--brief` 配 `--order` / `--match` / `--preflight`：工單記的列變了，印 `~ BRIEF_STALE <WO> <B> <AC-1,AC-2>`（舊條件驗過，新條件待重驗）；工單沒有追溯欄時寫 `WHOLE_ORDER`；版次沒升卻內容變了另註「同版內容有變」；列被刪掉寫「需求已取消，待調整範圍」。工單追溯了 B 卻沒記指紋，印 `~ BRIEF_UNCONFIRMED`。
+  - `--brief BRIEF.md --snapshot <資料夾>`：只收狀態 LOCKED、有版次的初衷卡，否則 exit 2。快照原子寫入：同資料夾暫存檔、fsync、改名；同內容的舊檔保留。寫完印 `BRIEF_LOCKED rev=<n> sha=<雜湊> snapshot=<路徑>`，整行寫進 DIRECTOR_LOG。再加 `--dispatch-log` 時，以最新一行 BRIEF_LOCKED 為依據：現在的初衷卡不是它（例如定版後的草稿），就改拿快照比，並印 `compared with the locked snapshot`。
+  - `--hash <WO.md> --snapshot <資料夾>`：另存 `<WO-ID>-rev<n>-<雜湊>.md`。`--match ... --order-history <資料夾>`：用 EVIDENCE_EQUIVALENT 沿用的證據，拿舊工單記的指紋比；條件變了印 `BRIEF_STALE`，找不到舊工單印 `BRIEF_UNCONFIRMED`（沿用依據未確認）。`evidence_record.py verify --rerun` 還不做這項比對。
+  - `--po-acceptance PO_ACCEPTANCE.json [--candidate <40 位>]`：檢查 PO 驗收紀錄（schema `po-acceptance-v1`），必填 candidate_id、commit（40 位）、entry、manifest_sha256、offered_message_ref；outcome 是 seen / changes / accepted 時還要 reply_ref，還沒回覆寫 null。少綁一項、雜湊不是 64 位、commit 不是 `--candidate`，印 `~ UNBOUND_PO_REPLY`；綁好的印 `~ PO_ACCEPTANCE <候選 ID>: <commit 前 12 位> <入口>: 已驗收 (<訊息>)`。
+  - 裁決可加 `ORDER_SHA256:`、`REPORT_SHA256:`（`--hash` 的值）。`--verdict ... --match` 時值不是現在的雜湊，印 `~ VERDICT_RECORD`。
 - 已有舊檔案的專案導入時：`--warn` 只警告、exit 0；`--since YYYY-MM-DD` 跳過較早的檔案（工單看 ISSUED_BY、RESUME_STATE 看 UPDATED、報告和裁決看第一個日期）；找不到日期的檔案無從比較，也跳過，印 `UNDATED` 並在最後一行另計，要查它就不加 `--since`。先用 `--warn` 看全貌，新工單再用 `--since` 嚴格檢查。舊檔案不追溯修改。
 
 ## trace_report.py
@@ -334,9 +341,15 @@ python -I -X utf8 trace_report.py --orders <DIRECTOR>/orders --reports <報告�
 - 表後列出：沒有 TRACES_TO 的工單、不符 `trace_id_pattern` 的編號、對不到工單的報告、裁決對不到報告版次（含 `CANDIDATE_HEAD:` 不是報告 HEAD 的）、報告過期或版次不符。沒設 `trace_id_pattern` 就不檢查格式。
 - 過期報告（1.3.3）：選中的報告 `ORDER:` 行的 REVISION 不是工單現在的 REVISION，或 `ORDER_SHA256` 不是工單現在的雜湊，狀態欄不再照抄它的 PASS，改寫「過期：…（報告寫 PASS）」或「版次不符：…」。只是提示，不擋；正式判定仍是 `gate_check --match`。沒寫 `ORDER:` 或 `ORDER_SHA256` 的舊報告不判斷。
 - 一列一條 AC（1.3.3），不再把 TRACES_TO 的每個編號和每條 AC 交叉配對。工單的 AC 表可加選用的 `追溯`（或 `traces`）欄，寫這條 AC 驗證哪些編號：每個編號一列，空的（或 `—`）寫「（未指定）」；表後另列「AC 的追溯不在工單 TRACES_TO 裡」和「TRACES_TO 裡沒有 AC 驗證的編號」。沒有這欄、TRACES_TO 有兩個以上編號時，每條 AC 一列，需求欄寫「DD-1、DD-2（工單層）」。`--decisions` 也查 AC 追溯的編號。
-- `--decisions 檔案`（可重複）：讀專案需求或決定檔裡表格列第一欄的 `XX-數字` 編號。TRACES_TO 寫了、卻不在這些檔裡的，列在「TRACES_TO 找不到的編號」；檔裡有、卻沒有任何工單追溯的，列在「沒有工單的需求」。不給這個旗標，輸出和以前相同。
+- `--decisions 檔案`（可重複）：讀專案需求或決定檔裡表格列第一欄的 `XX-數字` 編號。TRACES_TO 寫了、卻不在這些檔裡的，列在「TRACES_TO 找不到的編號」；檔裡有、卻沒有任何工單追溯的，列在「沒有工單的需求」。不給這個旗標，輸出和以前相同。專案用初衷卡時，卡和決策登記表一起查（旗標給兩次）：`--decisions <WS>/DIRECTOR/BRIEF.md --decisions <WS>/DIRECTOR/DECISION_REGISTER.md`；舊專案沒有登記表才只給卡。只有 B 開頭的列算待做項目，「沒有工單的需求」裡的 DD、PO、OD 只是決策紀錄，不代表缺工單。配色這類待預覽的事不要編成 B 號，放在卡的「待預覽」段（`docs/12` 第三節）。
+- 初衷卡只用清單列出 DD 編號（`- DD-1 …`，2.1）：只給 `--decisions BRIEF.md` 時，這些編號也算找得到，但不列進「沒有工單的需求」；圍欄裡的清單是例子，不算。表格裡沒有某個開頭的編號時（例如 PO），會提示再加 `--decisions DECISION_REGISTER.md`。
+- `--brief BRIEF.md`（2.1，只讀、不擋）：多印「初衷卡三欄」一節，每條 B 一列：有人負責／這版有驗證紀錄／你看過這個成品嗎。
+  - 驗證紀錄看選中的報告：AC 狀態，加 `--evidence-dir` 時 PASS 還要找得到證據檔。工單記的指紋和現在的列不同，寫「工單是照舊條件寫的，新條件待重驗」。
+  - 你看過：`--director-log` 讀 `PO_PRODUCT_REVIEW` 行，`--acceptance PO_ACCEPTANCE.json`（可重複）讀驗收紀錄，都要綁到報告的 HEAD。看的是別的成品，寫「看過別的成品」；看的是舊條件，寫「當時是舊條件」。
+  - 另列 `BRIEF_STALE` / `BRIEF_UNCONFIRMED` 提示和綁不到成品的 PO 回覆（`UNBOUND_PO_REPLY`）。`--director-log` 有 BRIEF_LOCKED 時以它為依據，和 gate_check 相同。
+  - `--director-log`、`--evidence-dir` 要配 `--brief`，否則 exit 2；`--acceptance` 可以單獨用。
 - 不悄悄略過檔案：三個資料夾裡不是該類檔案的 `.md`（工單沒有 `ISSUED_BY =`、報告沒有 `TASK_ID`、裁決沒有 `## A`）列在「沒計入的檔案」，寫數量和檔名。舊格式工單要算進來，補一行 `ISSUED_BY = <誰> <日期>`。
-- 只看檔案寫了什麼，不判斷做得對不對。資料夾或 `--decisions` 檔不存在 exit 1，其他情況 exit 0。
+- 只看檔案寫了什麼，不判斷做得對不對。資料夾或 `--decisions` / `--brief` / `--director-log` / `--acceptance` 檔不存在 exit 1，其他情況 exit 0。
 
 ## metrics_report.py
 
@@ -350,6 +363,32 @@ python -I -X utf8 metrics_report.py --director <DIRECTOR> [--since YYYY-MM-DD] [
 - PO 介入：`PO_PENDING.md` 的 OD / ACT 項目數；每項的 `CREATED:` 日期給 `--since` 用，沒寫的照算並標 `UNDATED`。待決事項放在別的檔案或別的格式時，在 `director_work.json` 設 `po_pending_files`、`po_item_pattern`、`po_open_pattern`（見 `../director_work.example.json`），不改程式。導入卡住：`DIRECTOR_LOG` 的 `BOOTSTRAP_STUCK` 行（`BOOTSTRAP`）。規格審查：`SPEC_REVIEW ... tokens= adopted=` 行的合計。
 - 額度不在這裡算，跑 `usage_report.py`。沒有東西可數時印 `UNKNOWN`，不印 0：來源檔不存在、一份裁決都沒有（返工）、一份工單都沒有（改版）、`DIRECTOR_LOG` 沒有 `RESUMED` 行（中斷後遺失）。只數得到檔案裡記下的事。
 - 文末「沒計入的檔案」列出像工單（檔名 `WO-` 開頭或放在 `orders` 資料夾）卻沒有 `ISSUED_BY =` 行的檔案；加 `--since` 時另列被略過的工單和沒有日期、照算的工單。
+
+### metrics_report --run（2.1.0，shadow：只讀、只多印一節）
+
+```text
+python -I -X utf8 metrics_report.py --run <run 資料夾> [--compare <基準 run 資料夾>] [--director <DIRECTOR>]
+```
+
+接手演練（`docs/06b`「接手演練」）每一輪一個 run 資料夾，放在 `DIRECTOR/research/<run>/`：
+
+- `run.json`：`{"v": 1, "run_id": "...", "started_at": "2026-11-08T10:00:00+08:00"}`。沒有這個檔，就用最早的 `run_started` 事件當開始時間。
+- `events/*.json`：每個檔是一筆事件或一串事件。每筆都要有 `v: 1`、`event_id`、`type`、`at`（ISO 8601，**要帶時區**，`Z` 也可以）；可以另記 `recorded_at`、`source`。各 type 另外要的欄位：
+
+| type | 另外要的欄位 | 算進哪裡 |
+|---|---|---|
+| `run_started` | 無 | 開始時間（沒有 `run.json` 時） |
+| `asked` | `decision_id`、`topic_id`、`scope_id`、`ask_id` | 決策「提出」；重問 |
+| `answer_received` | `decision_id`、`ask_id` | 決策「已回覆」 |
+| `applied`、`closed` | `decision_id` | 只記錄，不另算 |
+| `withdrawn` | `decision_id` | 決策「撤回」（已回覆的不算撤回） |
+| `po_action` | 無；可加 `kind`（click、type、paste…）和 `count`（正整數，預設 1） | PO 操作次數 |
+| `preview_ready` | 無 | 第一個可用預覽 = 最早的 `preview_ready` − 開始時間（分鐘） |
+
+- 同一個 `event_id` 只算一次（照檔名順序取第一筆）；內容不同的會註明。缺欄位、不認得的 type、時間沒帶時區的事件不算，列出檔名和第幾筆。
+- 決策依 `decision_id` 去重：提出、已回覆、還在等（提出 − 已回覆 − 撤回）、撤回。重問：同一個 `topic_id` + `scope_id` 有幾個不同的 `ask_id`，減 1 再加總；同一個 `ask_id` 重送不算重問。
+- `--compare`：省下 = 基準 − 本次（正數表示本次比較少），PO 操作另印百分比，基準是 0 時百分比寫 UNKNOWN。沒有開始時間或沒有 `preview_ready` 時預覽時間寫 UNKNOWN，不寫 0。
+- 不加 `--run` 時輸出和以前完全相同；`--director` 和 `--run` 至少給一個。run 資料夾不存在：exit 1。
 
 ## scope_check.py
 
@@ -376,6 +415,7 @@ python -I -X utf8 evidence_record.py verify <紀錄.json> --rerun-recorded   # �
 ```
 
 - 紀錄放 repo 外的工作資料夾。只留最後 40 行（`--tail`）、每行最多 400 字；要完整輸出就加 `--log <檔案>`。
+- 沒有 git（2.1.0，例如從 ZIP 解開的規則包）：`run` 照樣跑指令、寫紀錄，`git` 欄是 `{"head": null, "dirty": null}`，stderr 印一行 `git metadata not available (git not found ...)`。這種紀錄在 `gate_check --match --evidence-dir` 算「沒有 git HEAD 的紀錄」（Strict 失敗、Standard 提示）。`verify` 不加 `--rerun` 照常可用；`--rerun` 要 git，沒有就 `NOT_RUN git not found ...`、exit 2，絕不算通過。
 - 螢幕只印一行結論，指令本身的 exit code 原樣傳回。
 - 指令和輸出結尾會照原樣存檔，不要把密鑰放進指令。
 - `verify` 先查紀錄有沒有 `run` 寫的每個欄位（缺欄位或型別不對：`NOT_RUN not an evidence record`，exit 2；沒有 `schema` 的舊紀錄照讀，印提示），再比對產物雜湊。結論行把三件事分開印：`integrity=same|changed`（產物和紀錄時相同）、`test=not-rerun|passed|failed(...)`（只有 `--rerun` 跑核准的檢查而且 exit 0 才是 `passed`；不重跑就是 `not-rerun`，不算重跑過）、`artifacts=N missing=M`（紀錄時就缺的、現在不見的都算 missing）。有任何一項不對就是 `MISMATCH`，exit 1；產物缺了絕不會 OK。會變動的產物（含時間戳）重跑後一定不同，這種就只比 exit code 和人工看的部分。
@@ -528,6 +568,7 @@ python -I -X utf8 status_gen.py --out <DIRECTOR>/status.py --config templates/st
 - 一般段：LOG（log 尾段）、HASH（雜湊檔尾段、`--checksum` 檔的 SHA-256）、DISK（GiB）、GIT（分支、領先 / 落後、改動數、最近的 commit）、OUT（最新輸出）。
 - 總監段（設定檔，都選用）：`po_page`（待決頁的計數：每項一個 regex，或 JSON 頁的 `list` 加 `field` / `value`）、`orders`（沒有結案字樣的工單）、`pending_sends`（還沒勾的 `- [ ]`）、`audit`（每份動作紀錄最近 `hours` 小時的筆數、被擋次數、讀 log 次數、session 數；讀 log 的判斷照抄 `poll_hint.py`）、`processes`（命令列含某字串的程序有沒有在跑）。
 - 讀不到的路徑印 MISSING；磁碟低於門檻、讀不到待決頁或程序沒在跑時 exit 1。
+- 2.1.0（shadow）：待決頁是文字頁（沒有 `extract`）時，若有項目 `STATUS: open` 但 `ANSWER:` 已填（不算空白或 `<…>` 佔位），多印一行 `PO hint: N item(s) still STATUS open with an ANSWER filled in (ID…)`：PO 可能已回覆但沒改狀態，計數會漏掉，要到頁上讀。exit code 不變。
 - 已存在的 `--out` 要加 `--force` 才覆蓋。
 
 ## round_check.py（1.3.0）
@@ -562,13 +603,36 @@ python -I -X utf8 report_vs_audit.py --report <報告.md> --log <動作紀錄.js
 - 最後一行 `REPORT_VS_AUDIT: PASS|FAIL|NONE claims= ok= failed= session= logs=`；FAIL exit 1，不能跑 exit 2。
 - 只證明「有跑、結果和報告一致」，不證明跑的內容對；動作紀錄沒有 exit code，用 ok / error 判斷。
 
+## choice_reconcile.py（2.1.0，shadow）
+
+```text
+python -I -X utf8 choice_reconcile.py register --db <DIRECTOR>/choice_inbox.sqlite3 --snapshot <一題一版.json>
+python -I -X utf8 choice_reconcile.py ingest   --db <DIRECTOR>/choice_inbox.sqlite3 --export <從選擇頁讀回來的.json>
+python -I -X utf8 choice_reconcile.py plan     --db <DIRECTOR>/choice_inbox.sqlite3 --question CH-01 --revision 2 [--wo WO-012] [--orders <DIRECTOR>/orders]
+python -I -X utf8 choice_reconcile.py advance  --db <DIRECTOR>/choice_inbox.sqlite3 --question CH-01 --revision 2 --from QUEUED --to CLAIMED [--session <名字>] [--result <文字>]
+python -I -X utf8 choice_reconcile.py settle   --db <DIRECTOR>/choice_inbox.sqlite3 --key <來源鍵> --to NOTED|SUPERSEDED|CLOSED [--result <文字>]
+python -I -X utf8 choice_reconcile.py status   --db <DIRECTOR>/choice_inbox.sqlite3 [--now <ISO>] [--late-min 10] [--stuck-min 30] [--json]
+```
+
+- 選擇頁回覆的本機帳本（`docs/12` 第四、六節），一個 SQLite 檔，四個表：`revisions`（每題每版的內容和 hash，登記後不能改）、`inbox`（每筆回覆一列，用來源鍵去重）、`decisions`（每題每版最多採用一筆和它的狀態）、`effects`（固定的 WO 編號、誰接手、結果）。
+- `register` 印 `snapshotHash=sha256:…`（JSON 排序鍵、UTF-8、不含 `snapshotHash` 和 `id`）；同一版內容不同就 `REFUSED`，exit 1。
+- `ingest` 的 JSON：`{"source": "<artifact>", "decisions": [...], "choiceReplies": [...], "notes": [...]}`，每筆是 db 的欄位加 `id`。每筆標 `ok`、`legacy`（2.0 舊題）、`note`、`duplicate`、`conflict`、`conflict-same-submission`、`stale`、`bad-hash`、`bad-choice`、`unknown-revision`；後面這些只記錄，進 `RECEIPT_PENDING`，要回給使用者。題目已關閉的 2.0 舊答案記成 `legacy-closed`，直接 `CLOSED`。再跑一次同一份不會多記（`already=`）。
+- `plan` 在 `BEGIN IMMEDIATE` 裡採用最早一筆 `RECORDED` 回覆，給固定 WO 編號（沒給 `--wo` 就取帳本和 `--orders` 裡最大號加一）；再跑還是同一張（`already`）。沒有可採用的回覆 `NOTHING`，exit 1。
+- `advance` 只照 `RAW → RECORDED → PLANNED → QUEUED → CLAIMED | RECONCILE → RECEIPT_PENDING → CLOSED`（`RECONCILE → CLAIMED | QUEUED`）走；不是一步 exit 2。狀態已經不是 `--from` 就 `LOST`，exit 1：兩個總監同時接手，只有一個成功。
+- `settle` 結案沒被採用的那幾列：留言 `NOTED`、被取代 `SUPERSEDED`、回給使用者後 `CLOSED`；已被採用的要用 `advance`，exit 1。
+- `status` 列出還沒結束的：只有 `ok`、`legacy` 的 `RECORDED` 回覆超過 `--late-min` 分才標「沒交出去」，留言另計 `notes=`；`PLANNED / QUEUED / CLAIMED / RECONCILE` 超過 `--stuck-min` 分標「收到但卡住」。最後一行 `CHOICE_RECONCILE: open= not_handed= stuck= receipts_pending= notes= (shadow: hints only)`，一律 exit 0；沒有帳本也 exit 0。
+- 壞資料、壞 `--now`、壞帳本、資料夾不存在：`ingest`、`plan`、`advance`、`settle`、`status` 只印 `CHOICE_RECONCILE: SHADOW_ERROR <原因>`，exit 0；`register` exit 2。只有 `MOVED`、`PLANNED`、`SETTLED` 代表狀態真的改了。
+- 2.1 是 shadow：只提示、不擋任何工具；讀 db 和寫回條仍由總監用 `ArtifactData` 做，本工具不連網。
+
 ## selftest.py
 
 ```text
 python -I -X utf8 selftest.py
 ```
 
-改過任何工具、`vocabulary.json`、`docs/02`、範本或每輪必讀的文件就跑一次。也會檢查：文件和範本裡的固定用詞和 `vocabulary.json` 一致；README 標「每輪必讀」的文件合計不超過上限（`MUST_READ_LIMIT`，2026-11-06 為 12,392 bytes）。要提高上限，commit 訊息寫明原因。GitHub Actions 在每次 push 和 PR 跑同一支（`.github/workflows/selftest.yml`）。
+改過任何工具、`vocabulary.json`、`docs/02`、範本或每輪必讀的文件就跑一次。也會檢查：文件和範本裡的固定用詞和 `vocabulary.json` 一致；README 標「每輪必讀」的文件合計不超過上限（`MUST_READ_LIMIT`，2.1.0 起為 9,550 bytes：四份必讀從 12,433 減到 9,550）。要提高上限，commit 訊息寫明原因。GitHub Actions 在每次 push 和 PR 跑同一支（`.github/workflows/selftest.yml`），另外在 PATH 上沒有 git 時再跑一次。
+
+- 沒有 git（2.1.0）：要建 git 測試資料的測試組整組略過，每組印一行 `SKIP <測試組>: needs git, none on PATH`，最後一行寫 `skipped N git group(s)`；其餘照跑，有失敗照樣 exit 1。有 git 時這些測試組照常跑，建資料失敗仍是失敗。`test_no_git` 自己把 git 從 PATH 拿掉，確認 `evidence_record run` 仍寫紀錄、`--rerun` 是 NOT_RUN、doctor 說沒有 git。
 
 ## 建議另外寫的（依專案）
 

@@ -6,6 +6,119 @@
 - **MINOR**：新增規則、文件、工具或選項，舊檔案照樣通過。
 - **PATCH**：修正文字、修 bug，規則不變。
 
+## 2.1.0 — 2026-11-08
+
+含未發布的 2.0.1（PR #18）：選擇頁不漏讀。
+
+MINOR：五份外部研究提出的問題一次修完，2.0.1 一起併入。PO 2026-11-08：「這些都修正成2.1版」。研究是外部 GPT 在 2026-11-08 針對 v2.0.0（`15f0460`）做的五個題目，每份都附重現腳本：題1 初衷卡改版後的追溯、題2 選擇頁可靠性、題3 小白模式的第一輪、題4 只跟總監聊天的演練、題5 跨帳號導入與每輪成本。報告內容是研究者自述，每一項都由負責的 worker 自己重現過才修，重現不到的不修，列在「沒重現的」。新的檢查都用影子模式：只提示，exit code 不變，不擋。舊檔案和舊指令照樣通過，所以是 MINOR。
+
+2.0.1 的內容列在第一節。
+
+### 選擇頁不漏讀（原 2.0.1）
+
+PO 要求「專案選項頁你不會漏讀，跟我們的那個待決頁一樣」。原本選擇頁只靠總監每輪第一個動作去查，總監的對話沒在動時，回覆會一直放著，使用者也看不出總監讀了沒。
+
+- 送出就叫醒：`templates/choice_page.html` 的 capabilities 加 `comments`。使用者送出回覆或留言後，頁面用 `comments.sendToClaude` 在那一題留一則給總監的訊息；總監的對話開著、這一頁的監看是 armed 時，總監馬上被叫醒。不能送（沒權限、沒有對話、使用者關掉）就顯示「總監下一輪會讀到」，已寫進 db 的回覆不受影響。
+- 已讀回條：總監讀到回覆時同一輪先寫回條（2.1.0 起改成分階段回條，見下一節）。已回覆卻很久沒有回條的題目會標出來，提醒使用者在聊天裡講一聲；「已回覆」列表每分鐘自己更新一次。
+- 補充文字不再消失：資料同步進來時，正在打的補充文字連游標一起放回。
+- 規則：`docs/12` 新增第六節「選擇頁不漏讀」；`docs/03`、`docs/06` 的「讀待決頁」各加一句「含選擇頁」。
+
+### 選擇頁不漏字、不送錯、不重複執行（題2）
+
+題2 在 Chromium 實測：資料同步會整區重畫開放題，清掉補充文字、選取範圍和焦點；刪掉 B 選項後仍能送出 B；送出中的按鈕被改選或重畫後又能按；`seenAt` 寫成功反而讓卡住的題目從逾時提示裡消失；兩個總監可能同時處理同一筆回覆。
+
+- 重畫分區（P-1）：`render` 拆成待選、已回覆、已結束、留言四區，初衷卡和留言的資料進來只重畫自己那區。重畫前後保留輸入框的內容、選取範圍和焦點；輸入法組字中延後重畫。送出前確認選的選項還在目前的選項裡；新題的選項還沒讀到時顯示「載入中」或「這一版選項讀不到，請在聊天告訴總監」，都不能送。每題送出中上鎖（`S.inFlight`），晚到的寫入不會蓋掉已結束的題目；留言送出成功後，只有文字沒被改過才清空。
+- 題目改版不覆蓋（P-2）：題目每改一版留一份（`choiceRevisions`）；回覆只新增（`choiceReplies`），帶 `submissionId`、`revision`、`snapshotHash` 和當時的選項內容。沒有版本紀錄的舊題照樣顯示，標「舊題，當時選項未留存」。
+- 本機收件帳本（P-3，影子模式）：新工具 `tools/choice_reconcile.py`，帳本是 `<DIRECTOR>/choice_inbox.sqlite3`（revisions、inbox、decisions、effects 四張表；指令 register、ingest、plan、advance、settle、status）。每筆回覆的狀態 RAW → RECORDED → PLANNED → QUEUED → CLAIMED／RECONCILE → RECEIPT_PENDING → CLOSED；`plan` 在 `BEGIN IMMEDIATE` 裡固定工單編號、可重跑，`advance` 用 compare-and-set，兩個總監同時處理同一筆，只有一個拿得到。帳本出錯只印一行 `CHOICE_RECONCILE: SHADOW_ERROR <原因>`，exit 0。
+- 頁面看得出卡在哪（P-4）：回條分三階段（`choiceReceipts`），每題顯示「已儲存，等總監讀取」／「總監已收件，處理中」／「已交接／處理完成」；逾時提醒分成「（沒收到）」（10 分鐘沒有收件回條）和「（收到但卡住）」（收件後 30 分鐘沒交接）。叫醒訊息只送事件提示，掛在固定的標題 anchor（`#h-open`、`#h-note`）上。頁面裡的連結只接受 `https:`、`/_blob/` 和相對路徑。
+- `docs/12` 第四～六節照上面更新；`tools/README.md` 加 `choice_reconcile` 一節。
+- 重現：題2 的 F-1、F-2、F-4 在 headless Chrome 加題2 的 stub 重跑，修前重現、修後 13/13 FIXED；F-3（兩個總監搶同一筆）和 F-6（`seenAt` 讓卡住的題目消失）瀏覽器重現不到，在帳本模型和 selftest 修好（兩個行程同時 claim 只有一個成功）；F-5 只修一部分，見「沒重現的」。
+
+### 初衷卡改了，用舊驗證的工單會被標出來（題1、題4 P-2）
+
+題1 重現：B-2 的內容改版後，`trace_report.py` 和 Strict gate 照樣顯示舊條件的 PASS；只提高工單版次，仍可能把舊證據帶進新版；追溯表分不出「報告寫了 PASS」「證據還在」「使用者看過」。題4 重現：兩份候選都核對成功，試用連結換了之後，PO 的「對，可以收貨」分不出批准的是哪一份。
+
+- 工單記初衷卡版次和逐條指紋（題1 P-1）：`templates/WORK_ORDER.md` 加選填欄位 `BRIEF_REVISION`、`BRIEF_FINGERPRINTS_V1={"B-2":"<sha256>"}`。指紋 = sha256(UTF-8(`"brief-row-v1\n"` + 精簡 JSON [編號, 類別, 內容, 怎麼算做到]))；`gate_check --brief BRIEF.md` 單獨跑會印出這兩行，貼進工單即可。重複或認不出的列顯示「依據未確認」。沒有這兩欄的舊工單照樣通過。
+- 追溯表三欄（題1 P-2）：`trace_report.py --brief` 分成「有人負責」「這版有驗證紀錄」「你看過這個成品嗎」，另有 `--director-log`、`--evidence-dir`、`--acceptance`。看過成品的依據是 `DIRECTOR_LOG` 的 `PO_PRODUCT_REVIEW` 紀錄；裁決紀錄可選擇帶 `ORDER_SHA256`、`REPORT_SHA256`、`CANDIDATE_HEAD`。
+- 改版快照與影子提示（題1 P-4）：初衷卡鎖定時存快照 `DIRECTOR/brief-history/<rev>-<hash>.md`（原子寫入）並記 `BRIEF_LOCKED`；`gate_check --brief` 印影子提示 `~ BRIEF_STALE WO-001 B-2 AC-1`，exit code 不變。沿用的證據要對照舊工單當時的指紋，不能跨條文沿用（題1 F-4）：`--hash 工單 --snapshot DIR` 留下工單原檔，`--match --order-history DIR` 拿 `EVIDENCE_EQUIVALENT` 沿用的舊工單指紋比，條件變了印 `BRIEF_STALE`，找不到舊工單印 `BRIEF_UNCONFIRMED`。
+- `--decisions BRIEF.md` 單獨使用時，不再把合法的 DD-1 報成找不到（題1 F-2）：初衷卡用清單列出的 DD 也算找得到，不列成缺漏，也不列進「沒有工單的需求」；圍欄裡的清單不算。表格裡沒有 PO 編號時，提示再加一次 `--decisions DECISION_REGISTER.md`。
+- 收貨紀錄（題4 P-2）：`PO_ACCEPTANCE.json` 綁定候選 ID、完整 commit、入口檔、manifest 的 SHA-256 和訊息參照；`gate_check --po-acceptance` 和 `trace_report --acceptance` 讀得到，PO 的回覆沒綁到候選時印 `~ UNBOUND_PO_REPLY`。PO 打開試用後照常回話即可，由總監寫這份檔。
+- `templates/GATE_VERDICT.md`、`docs/02`、`docs/07`、`tools/README.md` 的對應段落同步。
+
+### 小白模式第一輪就談需求；一句話確認初衷卡並開工（題3、題2 P-5、題1 P-3）
+
+題3 重現：小白模式的第一次需求訪談排在完整建置之後，而建置在新 repo 上會出錯（沒有 `.gitignore` 時 `setup_project_settings.py` exit 1；PATH 上沒有 CLI 時 `context_probe.py` exit 1，成功時還要先等 20 秒）。確認初衷卡和同意開工是兩個決定，原本沒有合併回覆的範本。題2 F-7：`BOOTSTRAP` 和 `docs/11` 對小白模式要不要先問才用 Artifact 寫法矛盾。
+
+- 小白模式選完模式的同一輪就開始談需求（題3 P-1）：`BOOTSTRAP` 加「小白快速路徑」，先做唯讀檢查，只在 repo 外寫最少的續航狀態，完整建置延到開第一位 worker 之前；一般模式的順序不變。
+- 壓縮門檻改在開第一位 worker 前才設（題3 P-2，`BOOTSTRAP` 步驟 7）：只對 worker 資料夾，`setup_project_settings.py --repo <worker> --only-this` 先看報告 → `--apply` → `git check-ignore` → 開線 → `get_usage`，結果記進 GUARDS；讀不到寫 NOT_VERIFIED。
+- 一句回覆同時確認初衷卡、授權開工（題3 P-3，`docs/12` 第三節）：加同意範本（店員班表的例子，回覆句「卡片對，請開一位 AI 助手做這一批」）和三種狀態 `LOCK_ONLY`、`NO_START`、`LOCK_AND_USER_ASKED`。
+- 初衷卡可以只鎖「第一階段」；要看到真的畫面才能選的事（例如配色）放在「待預覽」段，不編 B 號（題3 P-4，`templates/BRIEF.md`）。
+- 選擇頁一定先問（題2 P-5、F-7）：兩種模式都預設用聊天加本機 `PO_PENDING.md`；Artifact 選擇頁要先問、PO 同意、而且能用時才開。小白模式的問法：「需要我把選擇題和圖片放在你自己的 Claude 頁面，讓你點選嗎？直接在這裡回答也可以。」頁面不能用時，經 `PO_PENDING.md` 和聊天的 4 步備援。`BOOTSTRAP` 步驟 6 和 `docs/11` 新節「選擇頁的授權與備援」不再矛盾。
+- 追溯指令改成兩次 `--decisions`（題1 P-3）：`--decisions <WS>/DIRECTOR/BRIEF.md --decisions <WS>/DIRECTOR/DECISION_REGISTER.md`；只有 B 列算待做項目。`docs/12`、`BOOTSTRAP`、`templates/BRIEF.md`、`tools/README.md` 同步。
+- `README.md` 的開始步驟 3～6、模式表、提示詞第 0／2／5 項同步；文件表 `docs/12` 那一列沒改（內容仍對）。
+
+### 沒有 git 也能跑；每輪必讀變小；總監先想怎麼派工（題5、題4 P-1/P-3/P-4、題2 P-3、PO 2026-11-08）
+
+題5 重現：從 `git archive` 解出來、沒有 `.git` 的規則包跑 selftest 是 1,743/1,744，唯一失敗的是 `status.py full`；沒有 git 執行檔時，`evidence_record run` 照樣執行了指令，卻沒留下紀錄。四份每輪必讀還帶著只在某些情境才用的操作細節。
+
+- 沒有 git 不再失敗（題5 F-1、F-2）：selftest 的 `status_gen` 測試改用自建的 git fixture；PATH 上沒有 git 時，依賴 git 的組別依名稱 skip（`SKIP <group>: needs git, none on PATH`），其餘照跑。`evidence_record run` 沒有 git 照樣留紀錄（`git` 欄為 null，stderr 說明）；`verify --rerun` 沒有 git 是 NOT_RUN、exit 2；`doctor --repo` 沒有 git 是 exit 2 加訊息。CI 多跑一次沒有 git 的 selftest。
+- 題5 其餘各項：F-4 做一部分（`docs/06b` 寫合併 PO 入口時要保留真實回覆；總監版 `status.py` 的待決頁項目還是 `STATUS: open` 卻已填 `ANSWER` 時多印一行 `PO hint`，影子模式）；F-5 做一部分（`doctor` 的「not inside a git repo」分成「沒有 git」和「dubious ownership」）；F-9 只修 `doctor` 的編碼（子程序輸出一律用 UTF-8 讀，不再用 cp950）。F-6、F-7、F-8 和 F-5、F-9 的其餘部分在 `context_probe`、`docs/11`、`docs/12`、選擇頁、`BOOTSTRAP`、`setup_project_settings` 裡，不在這次 W4 的範圍，沒改。
+- 每輪必讀變小（題5 P-3）：純理由移到 `docs/10`「每輪必讀規則的理由」，按需才做的步驟移到 `docs/05`、`docs/06b`，規則留在原處；四份必讀 12,433 → 9,550 bytes，`MUST_READ_LIMIT` 12,440 → 9,550，理由寫在 `selftest.py`。每輪的本機讀取合併成較少的工具呼叫，所有有效的 PO 入口照樣每輪掃完（題5 P-4，`docs/06b`）。
+- `docs/03` 待決頁兩句改短（題2 P-3）：「每輪第一步讀待決頁（任何喚醒）：照待決頁程序（含選擇頁）讀回覆和新留言，同輪執行或派工並關閉；未能完成則寫續辦紀錄。」「每輪結束前自查：待決頁已讀、本輪 PO 訊息已處理並登記、已回覆項目已關閉或留有續辦紀錄。」
+- 總監每次派工先做派工規劃（PO 2026-11-08）：PO 原話「記住不要讓總監自己做事，這是不符合初衷的，總監制的目的就是提高效率的同時穩定研發」，並補充「總監不是只派工…是讓他不要攬著所有事情自己做」。總監的職責範圍不變；要加的是每次有工作，先想要不要開 worker、開幾位、依檔案歸屬怎麼切（兩人不改同一檔）、平行或先後、各自的模型和 effort、誰整合，寫進工單或 `DIRECTOR_LOG` 的 `DISPATCH` 紀錄。`docs/01` 加一句，細節放 `docs/05`「派工規劃」（非必讀）。
+- 八步演練（題4 P-1）：`docs/06b`「接手演練」，中斷點放在 PO 送出 A/B 選擇之後、舊總監讀到之前；接手通過要有證據顯示選擇只套用一次，沒有重問、重派或重做。
+- 量得到「少問幾次」（題4 P-3/P-4）：`metrics_report.py --run <資料夾> [--compare <基準>]`（影子模式）算決定事件（提出／已回覆／還在等／撤回）、第一個可用預覽的分鐘數、重問次數、PO 操作數；省下的操作 = 基準 − 本次，加百分比。不加 `--run` 時輸出和 2.0.1 相同。
+- `docs/10` 新增第 48 條 L-057（總監把實作攬在自己身上，上下文變長、平行變排隊、自己驗收自己）和第 49～58 條 L-047～L-056（W1～W4 的教訓：通知錨點、分階段回條、共用函式跨 SCOPE、lacks 測試、指紋格式標籤、預設寫在三處、未定案不編號、selftest 不假設有 git、中文與 CRLF 檔的改法、selftest 排進背景）。
+
+### README 重整：啟動提示詞放最上面（PO 2026-11-08）
+
+PO 要求重新整理 README，把啟動提示詞放到最上面。
+
+- 標題下先寫「怎麼用：開一個新的 Claude Code 對話，把下面整段貼上」，接著是整段啟動提示詞（內容沒改），再用兩行說明一般模式和小白模式的差別，然後才是「這是什麼」。
+- 其餘照新手閱讀順序：這是什麼、解決什麼 → 準備和怎麼開始 → 第一份回報 → 用起來長怎樣 → 平常要做的事 → 常見問題 → 名詞 → 檔案地圖 → 防護 → 已知限制 → 原則 → 授權。
+- 原本兩節「防護是安全帶，不是剎車（1.3.1）」和「執行期防護（1.1.0）」合成一節「防護：哪些真的擋、哪些只提醒」，標題不寫版號。
+- 內容只搬不刪，規則句都留著；只有「怎麼開始」第 2 步改成「把本頁最上面的啟動提示詞整段貼給它」。
+- selftest 新增 `test_readme_prompt_first`：啟動提示詞的 text 區塊一定在「## 這是什麼」之前，防護只有一節，標題不帶版號。
+
+### 數字
+
+- 每輪必讀（`docs/01`、`03`、`06`、`08`）：2.0.0 的 12,363 bytes → 2.0.1 的 12,433 → 本版 9,550（少 2,883，約 23%）。`MUST_READ_LIMIT` 12,392 → 12,440 → 9,550。
+- `selftest.py`：2.0.0 的 1,744 項 → 2.0.1 的 1,756 → 本版 1,946 項（W1 選擇頁與帳本、W2 指紋與收貨、W3 小白第一輪、W4 沒有 git 與指標、README 重整），本機 Python 3.9、3.11、3.12 各跑一次全過；PATH 上沒有 git 時 821/821 項全過，19 組依賴 git 的照名稱 skip。GitHub CI 跑 Python 3.9、3.12 和一次沒有 git 的 selftest，全綠才合併（L-046）。
+
+### 已知問題（不擋發布，下一版處理）
+
+- `evidence_record run --log <路徑>` 的資料夾不存在時會出錯，不會自己建（W4）。
+- `evidence_record verify --rerun` 還不做題1 F-4 的舊工單指紋比對：這段比對和 `gate_check` 共用同一個函式，而 `evidence_record.py` 在 W2 工單的 FORBIDDEN 裡；新的綁定鍵一律用 `.get` 讀，所以 `evidence_record` 照舊運作，只是不比（W2）。
+- W2 新增的檔案讀取用嚴格 UTF-8，遇到非 UTF-8 的檔案會印 traceback，而不是一行錯誤。
+- 只給 `--decisions` 時，`trace_report` 的提示文字變了（exit code 不變）；有腳本比對舊提示字串的要更新。
+- `PO_PRODUCT_REVIEW` 只認整行的紀錄，寫在句子中間的不算（W2）。
+- 同一個舊題（沒有版本紀錄）在不同分頁各還能送出一次（W1）。
+- `choice_reconcile register` 出錯時 exit 2，不是影子模式的 exit 0：頁面需要它算出的雜湊（W1，已接受）。
+
+### 沒重現的、沒驗證到的
+
+- 題2 F-3（兩個總監搶同一筆）、F-6（`seenAt` 讓卡住的題目消失）瀏覽器重現不到，只在帳本模型和 selftest 驗證。
+- 題2 F-5：頁面沒有回合可跑時叫不醒總監，是 Desktop 的行為，不在這次範圍；改成頁面顯示「（沒收到）」、總監的 `status` 看得到沒交出去的，`docs/12` 第 6.1 節寫明「沒有人開始下一輪時不會被讀到，請在聊天提醒總監」。
+- 題1 P-3：工具本來就支援兩次 `--decisions`，只改文件。題3 F-3／F-4、題2 F-7 是文件和規則前後矛盾，靠讀文字重現，不是跑程式。
+- 題5 F-6、F-7、F-8 不在範圍，沒改，也沒重跑報告的重現腳本；F-5 只重現了 `doctor` 的訊息，`BOOTSTRAP` 的資料夾碰撞沒重現。
+- 選擇頁的修正在 headless Chrome 加題2 的 stub 驗證，不是真的 Artifact SDK；輸入法只用事件模擬，沒用真的輸入法。
+- 五份研究都沒有在 Claude Desktop 跑完真的流程；這次也沒有：手機上送出選擇頁並看到總監被叫醒、另一個 Claude 帳號的導入、小白模式同輪開線（`user_asked`）、八步演練全程，都是 NOT_VERIFIED。影子提示的誤報率要等真實專案的資料。
+
+遷移（已在用的專案，全部選做；不做也照樣通過）：
+1. 把 `tools/` 整個重新複製到 `DIRECTOR/tools/`。新的檢查都是影子模式，只多提示，exit code 不變。
+2. 選擇頁：用新範本重新發布，`capabilities` 改成 `{"db": {}, "user": {}, "assets": {}, "comments": {}}`；網址不變，資料不動。舊頁不改照樣能用，只是沒有叫醒、分階段回條和三種狀態。
+3. 想用收件帳本：照 `tools/README.md` 的 `choice_reconcile` 一節建 `<DIRECTOR>/choice_inbox.sqlite3`；帳本和 `DIRECTOR/` 裡其他檔案放在一起，本版沒有改 ignore 規則。
+4. 想讓初衷卡改版標得出來：新工單填 `BRIEF_REVISION` 和 `BRIEF_FINGERPRINTS_V1`（`gate_check --brief BRIEF.md` 會印出來），舊工單不用改；跑 `gate_check --brief` 看 `BRIEF_STALE` 提示。
+5. 追溯指令：原本只給 `--decisions DIRECTOR/BRIEF.md` 的，改成兩次 `--decisions`（BRIEF 和 DECISION_REGISTER）。
+6. 每輪必讀變了：現任總監下一輪重讀 `docs/01`、`03`、`06`、`08` 一次。
+
+對齊初衷：
+1. 幫到誰：PO 和之後所有用 DW 的人，特別是小白模式的使用者和換帳號導入的人。依據是五份外部研究的重現結果（每項由 worker 重新重現），和 PO 2026-11-08 對 2.0.1 選擇頁、總監派工的兩次要求。
+2. Desktop：總監和五位 worker 都在 Desktop Code 分頁的 session 做；selftest 在本機 Python 3.9、3.11、3.12 各跑一次，另跑一次 PATH 上沒有 git 的，合併前看 GitHub CI 全綠（L-046）。選擇頁在 headless Chrome（題2 的 stub）重現 13 案，修後都 FIXED；不是 Desktop 內建瀏覽器，也不是真的 Artifact SDK。Desktop 全流程（手機送出叫醒、同輪開線、跨帳號導入、八步演練）沒有實跑，寫 NOT_VERIFIED。
+3. 服務：初衷 8（只跟總監聊天就能做出成品）：小白模式第一輪就談需求、一句話確認並開工、選了不會漏、不會送錯；初衷 5（成品要真的對）：初衷卡改版後舊驗證會被標出來，收貨綁定到哪一份候選；初衷 4（中斷不丟進度）：收件帳本和八步演練；初衷 1（一條連結就能開工）：沒有 git、換帳號也跑得起來；初衷 2（省額度）：每輪必讀變小、工具呼叫合併；初衷 3（PO 不用盯）：總監先派工規劃，不攬著自己做。零成本（7）：只用標準庫和 Artifact 內建能力。
+4. 核心：每輪必讀 12,433 → 9,550 bytes（少約 23%），移走的只有理由和按需步驟，規則沒少（總監讀 diff 確認）；派工規劃只在 `docs/01` 加一句。新的檢查全是影子模式；工作線隔離（核心 4）照檔案歸屬切成四位 worker，必讀四檔只有一人改。Direct 工作不多步驟；PO 的操作變少（確認初衷卡和開工合成一句）。
+5. 舊檔案和舊指令：都照樣通過。沒有新欄位的工單、沒有版本紀錄的選擇題、沒有 `PO_ACCEPTANCE.json` 和收件帳本的專案都照舊；新提示只多印，不改 exit code。輸出有變的只有：只給 `--decisions` 時 `trace_report` 的提示文字；沒有 git 時 `doctor` 的訊息分成兩種、`evidence_record run` 多留一份紀錄。
+
 ## 2.0.0 — 2026-11-08
 
 MAJOR（PO 定的）：初衷變了。PO 在 2026-11-07 加了第 8 條初衷「只跟總監聊天就能做出成品」：使用者給初始提示詞、選模式後，一直跟總監聊需求，聊到能寫成初衷卡、確認了才開工；中途要選的 A/B 放在獨立的選擇頁；每張工單都對回初衷卡，不做歪。舊檔案和舊指令都照樣通過；升 MAJOR 是因為目標變了，不是格式變了。

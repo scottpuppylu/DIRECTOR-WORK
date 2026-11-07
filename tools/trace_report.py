@@ -28,6 +28,19 @@ Rows are one per AC, never TRACES_TO x AC: an order may give each AC its own IDs
 its AC table (one row per ID and AC; an AC left empty shows （未指定）); without that column, two or more TRACES_TO IDs
 share one row per AC marked （工單層）. With the column, IDs an AC traces that TRACES_TO lacks, and TRACES_TO IDs no AC
 traces, are listed at the end.
+
+2.1 (WO-DW-210-W2, shadow: views and hints only; without these flags the output is the same as before):
+  --brief BRIEF.md [--director-log DIRECTOR_LOG.md] [--evidence-dir DIR] [--acceptance PO_ACCEPTANCE.json ...]
+  adds 初衷卡三欄（每條 B 一列）: for each brief row 有人負責 (the orders that trace it), 這版有驗證紀錄 (the order
+  pins the row's fingerprint as the brief has it now, its chosen report is not stale and an AC that traces the row is
+  PASS; with --evidence-dir the evidence file must be there) and 你看過這個成品嗎 (the latest whole line
+  `PO_PRODUCT_REVIEW <WO-ID> candidate=<sha> outcome=seen|changes|accepted [ref=..] [brief=B-2:<sha256>,..]` in
+  --director-log for the report's HEAD, or a bound PO_ACCEPTANCE record for that commit). It also lists
+  gate_check's BRIEF_STALE / BRIEF_UNCONFIRMED hints per order, and the log's BRIEF_LOCKED basis (a draft is not it).
+  --acceptance alone lists the records that do not bind a reply to one product (UNBOUND_PO_REPLY).
+  --decisions: an ID that starts a list item (`- DD-1 用標準函式庫`, as the BRIEF lists the Director's decisions)
+  counts as known but is not listed under 沒有工單的需求; a missing ID whose prefix no table in the files has gets a hint
+  to add the decision register.
 """
 import argparse
 import importlib.util
@@ -177,6 +190,141 @@ def decision_ids(text):
     return ids
 
 
+LIST_ID = re.compile(r"[ \t]*[-*+][ \t]+(?:\[[ xX]\][ \t]+)?\**`?([A-Z]+-\d+)`?\**(?![\w-])")
+
+
+def listed_ids(text):
+    """IDs that start a list item outside a fence (`- DD-1 用標準函式庫`): the BRIEF lists the Director's decisions so
+    (2.1, 題1 F-2). Known, so not missing; not requirements of their own, so not under 沒有工單的需求."""
+    return [m.group(1) for m in (LIST_ID.match(line) for line in gate.log_lines(text)) if m]
+
+
+def missing_hint(name, table_prefixes):
+    prefix = gate.id_prefix(name)
+    if not table_prefixes or prefix in table_prefixes:
+        return ""
+    return (f"（--decisions 的表格沒有 {prefix} 開頭的編號；初衷卡只列 "
+            + "／".join(sorted(table_prefixes)) + "，DD／PO 編號請再加 --decisions DECISION_REGISTER.md）")
+
+
+def every(order):
+    """The IDs an order traces: TRACES_TO, then those of its 追溯 column."""
+    return list(dict.fromkeys((order["traces"] or []) + [i for ids in (order["per_ac"] or {}).values() for i in ids]))
+
+
+def acs_for(order, name):
+    """The ACs of an order that verify one requirement: by its 追溯 column, else every AC when TRACES_TO names it."""
+    if order["per_ac"] is not None:
+        return [ac for ac, ids in order["per_ac"].items() if name in ids]
+    return list(order["acs"]) if name in (order["traces"] or []) else []
+
+
+def chosen_head(order):
+    report = order["reports"][0] if order["reports"] and not order["tie"] else None
+    head = (report["head"] or "").lower() if report else ""
+    return head if re.fullmatch(r"[0-9a-f]{7,40}", head) else None
+
+
+def same_commit(one, other):
+    return bool(one and other and (one.startswith(other) or other.startswith(one)))
+
+
+def verified_state(order, name, fingerprint, evidence_dir):
+    """這版有驗證紀錄 for one order and one brief row."""
+    if fingerprint is None:
+        return f"{gate.UNCONFIRMED}（初衷卡這條列了兩次或不是 4 格）"
+    _, pins = gate.order_brief(order["text"])
+    if not pins or name not in pins:
+        return f"{gate.UNCONFIRMED}（工單沒有釘這條的指紋）"
+    if pins[name] != fingerprint:
+        return "沒有：工單是照舊條件寫的，新條件待重驗"
+    if order["tie"] or order["report"] is None:
+        return "沒有：還沒有報告" if not order["tie"] else "沒有：多份報告分不出先後"
+    if order["stale"]:
+        return f"沒有：{order['stale']}"
+    states = []
+    for ac in acs_for(order, name):
+        got = order["report"].get(ac) or {}
+        status = got.get("status") or "報告缺這條"
+        files = re.findall(r"[\w.-]+\.json", got.get("evidence") or "")
+        if status == "PASS" and evidence_dir and any(not (pathlib.Path(evidence_dir) / f).is_file() for f in files):
+            status = "PASS 但證據檔找不到"
+        states.append((ac, status))
+    passed = [ac for ac, status in states if status == "PASS"]
+    shown = "、".join(f"{ac} {status}" for ac, status in states) or "沒有 AC 驗這條"
+    return ("有" if passed else "還沒有") + f"（{shown}）"
+
+
+SEEN = {"seen": "看過", "changes": "看過，要求修改", "accepted": "已接受"}
+
+
+def seen_state(order, name, fingerprint, reviews, accepted):
+    """你看過這個成品嗎 for one order and one brief row: the latest PO_PRODUCT_REVIEW for the report's HEAD, else a
+    bound PO_ACCEPTANCE record for that commit."""
+    head = chosen_head(order)
+    mine = [r for r in reviews if r["order"] == order["id"] and not r["problem"]]
+    if mine:
+        review = mine[-1]
+        if head and not same_commit(review["candidate"], head):
+            return f"看過別的成品（{review['candidate'][:12]}），這版（{head[:12]}）還沒看"
+        said = SEEN[review["outcome"]] + (f"（{review['ref']}）" if review["ref"] else "")
+        if fingerprint and review["brief"].get(name) not in (None, fingerprint):
+            return f"{said}，但當時是舊條件，新條件還沒看"
+        return said
+    bound = [r for r in accepted if head and same_commit(r["commit"].lower(), head)]
+    if bound:
+        record = bound[-1]
+        outcome = gate.PO_OUTCOMES.get(record.get("outcome") or "")
+        return (SEEN[outcome] + f"（{record['reply_ref']}）") if outcome else f"已送出，還沒回覆（{record['offered_message_ref']}）"
+    return "還沒看"
+
+
+def brief_sections(a, orders):
+    """2.1: print 初衷卡三欄 (with --brief) and return the hint sections: the brief's basis and BRIEF_STALE /
+    BRIEF_UNCONFIRMED per order, and PO replies that do not bind to one product."""
+    log_text = pathlib.Path(a.director_log).read_text(encoding="utf-8-sig") if a.director_log else None
+    reviews = gate.po_reviews(log_text) if log_text else []
+    accepted, unbound = [], []
+    for path in a.acceptance:
+        records, problem = gate.acceptance_records(pathlib.Path(path).read_text(encoding="utf-8-sig"))
+        if problem:
+            unbound.append(f"{path}：{problem}")
+        for n, record in enumerate(records, 1):
+            bad = gate.acceptance_problems(record)
+            if bad:
+                unbound.append(f"{path} #{n}：" + "；".join(bad))
+            else:
+                accepted.append(record)
+    ids = {o["id"] for o in orders}
+    unbound += [f"{a.director_log}：{r['line']}：{r['problem'] or '沒有這張工單'}" for r in reviews
+                if r["problem"] or r["order"] not in ids]
+    sections = []
+    if a.brief:
+        notes = []
+        brief = gate.load_brief(a.brief, log_text, a.director_log, notes)
+        names = sorted(set(brief["rows"]) | brief["ambiguous"], key=gate.id_sort)
+        print("\n## 初衷卡三欄（每條 B 一列）\n\n"
+              f"初衷卡 {brief['label']}，版次 {brief['revision'] if brief['revision'] is not None else '—'}。"
+              "提示用，不擋任何關卡。\n")
+        print("| 需求 | 內容 | 有人負責 | 這版有驗證紀錄 | 你看過這個成品嗎 |\n|---|---|---|---|---|")
+        for name in names:
+            row = brief["rows"].get(name)
+            fingerprint = gate.brief_fingerprint(row) if row else None
+            serving = [o for o in orders if name in every(o)]
+            cells = (name, row[2] if row else f"{gate.UNCONFIRMED}（列了兩次或不是 4 格）",
+                     "、".join(o["id"] for o in serving) or "沒有工單",
+                     "；".join(f"{o['id']}：{verified_state(o, name, fingerprint, a.evidence_dir)}" for o in serving) or "—",
+                     "；".join(f"{o['id']}：{seen_state(o, name, fingerprint, reviews, accepted)}" for o in serving) or "—")
+            print("| " + " | ".join(cell(v) for v in cells) + " |")
+        hints = ([brief["problem"]] if brief["problem"] else []) + notes
+        for order in orders:
+            gate.brief_notes(order["text"], order["path"], brief, hints)
+        sections.append(("初衷卡依據提示（BRIEF_STALE／BRIEF_UNCONFIRMED，shadow，不擋）", hints))
+    if a.acceptance or a.director_log:
+        sections.append(("PO 回覆沒綁到成品（UNBOUND_PO_REPLY）", unbound))
+    return sections
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--orders", required=True)
@@ -184,18 +332,26 @@ def main():
     ap.add_argument("--verdicts")
     ap.add_argument("--config")
     ap.add_argument("--decisions", action="append", default=[])
+    ap.add_argument("--brief", help="2.1: the BRIEF; adds 初衷卡三欄 and the BRIEF_STALE hints")
+    ap.add_argument("--director-log", help="with --brief: PO_PRODUCT_REVIEW and BRIEF_LOCKED lines")
+    ap.add_argument("--evidence-dir", help="with --brief: the evidence files a PASS must name")
+    ap.add_argument("--acceptance", action="append", default=[], help="PO_ACCEPTANCE.json (repeatable)")
     a = ap.parse_args()
+    if (a.director_log or a.evidence_dir) and not a.brief:
+        ap.error("--director-log and --evidence-dir work with --brief")
     sys.stdout.reconfigure(encoding="utf-8")
-    missing = [f for f in (a.orders, a.reports, a.verdicts) if f and not pathlib.Path(f).is_dir()]
+    missing = [f for f in (a.orders, a.reports, a.verdicts, a.evidence_dir) if f and not pathlib.Path(f).is_dir()]
     if missing:
         print(f"FAIL folder not found: {', '.join(missing)}")
         return 1
-    missing = [f for f in a.decisions if not pathlib.Path(f).is_file()]
+    missing = [f for f in a.decisions + [a.brief, a.director_log] + a.acceptance if f and not pathlib.Path(f).is_file()]
     if missing:
         print(f"FAIL file not found: {', '.join(missing)}")
         return 1
-    known = list(dict.fromkeys(i for f in a.decisions for i in decision_ids(
-        pathlib.Path(f).read_text(encoding="utf-8-sig"))))
+    decision_texts = [pathlib.Path(f).read_text(encoding="utf-8-sig") for f in a.decisions]
+    known = list(dict.fromkeys(i for text in decision_texts for i in decision_ids(text)))
+    listed = {i for text in decision_texts for i in listed_ids(text)} - set(known)
+    table_prefixes = {gate.id_prefix(i) for i in known}
     cfg = json.loads(pathlib.Path(a.config).read_text(encoding="utf-8-sig")) if a.config else {}
     if cfg.get("schema_version", 1) != CONFIG_VERSION:
         sys.exit(f"{a.config}: schema_version {cfg['schema_version']} is not {CONFIG_VERSION}; see CHANGELOG.md")
@@ -209,7 +365,7 @@ def main():
         m = re.search(r"^\s*TRACES_TO\s*=\s*([^#\n]*)", text, re.M)
         ids = id_list(m.group(1)) if m else None
         acs = gate.ac_table(text)
-        orders.append({"path": path, "id": first_id(text, path.stem), "traces": ids, "acs": acs,
+        orders.append({"path": path, "id": first_id(text, path.stem), "traces": ids, "acs": acs, "text": text,
                        "per_ac": {ac: id_list(row.get("traces")) for ac, row in acs.items()}
                        if any(id_list(row.get("traces")) for row in acs.values()) else None,
                        "rev": int(gate.order_revision(text)), "hash": gate.order_hash(path.read_bytes()),
@@ -260,8 +416,8 @@ def main():
     print("| 需求 | 工單 | AC | 類型 | 狀態 | 證據 | 裁決 |\n|---|---|---|---|---|---|---|")
     for row in sorted(rows, key=lambda r: (r[0] in last, r[0], r[1], r[2])):
         print("| " + " | ".join(cell(v) for v in row) + " |")
+    extra = brief_sections(a, orders) if a.brief or a.acceptance else []
     untraced = [o["id"] for o in orders if o["traces"] is None]
-    every = lambda o: list(dict.fromkeys((o["traces"] or []) + [i for ids in (o["per_ac"] or {}).values() for i in ids]))
     odd = [f"{o['id']}: {i}" for o in orders for i in every(o) if pattern and not pattern.fullmatch(i)]
     sections = [("沒有 TRACES_TO 的工單", untraced), ("編號格式不符 trace_id_pattern", odd),
                 ("對不到工單的報告", [str(p) for p in stray]), ("裁決對不到報告版次", unpaired),
@@ -276,9 +432,10 @@ def main():
                                                   if not any(i in ids for ids in o["per_ac"].values())])]
     if a.decisions:
         traced = {i for o in orders for i in every(o)}
-        sections += [("TRACES_TO 找不到的編號", [f"{o['id']}: {i}" for o in orders for i in every(o)
-                                                 if i not in known]),
+        sections += [("TRACES_TO 找不到的編號", [f"{o['id']}: {i}" + missing_hint(i, table_prefixes) for o in orders
+                                                 for i in every(o) if i not in known and i not in listed]),
                      ("沒有工單的需求", [i for i in known if i not in traced])]
+    sections += extra
     for title, items in sections:
         print(f"\n## {title}\n" + ("\n".join(f"- {i}" for i in items) if items else "- 無"))
     several = [o for o in orders if len(o["reports"]) > 1]
