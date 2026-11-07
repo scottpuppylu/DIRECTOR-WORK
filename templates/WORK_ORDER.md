@@ -4,7 +4,7 @@
 ```text
 ISSUED_BY      = 總監  <YYYY-MM-DD HH:MM，讀 date>
 REVISION       = 1    # 開工後每改一次 +1，並在 H 節加一列
-TRACES_TO      = <這張工單服務的需求或決定編號，逗號分隔，例如 DD-03；沒有寫 NONE>
+TRACES_TO      = <這張工單服務的初衷卡、需求或決定編號，逗號分隔，例如 B-2, DD-03；有初衷卡時至少一個 B 編號（docs/12）；沒有寫 NONE>
 PRIMARY_WORKER = session「<名稱>」
 MODEL / EFFORT = <模型> / <medium|high|xhigh>（理由見 docs/05）
 FALLBACK       = <同 session 新對話，從 RESUME_STATE 接續 | 其他 worker>
