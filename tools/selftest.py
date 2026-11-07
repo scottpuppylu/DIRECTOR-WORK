@@ -14,6 +14,7 @@ import shlex
 import shutil
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -5326,15 +5327,17 @@ def test_choice_reconcile(tmp):
     expect("reconcile queue", "choice_reconcile.py", 0, *move, "--from", "PLANNED", "--to", "QUEUED", says="MOVED")
     racers = [subprocess.Popen([sys.executable, "-I", "-X", "utf8", str(TOOLS / "choice_reconcile.py"), *map(str, move), "--from", "QUEUED",
                                 "--to", "CLAIMED", "--session", name], stdout=subprocess.PIPE, encoding="utf-8") for name in ("director-a", "director-b")]
-    outcomes = sorted((p.wait(timeout=60), p.stdout.read().strip()) for p in racers)
-    check("reconcile: of two Directors only one claims", [code for code, _ in outcomes] == [0, 1] and "LOST" in outcomes[1][1], repr(outcomes))
+    outcomes = sorted((p.wait(timeout=60), p.stdout.read().strip(), name) for p, name in zip(racers, ("director-a", "director-b")))
+    check("reconcile: of two Directors only one claims", [code for code, _, _ in outcomes] == [0, 1] and "LOST" in outcomes[1][1], repr(outcomes))
+    winner = outcomes[0][2]
     expect("reconcile status is shadow and names the stuck one", "choice_reconcile.py", 0, "status", "--db", ledger, "--now", "2030-01-01T00:00:00Z",
            says=["CH-05:r2 CLAIMED WO-041", "收到但卡住", "沒交出去", "not_handed=1 stuck=1 receipts_pending=4 notes=1", "shadow"],
            lacks=["CH-02", "notes/N1 RECORDED"])
     expect("reconcile status fresh shows no stuck", "choice_reconcile.py", 0, "status", "--db", ledger, says="stuck=0")
     expect("reconcile status without ledger", "choice_reconcile.py", 0, "status", "--db", folder / "none.sqlite3", says="no ledger")
     for step in (("CLAIMED", "RECEIPT_PENDING"), ("RECEIPT_PENDING", "CLOSED")):
-        expect(f"reconcile {step[0]} -> {step[1]}", "choice_reconcile.py", 0, *move, "--from", step[0], "--to", step[1], "--result", "done")
+        expect(f"reconcile {step[0]} -> {step[1]}", "choice_reconcile.py", 0, *move, "--from", step[0], "--to", step[1], "--result", "done",
+               "--session", winner)
     expect("reconcile closed is not open", "choice_reconcile.py", 0, "status", "--db", ledger, "--json", lacks="CH-05:r2")
     settle = ("settle", "--db", ledger, "--key")
     expect("reconcile settle refuses an adopted reply", "choice_reconcile.py", 1, *settle, "art/choiceReplies/R1", "--to", "CLOSED", says="adopted")
@@ -5345,7 +5348,7 @@ def test_choice_reconcile(tmp):
     legacy = ("--db", ledger, "--question", "CH-01", "--revision", "0")
     expect("reconcile plan a 2.0 answer", "choice_reconcile.py", 0, "plan", *legacy, says="PLANNED CH-01:r0 WO-042")
     for old, new in (("PLANNED", "QUEUED"), ("QUEUED", "CLAIMED"), ("CLAIMED", "RECEIPT_PENDING"), ("RECEIPT_PENDING", "CLOSED")):
-        expect(f"reconcile CH-01 {old} -> {new}", "choice_reconcile.py", 0, "advance", *legacy, "--from", old, "--to", new)
+        expect(f"reconcile CH-01 {old} -> {new}", "choice_reconcile.py", 0, "advance", *legacy, "--from", old, "--to", new, "--session", "d")
     expect("reconcile status reaches all zero", "choice_reconcile.py", 0, "status", "--db", ledger, "--now", "2030-01-01T00:00:00Z",
            says="open=0 not_handed=0 stuck=0 receipts_pending=0 notes=0")
     (folder / "list.json").write_text("[1, 2]", encoding="utf-8")
@@ -5353,13 +5356,357 @@ def test_choice_reconcile(tmp):
     (folder / "broken.sqlite3").write_bytes(b"not a database at all, just text" * 40)
     for name, args in (("unreadable export", ("ingest", "--db", ledger, "--export", folder / "none.json")),
                        ("export not an object", ("ingest", "--db", ledger, "--export", folder / "list.json")),
-                       ("bad reply rows", ("ingest", "--db", ledger, "--export", folder / "rows.json")),
                        ("bad --now", ("status", "--db", ledger, "--now", "yesterday")),
                        ("broken ledger", ("status", "--db", folder / "broken.sqlite3")),
                        ("missing folder", ("plan", "--db", folder / "no" / "such" / "x.sqlite3", "--question", "CH-01", "--revision", "1")),
                        ("advance on a broken ledger", ("advance", "--db", folder / "broken.sqlite3", "--question", "CH-01", "--revision", "1",
                                                        "--from", "QUEUED", "--to", "CLAIMED"))):
         expect(f"reconcile shadow error: {name}", "choice_reconcile.py", 0, *args, says="CHOICE_RECONCILE: SHADOW_ERROR", lacks="Traceback")
+    expect("reconcile bad reply rows are quarantined", "choice_reconcile.py", 0, "ingest", "--db", ledger, "--export", folder / "rows.json",
+           says=["QUARANTINED", "reason=not-an-object", "quarantined=1"], lacks=["SHADOW_ERROR", "Traceback"])
+
+
+def test_choice_reconcile_v22(tmp):
+    """2.2 (GPT review F01 F02 F03 F06 F07): takeover with holder / generation, the current-revision pointer, per-row
+    quarantine and re-check, late conflicts, one JSON document from status --json, idempotent notes, the 2.1 upgrade."""
+    folder = tmp / "choice_reconcile_v22"
+    folder.mkdir()
+
+    def cr(*args):
+        return run("choice_reconcile.py", *args)
+
+    def snap(db, rev, title="t", qid="CH-01"):
+        path = folder / f"snap-{qid}-{rev}.json"
+        path.write_text(json.dumps({"questionId": qid, "revision": rev, "title": title,
+                                    "options": [{"key": "A"}, {"key": "B"}]}, ensure_ascii=False), encoding="utf-8")
+        return cr("register", "--db", db, "--snapshot", path)[1].strip().rsplit("=", 1)[-1]
+
+    def export(db, name, replies=(), decisions=(), notes=(), source="art"):
+        path = folder / name
+        path.write_text(json.dumps({"source": source, "decisions": list(decisions), "choiceReplies": list(replies),
+                                    "notes": list(notes)}, ensure_ascii=False), encoding="utf-8")
+        return ("ingest", "--db", db, "--export", path)
+
+    def reply(digest, rid="R1", sub="s1", choice="A", rev=1):
+        return {"id": rid, "questionId": "CH-01", "revision": rev, "snapshotHash": digest, "submissionId": sub, "choice": choice, "note": ""}
+
+    def status_json(db, *extra):
+        code, out = cr("status", "--db", db, "--json", *extra)
+        try:
+            return code, json.loads(out)
+        except ValueError:
+            return code, {"_not_one_json_document": out}
+
+    # F01: CLAIMED -> RECONCILE takeover, holder and generation are compare-and-set
+    db = folder / "f01.sqlite3"
+    d1 = snap(db, 1)
+    expect("v22 f01 ingest", "choice_reconcile.py", 0, *export(db, "f01.json", [reply(d1)]), says="r1 ok")
+    expect("v22 f01 plan names the effect and identity", "choice_reconcile.py", 0, "plan", "--db", db, "--question", "CH-01", "--revision", "1",
+           says=["PLANNED CH-01:r1 WO-001", "effect=CH-01:r1:effect", '"submissionId": "s1"', '"snapshotHash": "' + d1])
+    mv = ("advance", "--db", db, "--question", "CH-01", "--revision", "1")
+    expect("v22 f01 queue", "choice_reconcile.py", 0, *mv, "--from", "PLANNED", "--to", "QUEUED")
+    expect("v22 f01 claim needs a session", "choice_reconcile.py", 2, *mv, "--from", "QUEUED", "--to", "CLAIMED", says="needs --session")
+    expect("v22 f01 claim raises the generation", "choice_reconcile.py", 0, *mv, "--from", "QUEUED", "--to", "CLAIMED", "--session", "A",
+           says="generation=1 holder=A")
+    expect("v22 f01 only the holder hands over", "choice_reconcile.py", 1, *mv, "--from", "CLAIMED", "--to", "RECEIPT_PENDING", "--session", "B",
+           says=["REFUSED", "held by A"])
+    expect("v22 f01 a takeover needs --generation", "choice_reconcile.py", 2, *mv, "--from", "CLAIMED", "--to", "RECONCILE",
+           "--session", "B", says="needs --generation 1")
+    expect("v22 f01 a stale generation loses", "choice_reconcile.py", 1, *mv, "--from", "CLAIMED", "--to", "RECONCILE", "--session", "B",
+           "--generation", "0", says="LOST")
+    expect("v22 f01 takeover to RECONCILE", "choice_reconcile.py", 0, *mv, "--from", "CLAIMED", "--to", "RECONCILE", "--session", "B",
+           "--generation", "1", says=["MOVED CH-01:r1 CLAIMED -> RECONCILE", "look up WO-001"])
+    con = sqlite3.connect(str(db))
+    takeover = con.execute("SELECT note FROM events WHERE to_state='RECONCILE'").fetchall()
+    con.close()
+    check("v22 f01 the takeover is logged", takeover == [("takeover from A",)], repr(takeover))
+    expect("v22 f01 the old holder cannot hand over", "choice_reconcile.py", 1, *mv, "--from", "CLAIMED", "--to", "RECEIPT_PENDING",
+           "--session", "A", says="LOST")
+    racers = [subprocess.Popen([sys.executable, "-I", "-X", "utf8", str(TOOLS / "choice_reconcile.py"), *map(str, mv), "--from", "RECONCILE",
+                                "--to", "CLAIMED", "--session", name], stdout=subprocess.PIPE, encoding="utf-8") for name in ("B", "C")]
+    outcomes = sorted((p.wait(timeout=60), p.stdout.read().strip()) for p in racers)
+    check("v22 f01 of two takers only one claims", [c for c, _ in outcomes] == [0, 1] and "generation=2" in outcomes[0][1]
+          and "LOST" in outcomes[1][1], repr(outcomes))
+    holder = "B" if "holder=B" in outcomes[0][1] else "C"
+    expect("v22 f01 a newer claim is not taken without --generation", "choice_reconcile.py", 2, *mv, "--from", "CLAIMED",
+           "--to", "RECONCILE", "--session", "Z", says="needs --generation 2")
+    expect("v22 f01 the new holder hands over", "choice_reconcile.py", 0, *mv, "--from", "CLAIMED", "--to", "RECEIPT_PENDING",
+           "--session", holder, "--generation", "2", says="MOVED")
+
+    # F02: plan / claim re-check the revision the page shows; snapshots and the pointer are kept apart
+    db = folder / "f02.sqlite3"
+    d1 = snap(db, 1)
+    expect("v22 f02 r1 reply", "choice_reconcile.py", 0, *export(db, "f02a.json", [reply(d1)]), says="r1 ok")
+    d2 = snap(db, 2, "changed")
+    plan1 = ("plan", "--db", db, "--question", "CH-01", "--revision", "1")
+    expect("v22 f02 a registered but unpublished r2 holds r1", "choice_reconcile.py", 1, *plan1, says=["HOLD", "publish --revision 2"])
+    expect("v22 f02 r1 replies stay ok while the page shows r1", "choice_reconcile.py", 0,
+           *export(db, "f02b.json", [reply(d1, "R2", "s2")], [{"id": "CH-01", "revision": 1, "snapshotHash": d1, "status": "open"}]),
+           says="R2 CH-01 r1 duplicate")
+    expect("v22 f02 publish r2 re-checks r1 replies", "choice_reconcile.py", 0, "publish", "--db", db, "--question", "CH-01", "--revision", "2",
+           says=["REEVALUATED art/choiceReplies/R1 ok -> stale", "PUBLISHED CH-01 r2"])
+    expect("v22 f02 plan r1 is stale now", "choice_reconcile.py", 1, *plan1, says="NOTHING")
+    expect("v22 f02 a published revision never goes back", "choice_reconcile.py", 1, "publish", "--db", db, "--question", "CH-01",
+           "--revision", "1", says="never goes back")
+    db = folder / "f02c.sqlite3"
+    d1 = snap(db, 1)
+    cr(*export(db, "f02c.json", [reply(d1)]))
+    cr("plan", "--db", db, "--question", "CH-01", "--revision", "1")
+    mv = ("advance", "--db", db, "--question", "CH-01", "--revision", "1")
+    cr(*mv, "--from", "PLANNED", "--to", "QUEUED")
+    snap(db, 2, "changed")
+    expect("v22 f02 the page moved to r2 (decisions doc)", "choice_reconcile.py", 0,
+           *export(db, "f02d.json", [], [{"id": "CH-01", "revision": 2, "status": "open"}]), says="CHOICE_INGEST")
+    expect("v22 f02 claim re-checks the revision", "choice_reconcile.py", 1, *mv, "--from", "QUEUED", "--to", "CLAIMED", "--session", "A",
+           says=["REFUSED", "stale: the page shows r2"])
+    expect("v22 f02 status names the stale work order", "choice_reconcile.py", 0, "status", "--db", db, says="題目已改版或已關")
+    expect("v22 f02 a stale work order goes to RECONCILE", "choice_reconcile.py", 0, *mv, "--from", "QUEUED", "--to", "RECONCILE",
+           "--session", "A", says="MOVED")
+    db = folder / "f02e.sqlite3"
+    d1 = snap(db, 1)
+    cr(*export(db, "f02e.json", [reply(d1)]))
+    expect("v22 f02 close the question", "choice_reconcile.py", 0, "publish", "--db", db, "--question", "CH-01", "--close", says="closed")
+    expect("v22 f02 a reply to a closed question waits for a receipt", "choice_reconcile.py", 0,
+           *export(db, "f02f.json", [reply(d1, "R2", "s2")]), says="R2 CH-01 r1 question-closed")
+
+    # F03: one bad row is quarantined, the good rows go in; a late snapshot re-checks waiting rows
+    db = folder / "f03.sqlite3"
+    d1 = snap(db, 1)
+    bad = dict(reply(d1, "R2", "s2"), revision="unparseable")
+    expect("v22 f03 mixed batch keeps the good row", "choice_reconcile.py", 0, *export(db, "f03a.json", [reply(d1), bad, "junk"]),
+           says=["QUARANTINED art/choiceReplies/R2 reason=bad-revision", "RECORDED art/choiceReplies/R1 CH-01 r1 ok", "quarantined=2"],
+           lacks="SHADOW_ERROR")
+    code, rep = status_json(db)
+    check("v22 f03 status counts quarantine", rep.get("quarantined") == 2 and rep.get("clear") is False, repr(rep)[:300])
+    expect("v22 f03 the good row can be planned", "choice_reconcile.py", 0, "plan", "--db", db, "--question", "CH-01", "--revision", "1",
+           says="PLANNED CH-01:r1")
+    expect("v22 f03 a fixed row leaves quarantine", "choice_reconcile.py", 0, *export(db, "f03b.json", [dict(bad, revision=1)]),
+           says="R2 CH-01 r1 duplicate")
+    junk = [k for (k,) in sqlite3.connect(str(db)).execute("SELECT source_key FROM quarantine WHERE resolved_at IS NULL")]
+    check("v22 f03 only the junk row is left", len(junk) == 1 and "/choiceReplies/?" in junk[0], repr(junk))
+    expect("v22 f03 settle dismisses a quarantined row", "choice_reconcile.py", 0, "settle", "--db", db, "--key", (junk or ["no-quarantined-row"])[0], "--to", "CLOSED",
+           says="QUARANTINED -> CLOSED")
+    expect("v22 f03 a dismissed row is not raised again", "choice_reconcile.py", 0, *export(db, "f03a.json", [reply(d1), bad, "junk"]),
+           lacks="reason=not-an-object")
+    db = folder / "f03c.sqlite3"
+    expect("v22 f03 a reply before its snapshot waits", "choice_reconcile.py", 0, *export(db, "f03c.json", [reply(d1)]), says="unknown-revision")
+    expect("v22 f03 the late snapshot re-checks it", "choice_reconcile.py", 0, "register", "--db", db, "--snapshot", folder / "snap-CH-01-1.json",
+           says=["REEVALUATED art/choiceReplies/R1 unknown-revision -> ok RECORDED", "REGISTERED"])
+    expect("v22 f03 and it can be planned", "choice_reconcile.py", 0, "plan", "--db", db, "--question", "CH-01", "--revision", "1",
+           says="PLANNED")
+    expect("v22 f03 rescan runs on any ledger", "choice_reconcile.py", 0, "rescan", "--db", db, says="CHOICE_RESCAN: questions=1 reevaluated=0")
+
+    # F06: late conflicts are found, every state is counted, --json is one document
+    db = folder / "f06.sqlite3"
+    d1 = snap(db, 1)
+    cr(*export(db, "f06a.json", [reply(d1)]))
+    cr("plan", "--db", db, "--question", "CH-01", "--revision", "1")
+    expect("v22 f06 a late different answer is a conflict", "choice_reconcile.py", 0, *export(db, "f06b.json", [reply(d1, "R2", "s2", "B")]),
+           says="RECEIPT_PENDING art/choiceReplies/R2 CH-01 r1 conflict-late")
+    expect("v22 f06 a late same answer is a duplicate", "choice_reconcile.py", 0, *export(db, "f06c.json", [reply(d1, "R3", "s3", "A")]),
+           says="R3 CH-01 r1 duplicate")
+    mv = ("advance", "--db", db, "--question", "CH-01", "--revision", "1")
+    for a, b in (("PLANNED", "QUEUED"), ("QUEUED", "CLAIMED"), ("CLAIMED", "RECEIPT_PENDING")):
+        cr(*mv, "--from", a, "--to", b, "--session", "A")
+    code, rep = status_json(db)
+    check("v22 f06 status --json is one JSON document", code == 0 and "items" in rep and rep.get("schema") == "dw-choice-status/2",
+          repr(rep)[:300])
+    check("v22 f06 adopted replies waiting for a receipt count", rep.get("receipts_pending") == 3 and rep.get("clear") is False
+          and rep.get("states", {}).get("decisions") == {"RECEIPT_PENDING": 1}, repr(rep)[:400])
+    expect("v22 f06 text status says clear=no", "choice_reconcile.py", 0, "status", "--db", db, says=["receipts_pending=3", "clear=no"])
+    code, rep = status_json(folder / "none.sqlite3")
+    check("v22 f06 --json without a ledger is one document", rep.get("clear") is True and rep.get("ledger") is False, repr(rep))
+    (folder / "broken.sqlite3").write_bytes(b"not a database at all, just text" * 40)
+    code, rep = status_json(folder / "broken.sqlite3")
+    check("v22 f06 --json on a broken ledger is one document", code == 0 and "error" in rep, repr(rep)[:300])
+    cr(*mv, "--from", "RECEIPT_PENDING", "--to", "CLOSED", "--session", "A")
+    for rid in ("R2", "R3"):
+        cr("settle", "--db", db, "--key", f"art/choiceReplies/{rid}", "--to", "CLOSED")
+    expect("v22 f06 clear=yes when everything is handled", "choice_reconcile.py", 0, "status", "--db", db, says="clear=yes")
+
+    # F07: a resent note (same source, kind and submissionId) counts once; changed text keeps both
+    db = folder / "f07.sqlite3"
+    note = {"text": "hello", "submissionId": "n1", "status": "new"}
+    expect("v22 f07 a resent note is a duplicate", "choice_reconcile.py", 0,
+           *export(db, "f07a.json", notes=[dict(note, id="N1"), dict(note, id="N2")]), says=["CLOSED art/notes/N2", "duplicate=1 note=1"])
+    expect("v22 f07 a changed note under the same submission is kept", "choice_reconcile.py", 0,
+           *export(db, "f07b.json", notes=[dict(note, id="N3", text="other")]), says="RECORDED art/notes/N3  r0 conflict-same-submission")
+    expect("v22 f07 another page is another key", "choice_reconcile.py", 0,
+           *export(db, "f07c.json", notes=[dict(note, id="N1")], source="other-page"), says="other-page/notes/N1  r0 note")
+    expect("v22 f07 notes counted once per submission", "choice_reconcile.py", 0, "status", "--db", db, says="notes=3")
+
+    # 2.1.0 ledger: upgraded in place, copy kept, old CLAIMED goes through RECONCILE, WO-ID kept
+    db = folder / "old.sqlite3"
+    con = sqlite3.connect(str(db))
+    con.executescript("""
+CREATE TABLE revisions (question_id TEXT, revision INTEGER, snapshot_hash TEXT, snapshot TEXT, registered_at TEXT, PRIMARY KEY (question_id, revision));
+CREATE TABLE inbox (source_key TEXT PRIMARY KEY, kind TEXT, question_id TEXT, revision INTEGER, submission_id TEXT, payload TEXT, received_at TEXT, state TEXT, verdict TEXT);
+CREATE TABLE decisions (decision_key TEXT PRIMARY KEY, question_id TEXT, revision INTEGER, source_key TEXT, choice TEXT, state TEXT, created_at TEXT, updated_at TEXT);
+CREATE TABLE effects (effect_key TEXT PRIMARY KEY, decision_key TEXT UNIQUE, wo_id TEXT UNIQUE, claimed_by TEXT, claimed_at TEXT, result TEXT);
+INSERT INTO revisions VALUES ('CH-01', 1, 'sha256:a', '{"options":[{"key":"A"}]}', '2026-11-01T00:00:00+00:00');
+INSERT INTO revisions VALUES ('CH-01', 2, 'sha256:b', '{"options":[{"key":"A"}]}', '2026-11-02T00:00:00+00:00');
+INSERT INTO inbox VALUES ('art/choiceReplies/R9', 'choice', 'CH-01', 1, 's9', '{"choice":"A","snapshotHash":"sha256:a","submissionId":"s9"}', '2026-11-01T00:00:00+00:00', 'RECORDED', 'ok');
+INSERT INTO inbox VALUES ('art/choiceReplies/R7', 'choice', 'CH-07', 1, 's7', '{"choice":"A","submissionId":"s7"}', '2026-11-01T00:00:00+00:00', 'CLAIMED', 'ok');
+INSERT INTO decisions VALUES ('CH-07:r1', 'CH-07', 1, 'art/choiceReplies/R7', 'A', 'CLAIMED', '2026-11-01T00:00:00+00:00', '2026-11-01T00:00:00+00:00');
+INSERT INTO effects VALUES ('CH-07:r1:effect', 'CH-07:r1', 'WO-007', NULL, '2026-11-01T00:00:00+00:00', NULL);
+INSERT INTO inbox VALUES ('art/choiceReplies/R8', 'choice', 'CH-08', 1, 's8', '{"choice":"A","submissionId":"s8"}', '2026-11-01T00:00:00+00:00', 'CLAIMED', 'ok');
+INSERT INTO decisions VALUES ('CH-08:r1', 'CH-08', 1, 'art/choiceReplies/R8', 'A', 'CLAIMED', '2026-11-01T00:00:00+00:00', '2026-11-01T00:00:00+00:00');
+INSERT INTO effects VALUES ('CH-08:r1:effect', 'CH-08:r1', 'WO-008', 'X', '2026-11-01T00:00:00+00:00', NULL);
+""")
+    con.close()
+    expect("v22 old ledger: status reads it and flags the old claim", "choice_reconcile.py", 0, "status", "--db", db, says="2.1 舊領取")
+    con = sqlite3.connect(str(db))
+    facts = (con.execute("PRAGMA user_version").fetchone()[0], con.execute("SELECT revision, source FROM questions").fetchall(),
+             con.execute("SELECT idem_key FROM inbox WHERE source_key='art/choiceReplies/R9'").fetchone()[0],
+             con.execute("SELECT wo_id, generation, claimed_by FROM effects ORDER BY wo_id").fetchall())
+    con.close()
+    check("v22 old ledger: upgraded with pointer backfill, idempotency keys and WO-ID kept",
+          facts == (2, [(2, "backfill-2.1")], "art|choice|s9", [("WO-007", 1, None), ("WO-008", 1, "X")]), repr(facts))
+    check("v22 old ledger: a copy is kept before the upgrade", (folder / "old.sqlite3.v210.bak").is_file(), "no .v210.bak")
+    kept = None
+    if (folder / "old.sqlite3.v210.bak").is_file():
+        con = sqlite3.connect(str(folder / "old.sqlite3.v210.bak"))
+        kept = (con.execute("PRAGMA user_version").fetchone()[0], con.execute("SELECT COUNT(*) FROM inbox").fetchone()[0])
+        con.close()
+    check("v22 old ledger: the copy is the 2.1 ledger, not the upgraded one", kept == (0, 3), repr(kept))
+    mv = ("advance", "--db", db, "--question", "CH-07", "--revision", "1")
+    expect("v22 old ledger: a claim without holder is not handed over", "choice_reconcile.py", 1, *mv, "--from", "CLAIMED",
+           "--to", "RECEIPT_PENDING", "--session", "A", says="2.1 claim with no holder")
+    expect("v22 old ledger: a takeover without --generation is refused", "choice_reconcile.py", 2, *mv, "--from", "CLAIMED",
+           "--to", "RECONCILE", "--session", "A", says="needs --generation 1")
+    expect("v22 old ledger: it goes to RECONCILE", "choice_reconcile.py", 0, *mv, "--from", "CLAIMED", "--to", "RECONCILE", "--session", "A",
+           "--generation", "1", says="wo=WO-007")
+    expect("v22 old ledger: a 2.1 claim with a holder is handed over by that holder", "choice_reconcile.py", 0, "advance", "--db", db,
+           "--question", "CH-08", "--revision", "1", "--from", "CLAIMED", "--to", "RECEIPT_PENDING", "--session", "X", says="MOVED")
+    expect("v22 old ledger: rescan marks the r1 reply stale", "choice_reconcile.py", 0, "rescan", "--db", db,
+           says=["REEVALUATED art/choiceReplies/R9 ok -> stale", "reevaluated=1"])
+
+    # review 2 (1): the backup is checked, taken under the upgrade lock, never written over an existing file
+    old21 = """
+CREATE TABLE revisions (question_id TEXT, revision INTEGER, snapshot_hash TEXT, snapshot TEXT, registered_at TEXT, PRIMARY KEY (question_id, revision));
+CREATE TABLE inbox (source_key TEXT PRIMARY KEY, kind TEXT, question_id TEXT, revision INTEGER, submission_id TEXT, payload TEXT, received_at TEXT, state TEXT, verdict TEXT);
+CREATE TABLE decisions (decision_key TEXT PRIMARY KEY, question_id TEXT, revision INTEGER, source_key TEXT, choice TEXT, state TEXT, created_at TEXT, updated_at TEXT);
+CREATE TABLE effects (effect_key TEXT PRIMARY KEY, decision_key TEXT UNIQUE, wo_id TEXT UNIQUE, claimed_by TEXT, claimed_at TEXT, result TEXT);
+INSERT INTO inbox VALUES ('art/choiceReplies/R9', 'choice', 'CH-01', 1, 's9', '{"choice":"A"}', '2026-11-01T00:00:00+00:00', 'RECORDED', 'ok');
+"""
+
+    def make21(name):
+        path = folder / name
+        con = sqlite3.connect(str(path))
+        con.executescript(old21)
+        con.close()
+        return path
+
+    db = make21("half.sqlite3")
+    (folder / "half.sqlite3.v210.bak").write_bytes(b"")
+    expect("v22 backup: an empty .v210.bak does not stop the upgrade", "choice_reconcile.py", 0, "status", "--db", db, says="clear=")
+    stamped = sorted(folder.glob("half.sqlite3.v210.bak.*"))
+    check("v22 backup: an existing .v210.bak is never written over", (folder / "half.sqlite3.v210.bak").stat().st_size == 0,
+          "the old file changed")
+    check("v22 backup: a new name is taken instead and no temp file is left", len(stamped) == 1 and not stamped[0].name.endswith(".tmp"),
+          repr([s.name for s in stamped]))
+    if stamped:
+        con = sqlite3.connect(str(stamped[0]))
+        kept = (con.execute("PRAGMA quick_check").fetchone()[0], con.execute("PRAGMA user_version").fetchone()[0],
+                con.execute("SELECT COUNT(*) FROM inbox").fetchone()[0])
+        con.close()
+        check("v22 backup: the new copy passes quick_check and is the 2.1 ledger", kept == ("ok", 0, 1), repr(kept))
+    spec = importlib.util.spec_from_file_location("choice_reconcile_under_test", TOOLS / "choice_reconcile.py")
+    tool = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tool)
+    db = make21("fail.sqlite3")
+
+    def broken_backup(path):
+        raise ValueError("disk full")
+
+    real, tool.backup_v210 = tool.backup_v210, broken_backup
+    con = sqlite3.connect(str(db), isolation_level=None)
+    try:
+        tool.migrate(con, db)
+        stopped = False
+    except ValueError:
+        stopped = True
+    finally:
+        tool.backup_v210 = real
+    after = (stopped, con.in_transaction, con.execute("PRAGMA user_version").fetchone()[0],
+             con.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='questions'").fetchone()[0])
+    con.close()
+    check("v22 backup: a failed backup stops the upgrade and changes nothing", after == (True, False, 0, 0), repr(after))
+    held = []
+
+    def probe(path):  # is the upgrade lock held while the copy is taken?
+        other = sqlite3.connect(str(path), timeout=0, isolation_level=None)
+        try:
+            other.execute("BEGIN IMMEDIATE")
+            other.execute("ROLLBACK")
+            held.append(False)
+        except sqlite3.OperationalError:
+            held.append(True)
+        finally:
+            other.close()
+        return real(path)
+
+    db = make21("locked.sqlite3")
+    tool.backup_v210 = probe
+    con = sqlite3.connect(str(db), isolation_level=None)
+    try:
+        tool.migrate(con, db)
+    finally:
+        tool.backup_v210 = real
+    done = (held, con.execute("PRAGMA user_version").fetchone()[0])
+    con.close()
+    check("v22 backup: the copy is taken under the upgrade lock", done == ([True], tool.SCHEMA_VERSION), repr(done))
+    try:
+        tool.backup_v210(folder / "f01.sqlite3")
+        refused = ""
+    except ValueError as error:
+        refused = str(error)
+    check("v22 backup: a copy that fails its check is not kept", "backup check failed" in refused
+          and not list(folder.glob("f01.sqlite3.v210.bak*")), refused or "no error")
+
+    # review 2 (3): a ledger another Director holds is BUSY and exit 1 for every command
+    db = folder / "f01.sqlite3"
+    locker = sqlite3.connect(str(db), isolation_level=None)
+    locker.execute("BEGIN EXCLUSIVE")
+    try:
+        for label, args in (("ingest", export(db, "busy.json", [reply("sha256:x", "RB", "sb")])),
+                            ("publish", ("publish", "--db", db, "--question", "CH-01", "--revision", "1")),
+                            ("settle", ("settle", "--db", db, "--key", "x", "--to", "CLOSED")),
+                            ("rescan", ("rescan", "--db", db)),
+                            ("plan", ("plan", "--db", db, "--question", "CH-01", "--revision", "1")),
+                            ("status", ("status", "--db", db))):
+            expect(f"v22 busy: {label} exits 1", "choice_reconcile.py", 1, *args, "--busy-timeout", "0.2", says="BUSY")
+        code, doc = status_json(db, "--busy-timeout", "0.2")
+        check("v22 busy: status --json is one JSON document and exit 1", code == 1 and doc.get("busy") is True, repr((code, doc)))
+    finally:
+        locker.execute("ROLLBACK")
+        locker.close()
+
+    # review 2 (4): the hint for a stale PLANNED item names a step that exists
+    db = folder / "planned.sqlite3"
+    p1 = snap(db, 1)
+    expect("v22 planned: ingest", "choice_reconcile.py", 0, *export(db, "pw.json", [reply(p1)]), says="r1 ok")
+    plan1 = ("plan", "--db", db, "--question", "CH-01", "--revision", "1")
+    expect("v22 planned: plan", "choice_reconcile.py", 0, *plan1, says="PLANNED CH-01:r1")
+    snap(db, 2, "changed")
+    expect("v22 planned: publish r2", "choice_reconcile.py", 0, "publish", "--db", db, "--question", "CH-01", "--revision", "2",
+           says="PUBLISHED")
+    expect("v22 planned: the warning names a real step", "choice_reconcile.py", 0, *plan1,
+           says="advance --from PLANNED --to RECONCILE", lacks="move it to RECONCILE")
+    expect("v22 planned: PLANNED goes to RECONCILE", "choice_reconcile.py", 0, "advance", "--db", db, "--question", "CH-01",
+           "--revision", "1", "--from", "PLANNED", "--to", "RECONCILE", "--session", "A", says="MOVED CH-01:r1 PLANNED -> RECONCILE")
+
+    # review 2 (5): an export without a top-level source
+    db = folder / "source.sqlite3"
+    note = {"text": "hi", "submissionId": "q1", "status": "new"}
+    expect("v22 source: --source fills a missing source", "choice_reconcile.py", 0,
+           *export(db, "ns1.json", notes=[dict(note, id="N1")], source=None), "--source", "art", says="art/notes/N1", lacks="WARNING")
+    expect("v22 source: the same note in another export is a duplicate", "choice_reconcile.py", 0,
+           *export(db, "ns2.json", notes=[dict(note, id="N2")], source=None), "--source", "art", says="CLOSED art/notes/N2  r0 duplicate")
+    expect("v22 source: no source and no --source warns", "choice_reconcile.py", 0,
+           *export(db, "ns3.json", notes=[dict(note, id="N3")], source=None), says='WARNING the export has no top-level "source"')
+    expect("v22 source: the export's source wins over --source, with a warning", "choice_reconcile.py", 0,
+           *export(db, "ns4.json", notes=[dict(note, id="N4")]), "--source", "other", says=["WARNING the export says source=art", "art/notes/N4"])
 
 
 def nogit_env():
@@ -6067,6 +6414,7 @@ def main():
         guarded(test_poll_report, tmp)
         guarded(test_choice_page)
         guarded(test_choice_reconcile, tmp)
+        guarded(test_choice_reconcile_v22, tmp)
         guarded(test_no_git, tmp)
         guarded(test_dispatch_plan_rule)
         guarded(test_metrics_run, tmp)
