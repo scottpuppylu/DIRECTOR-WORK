@@ -31,6 +31,17 @@ RUN_DIR/events/*.json; a repeated event_id counts once; an event with a missing 
 listed and left out. The start is run.json `started_at`, else the earliest run_started event. --compare prints
 saved = baseline - this run; the percentage is UNKNOWN when the baseline is 0. Exit 1 when a run folder is missing.
 Without --run the output is the same as before.
+
+2.2 (F16): a number is only as good as what was recorded. run.json may carry
+  "sampling": {"version": 1, "complete": true, "scenario": "<劇本 ID>", "counted": ["po_action", "asked", ...],
+               "kinds": ["click", "type", ...]}
+complete=true says every event of the counted types was recorded (no "counted" = all types). Each number is shown as
+確認 (complete), 部分 (a marker that is not complete, or a type it does not count) or 完整度未知 (no marker: every
+run before 2.2); 0 PO operations without a complete marker prints UNKNOWN, never 0. --compare only subtracts when both
+runs are complete for that number with the same scenario and sampling version; otherwise UNKNOWN with the reason.
+A po_action whose kind is not a short name (a list, a number, an empty text), or not in sampling.kinds when that is
+given, is quarantined: listed, never counted, and the report does not crash. An answer_received counts only when an
+asked event with the same decision_id and ask_id came no later; the others are listed as 回覆對不到發問.
 """
 import argparse
 import datetime
@@ -50,6 +61,8 @@ PO_DEFAULTS = {"po_pending_files": ["PO_PENDING.md"], "po_item_pattern": r"^\s*I
                "po_open_pattern": r"^\s*STATUS\s*:\s*open\b"}
 CREATED = re.compile(r"\bCREATED\s*:\s*(\d{4}-\d{2}-\d{2})")
 RUN_VERSION = 1
+SAMPLING_VERSION = 1
+KIND = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,31}")
 REQUIRED = {"run_started": (), "asked": ("decision_id", "topic_id", "scope_id", "ask_id"),
             "answer_received": ("decision_id", "ask_id"), "applied": ("decision_id",), "closed": ("decision_id",),
             "withdrawn": ("decision_id",), "po_action": (), "preview_ready": ()}  # event type -> the string fields it needs
@@ -147,10 +160,14 @@ def run_events(folder):
             continue
         for n, event in enumerate(data if isinstance(data, list) else [data]):
             where = f"{path.name}#{n + 1}" if isinstance(data, list) else path.name
-            fields = REQUIRED.get(event.get("type")) if isinstance(event, dict) else None
+            fields = REQUIRED.get(event.get("type")) if isinstance(event, dict) and isinstance(event.get("type"), str) else None
             if (fields is None or event.get("v") != RUN_VERSION or not isinstance(event.get("event_id"), str)
                     or stamp(event.get("at")) is None or any(not isinstance(event.get(key), str) for key in fields)):
                 notes["bad"].append(where)
+                continue
+            if event["type"] == "po_action" and "kind" in event and not (
+                    isinstance(event["kind"], str) and KIND.fullmatch(event["kind"])):
+                notes.setdefault("quarantined", []).append(f"{where}（kind {json.dumps(event['kind'], ensure_ascii=False)[:40]}）")
                 continue
             if event["event_id"] in seen:
                 notes["duplicate"] += 1
@@ -166,35 +183,85 @@ def run_numbers(folder):
     events, notes = run_events(folder)
     of = lambda kind: [event for event in events if event["type"] == kind]
     asked = {event["decision_id"] for event in of("asked")}
-    answered = {event["decision_id"] for event in of("answer_received")} & asked
+    when = {}  # (decision_id, ask_id) -> the earliest time it was asked
+    for event in of("asked"):
+        key, moment = (event["decision_id"], event["ask_id"]), stamp(event["at"])
+        when[key] = min(when.get(key, moment), moment)
+    answered, stray = set(), []
+    for event in of("answer_received"):
+        asked_at = when.get((event["decision_id"], event["ask_id"]))
+        if asked_at is not None and asked_at <= stamp(event["at"]):
+            answered.add(event["decision_id"])
+        else:
+            stray.append(event["event_id"])
     withdrawn = {event["decision_id"] for event in of("withdrawn")} & asked - answered
     asks = {}
     for event in of("asked"):
         asks.setdefault((event["topic_id"], event["scope_id"]), set()).add(event["ask_id"])
     counts = [event.get("count", 1) for event in of("po_action")]
     bad_count = sum(1 for count in counts if not (isinstance(count, int) and not isinstance(count, bool) and count > 0))
-    kinds = {}
-    for event in of("po_action"):
-        count = event.get("count", 1)
-        if isinstance(count, int) and not isinstance(count, bool) and count > 0:
-            kinds[event.get("kind", "?")] = kinds.get(event.get("kind", "?"), 0) + count
-    started = None
+    started, sampling = None, None
     run_file = folder / "run.json"
     if run_file.is_file():
         try:
-            started = stamp(json.loads(run_file.read_text(encoding="utf-8-sig")).get("started_at"))
+            run = json.loads(run_file.read_text(encoding="utf-8-sig"))
+            started = stamp(run.get("started_at"))
+            sampling = run.get("sampling")
         except (OSError, ValueError, AttributeError):
             notes["bad"].append("run.json")
+    sampling, sampling_note = read_sampling(sampling)
+    if sampling_note:
+        notes["bad"].append(f"run.json sampling（{sampling_note}）")
+    allowed = set(sampling["kinds"]) if sampling and sampling.get("kinds") is not None else None
+    kinds = {}
+    for event in of("po_action"):
+        count, kind = event.get("count", 1), event.get("kind", "?")
+        if allowed is not None and kind not in allowed:
+            notes.setdefault("quarantined", []).append(f"{event['event_id']}（kind {kind} 不在 sampling.kinds）")
+            continue
+        if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+            kinds[kind] = kinds.get(kind, 0) + count
     starts = [stamp(event["at"]) for event in of("run_started")]
     if started is None and starts:
         started = min(starts)
     previews = [stamp(event["at"]) for event in of("preview_ready")]
     first = (min(previews) - started).total_seconds() / 60 if started and previews else None
-    return {"events": len(events), "notes": notes, "asked": len(asked), "answered": len(answered),
+    return {"events": len(events), "notes": notes, "asked": len(asked), "answered": len(answered), "stray": stray,
+            "sampling": sampling,
             "withdrawn": len(withdrawn), "waiting": len(asked - answered - withdrawn),
             "reasks": sum(len(ids) - 1 for ids in asks.values()), "po": sum(kinds.values()) if events else None,
             "po_kinds": kinds, "po_bad_count": bad_count, "started": started is not None, "previews": len(previews),
             "first_preview": first if first is None or first >= 0 else None, "preview_before_start": first is not None and first < 0}
+
+
+def read_sampling(value):
+    """(the run's sampling marker or None, what is wrong with it or None)."""
+    if value is None:
+        return None, None
+    if not isinstance(value, dict) or value.get("version") != SAMPLING_VERSION or not isinstance(value.get("complete"), bool):
+        return None, f"需要 version {SAMPLING_VERSION} 和 complete true/false；當成沒有標記"
+    for key in ("counted", "kinds"):
+        if value.get(key) is not None and not (isinstance(value[key], list) and all(isinstance(v, str) for v in value[key])):
+            return None, f"{key} 不是文字清單；當成沒有標記"
+    return value, None
+
+
+def completeness(n, kind):
+    """確認 / 部分 / 未知 for the numbers that come from one event type."""
+    s = n["sampling"]
+    if s is None:
+        return "未知"
+    return "確認" if s["complete"] and (s.get("counted") is None or kind in s["counted"]) else "部分"
+
+
+def comparable(b, n, kind):
+    """None when two runs can be compared for one event type, else why not."""
+    states = (completeness(b, kind), completeness(n, kind))
+    if states != ("確認", "確認"):
+        return f"採樣不完整（基準 {states[0]}、本次 {states[1]}）"
+    if b["sampling"].get("scenario") != n["sampling"].get("scenario"):
+        return "劇本不同"
+    return None
 
 
 def preview_cell(n):
@@ -212,14 +279,29 @@ def run_report(folder, base_folder):
     print(f"\n# 接手演練數字\n\nrun：{folder.name}。事件 {n['events']} 筆" + (f"；重複 event_id 略過 {notes['duplicate']} 筆" if notes["duplicate"] else "")
           + (f"（其中內容不同 {notes['conflict']} 筆，取第一筆）" if notes["conflict"] else "")
           + (f"；格式不對沒算 {len(notes['bad'])} 筆：{'、'.join(notes['bad'])}" if notes["bad"] else "") + "。\n")
+    if notes.get("quarantined"):
+        print(f"隔離（kind 不認得，沒算）{len(notes['quarantined'])} 筆：{'、'.join(notes['quarantined'])}\n")
+    if n["stray"]:
+        print(f"回覆對不到發問（沒有同 decision_id + ask_id 且更早的 asked，沒算已回覆）{len(n['stray'])} 筆："
+              f"{'、'.join(n['stray'])}\n")
+    s = n["sampling"]
+    print("採樣：" + ("沒有完整度標記（2.2 以前的 run），每個數字的完整度未知" if s is None else
+                    f"version {s['version']}，{'完整' if s['complete'] else '不完整'}，劇本 {s.get('scenario') or '—'}，"
+                    f"計入 {'、'.join(s['counted']) if s.get('counted') is not None else '全部類型'}") + "\n")
     print("| 指標 | 數字 | 來源 |\n|---|---|---|")
     print(f"| 第一個可用預覽 | {preview_cell(n)} | 開始時間 → 最早的 `preview_ready` |")
     decisions = (f"提出 {n['asked']}、已回覆 {n['answered']}、還在等 {n['waiting']}、撤回 {n['withdrawn']}" if n["asked"]
                  else "UNKNOWN：沒有 asked 事件")
     print(f"| 決策 | {decisions} | `asked` / `answer_received` / `withdrawn`，依 decision_id 去重 |")
     print(f"| 重問 | {n['reasks'] if n['asked'] else 'UNKNOWN：沒有 asked 事件'} | 同一 topic_id + scope_id 的不同 ask_id 數減 1 |")
-    ops = (f"{n['po']}" + (f"（{'、'.join(f'{k} {v}' for k, v in sorted(n['po_kinds'].items()))}）" if n["po_kinds"] else "")
-           if n["po"] is not None else "UNKNOWN：沒有事件")
+    state = completeness(n, "po_action")
+    if n["po"] is None:
+        ops = "UNKNOWN：沒有事件"
+    elif n["po"] == 0 and state != "確認":
+        ops = f"UNKNOWN：沒有 po_action，採樣完整度{state}，0 可能是沒記"
+    else:
+        ops = (f"{n['po']}" + (f"（{'、'.join(f'{k} {v}' for k, v in sorted(n['po_kinds'].items()))}）" if n["po_kinds"] else "")
+               + f"；完整度{state}")
     if n["po_bad_count"]:
         ops += f"；count 不是正整數沒算 {n['po_bad_count']} 筆"
     print(f"| PO 操作 | {ops} | `po_action`（每筆 count 次，預設 1） |")
@@ -228,16 +310,23 @@ def run_report(folder, base_folder):
     b = run_numbers(base_folder)
     print(f"\n## 和基準比\n\n基準 run：{base_folder.name}。省下 = 基準 − 本次；正數是本次比較少。\n")
     print("| 指標 | 基準 | 本次 | 省下 |\n|---|---|---|---|")
+    why = comparable(b, n, "po_action")
     if b["po"] is None or n["po"] is None:
         saved = "UNKNOWN：有一邊沒有事件"
+    elif why:
+        saved = f"UNKNOWN：{why}"
     else:
         saved = f"{b['po'] - n['po']}" + (f"（{(b['po'] - n['po']) * 100 / b['po']:.0f}%）" if b["po"]
                                           else "（百分比 UNKNOWN：基準是 0）")
-    print(f"| PO 操作 | {b['po'] if b['po'] is not None else 'UNKNOWN'} | {n['po'] if n['po'] is not None else 'UNKNOWN'} | {saved} |")
+    cell = lambda r: (f"{r['po']}（{completeness(r, 'po_action')}）" if r["po"] is not None else "UNKNOWN")
+    print(f"| PO 操作 | {cell(b)} | {cell(n)} | {saved} |")
     both = b["first_preview"] is not None and n["first_preview"] is not None
+    why = comparable(b, n, "preview_ready")
     print(f"| 第一個可用預覽 | {preview_cell(b)} | {preview_cell(n)} | "
-          + (f"{b['first_preview'] - n['first_preview']:.1f} 分鐘 |" if both else "UNKNOWN |"))
-    print(f"| 重問 | {b['reasks']} | {n['reasks']} | " + (f"{b['reasks'] - n['reasks']} |" if b["asked"] and n["asked"] else "UNKNOWN |"))
+          + (f"UNKNOWN：{why} |" if both and why else f"{b['first_preview'] - n['first_preview']:.1f} 分鐘 |" if both else "UNKNOWN |"))
+    why = comparable(b, n, "asked")
+    print(f"| 重問 | {b['reasks']} | {n['reasks']} | " + (f"UNKNOWN：{why} |" if b["asked"] and n["asked"] and why else
+                                                        f"{b['reasks'] - n['reasks']} |" if b["asked"] and n["asked"] else "UNKNOWN |"))
 
 
 def main():
@@ -337,4 +426,8 @@ def director_report(a, ap):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except UnicodeDecodeError as error:  # 2.2: one line and NOT_RUN (exit 2), never a traceback
+        print(f"METRICS_REPORT: NOT_RUN {gate.not_utf8(error)}")
+        sys.exit(2)

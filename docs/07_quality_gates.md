@@ -76,6 +76,9 @@
 - 總監和 worker **絕不自稱最終通過**（例如 ART_PASS、OWNER_PASS、RELEASE_READY）。總監最高只寫「建議 PO 驗收」。
 - 審查系統本身沒驗證、審查失敗、或沒跑，都要照實寫，不可以說檢查通過。
 - PO 的回覆要綁到 PO 看的那個成品：候選 ID、commit、入口檔、manifest SHA-256 和訊息編號，寫成 `PO_PRODUCT_REVIEW` 或 `PO_ACCEPTANCE.json`（`docs/02`）。綁不到的回覆不能拿來說「PO 看過這一版」。初衷卡改過之後，舊版的「看過」不算看過新條件。
+- 「綁到成品」是指成品檔現在還在、內容和紀錄的雜湊相同（2.2）。只寫了雜湊、沒有檔可以核對的回覆是「成品待核對」，不是已驗收。
+- worker 自己寫的 PASS 和證據紀錄只是自述（2.2）。說「這版驗證過」要四樣都有：worker 自述、合格的證據紀錄、鎖定的初衷卡、總監自己重跑通過（DIRECTOR_LOG 的 `EVIDENCE_RERUN` 行）。重跑時加 `--brief` 發現初衷卡條件變了（行尾 `brief=stale` 或 `brief=unconfirmed`），這次重跑不算。
+- `PO_PRODUCT_REVIEW` 只認整行紀錄，這是刻意的設計（2.2 說明），和 `DISPATCH`、`EVIDENCE_EQUIVALENT`、`EVIDENCE_RERUN` 一樣：一行從頭就是這個紀錄（前面可以有「日期 |」，後面可以有「| 備註」）。用 `>` 引用的、縮排的、在 ``` 區塊裡的、夾在別的句子中間的，都只是資料，不算 PO 回覆。理由：LOG 裡常會貼 worker 報告、聊天內容或範例；如果引用的字也算，貼一段文字就能假造「PO 看過」。總監記 PO 回覆時，自己另起一行寫完整的紀錄。
 
 ### 7. 新增閘門與來源資料
 

@@ -38,7 +38,9 @@ verify --rerun-recorded
 A record proves what ran and which files came out, not that the result is right.
 Do not put secrets in the command: it is stored as written, and so is the end of its output.
 
-Exit codes of run: the command's own; 124 timed out; 127 command not found; 3 the command passed but an artifact is missing.
+Exit codes of run: the command's own; 124 timed out; 127 command not found; 3 the command passed but an artifact is missing;
+4 the command passed but the --log could not be written in full (2.2: the record has `log_error`); 2 NOT_RUN: a --log
+that cannot be opened (2.2: nothing runs, no record is written) or an --order that cannot be read.
 Exit codes of verify: 0 OK; 1 something differs, failed or is missing; 2 could not read the record, it is not one, or
 the rerun was refused before anything ran (NOT_RUN).
 """
@@ -64,8 +66,10 @@ SHA = re.compile(r"[0-9a-fA-F]{7,40}")
 # field: type a record written by `run` has; a record missing one, or with another type, is not evidence
 SCHEMAS = (1,)  # record versions this tool writes and reads
 RECORD_FIELDS = {"schema": int, "label": str, "command": (list, str), "cwd": str, "started": str, "finished": str,
-                 "exit_code": int, "timed_out": bool, "git": dict, "artifacts": list, "order": dict}
-OPTIONAL_FIELDS = ("order",)  # `run --order` only; null or absent means the record is not bound to an order (G03b)
+                 "exit_code": int, "timed_out": bool, "git": dict, "artifacts": list, "order": dict, "log_error": str}
+# order: `run --order` only; null or absent means the record is not bound to an order (G03b).
+# log_error (2.2, F15): the --log could not be written in full while the command ran; the record is then incomplete.
+OPTIONAL_FIELDS = ("order", "log_error")
 CORE_FIELDS = ("command", "exit_code", "artifacts")  # a record without `schema` (legacy) must still have these
 
 
@@ -139,27 +143,47 @@ def decode(raw):
         return raw.decode(locale.getpreferredencoding(False), "replace")
 
 
-def execute(command, cwd, tail_lines, timeout, log_path, program=None):
+def execute(command, cwd, tail_lines, timeout, log_path, program=None, log_errors=None):
     """Run a command; returns (exit code, timed out, total lines, last lines). Keeps only the tail in memory.
-    program: the file to start instead of looking command[0] up in PATH."""
+    program: the file to start instead of looking command[0] up in PATH. log_path: an already opened binary file
+    (2.2: cmd_run opens it before the command starts) or a path. log_errors: a list that gets the first write error;
+    the output is still read to the end so the command's own exit code is kept."""
     tail, count = collections.deque(maxlen=tail_lines), [0]
     program = program or shutil.which(command[0], path=None) or command[0]
+    log = open(log_path, "wb") if isinstance(log_path, (str, os.PathLike)) else log_path
     try:
         proc = subprocess.Popen([program, *command[1:]], cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     except OSError as error:
+        if log:
+            log.close()
         return 127, False, 0, [f"could not start: {error}"]
 
+    def failed(error):
+        if log_errors is not None and not log_errors:
+            log_errors.append(str(error))
+
     def read():
-        log = open(log_path, "wb") if log_path else None
+        nonlocal log
         try:
             for raw in proc.stdout:
                 count[0] += 1
                 tail.append(decode(raw).rstrip()[:MAX_LINE])
                 if log:
-                    log.write(raw)
+                    try:
+                        log.write(raw)
+                    except OSError as error:  # keep reading: the exit code and the tail still count
+                        failed(error)
+                        try:
+                            log.close()
+                        except OSError:
+                            pass
+                        log = None
         finally:
             if log:
-                log.close()
+                try:
+                    log.close()
+                except OSError as error:
+                    failed(error)
 
     reader = threading.Thread(target=read, daemon=True)
     reader.start()
@@ -211,14 +235,24 @@ def cmd_run(a):
             print(f"EVIDENCE: NOT_RUN {problem}")
             return 2
     cwd = str(pathlib.Path(a.cwd).resolve())
+    log_file, log_errors = None, []
+    if a.log:  # 2.2 (F15): a --log that cannot be opened is NOT_RUN before anything runs, never a record with exit 0
+        try:  # a missing parent folder is created (v2.1.0 known issue); one that cannot be made is NOT_RUN
+            pathlib.Path(a.log).parent.mkdir(parents=True, exist_ok=True)
+            log_file = open(a.log, "wb")
+        except OSError as error:
+            print(f"EVIDENCE: NOT_RUN cannot open --log {a.log}: {error}; nothing ran and no record was written")
+            return 2
     started, clock = now(), time.monotonic()
-    code, timed_out, lines, tail = execute(command, cwd, a.tail, a.timeout, a.log)
+    code, timed_out, lines, tail = execute(command, cwd, a.tail, a.timeout, log_file, log_errors=log_errors)
     artifacts = [hash_artifact(pathlib.Path(cwd, path)) for path in a.artifact]
     missing = sum(1 for item in artifacts if item["sha256"] is None)
     record = {"schema": 1, "label": a.label, "command": command, "cwd": cwd, "started": started, "finished": now(),
               "seconds": round(time.monotonic() - clock, 1), "exit_code": code, "timed_out": timed_out,
               "git": git_state(cwd), "output_lines": lines, "output_tail": tail, "log": a.log, "artifacts": artifacts,
               "order": binding}
+    if log_errors:
+        record["log_error"] = log_errors[0]
 
     out_dir = pathlib.Path(a.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -234,8 +268,9 @@ def cmd_run(a):
     if a.verbose:
         print("\n".join(tail))
     bound = f" order={binding['id']}@rev{binding['rev']}" if binding else ""
-    print(f"EVIDENCE: exit={code} lines={lines} artifacts={len(artifacts)} missing={missing}{bound} file={path}")
-    return 3 if code == 0 and missing else code
+    broken = f" log=incomplete({log_errors[0][:80]})" if log_errors else ""
+    print(f"EVIDENCE: exit={code} lines={lines} artifacts={len(artifacts)} missing={missing}{bound}{broken} file={path}")
+    return 3 if code == 0 and missing else 4 if code == 0 and log_errors else code
 
 
 def gate_module():
@@ -317,7 +352,8 @@ def safe_part(part):
 
 def materialize(repo, commit, dest):
     """Write the commit's tree from git's objects into dest, checking each blob's hash; returns the file count.
-    A symbolic link is written as a file holding its target, a submodule as an empty folder (as git does without them)."""
+    2.2 (F10): a symbolic link (mode 120000) or a submodule (160000) cannot be rebuilt as the candidate has it, so the
+    rerun is refused (NOT_RUN) instead of writing a file holding the link's target or an empty folder."""
     algorithm = "sha1"
     try:
         algorithm = git_trusted(repo, "rev-parse", "--show-object-format") or "sha1"
@@ -336,10 +372,14 @@ def materialize(repo, commit, dest):
         if not all(safe_part(part) for part in path.split("/")):
             raise Refused(f"the candidate has a path that cannot be written safely here: {path}")
         entries.append((mode, kind, sha, path))
+    odd = [(mode, path) for mode, kind, _, path in entries if mode == "120000" or kind == "commit"]
+    if odd:
+        mode, path = odd[0]
+        what = "a symbolic link" if mode == "120000" else "a submodule"
+        raise Refused(f"unsupported tree mode {mode} ({what}) at {path}" + (f" (+{len(odd) - 1} more)" if len(odd) > 1 else "")
+                      + ": the rerun cannot rebuild it as the candidate has it, so a check could test another tree; "
+                      "verify this AC another way or take the link out of the candidate")
     blobs = [entry for entry in entries if entry[1] == "blob"]
-    for mode, kind, sha, path in entries:
-        if kind == "commit":
-            (dest / path).mkdir(parents=True, exist_ok=True)
     try:
         proc = subprocess.Popen(["git", "-c", "core.useReplaceRefs=false", "-C", str(repo), "cat-file", "--batch"],
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=GIT_ENV)
@@ -420,6 +460,14 @@ def approved_check(a, record):
     binding = {"ids": ids, "rev": int(gate.order_revision(text)), "sha": now, "path": a.order,
                "equivalent": gate.equivalent_records(log),
                "strict": bool(re.search(r"^\s*GOVERNANCE\s*=\s*Strict\b", text, re.M))}
+    if a.brief or a.order_history:  # v2.1.0 known issue: the brief comparison gate_check --match makes, same functions
+        brief_lines = []
+        try:
+            brief = gate.load_brief(a.brief, log, a.dispatch_log, brief_lines) if a.brief else None
+        except OSError as error:
+            raise Refused(f"cannot read --brief: {error}")
+        binding.update(brief=brief, history=a.order_history, pinned=gate.order_brief(text)[1], text=text,
+                       brief_lines=([brief["problem"]] if brief and brief["problem"] else []) + brief_lines)
     return names[0], approved, wanted, git_trusted(a.repo, "rev-parse", f"{wanted}^{{tree}}"), binding
 
 
@@ -478,7 +526,9 @@ def finish_rerun(a, record, ac, approved, candidate, tree, root, count, program,
     binding: the order's identity; the record's `order` field is judged by gate_check.check_binding."""
     lines, expected, command = [], record["exit_code"], record["command"]
     notes = []
-    gate_module().check_binding(ac, pathlib.Path(a.record).name, record, binding, lines, notes, binding["strict"])
+    gate = gate_module()
+    gate.check_binding(ac, pathlib.Path(a.record).name, record, binding, lines, notes, binding["strict"])
+    state = brief_state(gate, ac, binding, notes)
     for note in notes:
         print(f"  ~ {note}")
     recorded = ((record.get("git") or {}).get("head") or "").lower()
@@ -499,8 +549,33 @@ def finish_rerun(a, record, ac, approved, candidate, tree, root, count, program,
         after = [str(why)]
     lines += [f"the repo changed while the check ran: {why}" for why in after]
     test = "passed" if code == 0 else f"failed(rerun exit {code})"
-    return report(a, record["artifacts"], lines, test, f" check={ac} source=order candidate={candidate[:12]}",
-                  root, pathlib.Path(record.get("cwd") or "."))
+    result = report(a, record["artifacts"], lines, test, f" check={ac} source=order candidate={candidate[:12]}",
+                    root, pathlib.Path(record.get("cwd") or "."))
+    if result == 0:  # 2.2 (F08): the whole line the Director logs, so trace_report can show 總監重跑過
+        key = gate.order_key(binding["ids"]) or "<WO-ID>"
+        print(f"LOG_LINE: EVIDENCE_RERUN {key} {ac} candidate={candidate} result=ok record={pathlib.Path(a.record).name}"
+              + (f" brief={state}" if state else ""))
+    return result
+
+
+def brief_state(gate, ac, binding, notes):
+    """None without --brief / --order-history; else ok, stale or unconfirmed for this AC (F08 綁鎖定依據): the order's
+    pins against the brief (gate_check.brief_notes) and, for a record carried by EVIDENCE_EQUIVALENT, the old order's
+    pins (gate_check.carried_notes, run by check_binding). Shadow: the exit code does not change."""
+    if "pinned" not in binding:
+        return None
+    mine = []
+    if binding.get("brief"):
+        gate.brief_notes(binding["text"], binding["path"], binding["brief"], mine)
+    notes += binding["brief_lines"] + mine
+    hits = [n for n in notes if n.startswith(("BRIEF_STALE", "BRIEF_UNCONFIRMED"))
+            and (re.search(rf"(?<![\w-]){ac}(?![\w-])", n.split(":")[0]) or "WHOLE_ORDER" in n.split(":")[0]
+                 or "AC-" not in n.split(":")[0])]
+    if any(n.startswith("BRIEF_STALE") for n in hits):
+        return "stale"
+    if hits or (binding.get("brief") and not binding["brief"].get("trusted")):
+        return "unconfirmed"
+    return "ok"
 
 
 def report(a, artifacts, lines, test, extra, root=None, base=None):
@@ -561,6 +636,10 @@ def main():
     verify.add_argument("--dispatch-log", help="with --rerun: the log with the order's DISPATCH line")
     verify.add_argument("--repo", help="with --rerun: a clean checkout of the candidate; the check runs in a copy of its tree")
     verify.add_argument("--candidate", help="with --rerun: the commit under review, 40 hex digits (git rev-parse <branch>)")
+    verify.add_argument("--brief", help="with --rerun: the brief; the order's pins (and a carried record's old order) "
+                        "are compared as gate_check --match does, and LOG_LINE ends brief=ok|stale|unconfirmed")
+    verify.add_argument("--order-history", help="with --rerun: old orders, found by hash, for a record carried over by "
+                        "EVIDENCE_EQUIVALENT")
     verify.add_argument("--timeout", type=float, help="seconds before the rerun is killed")
     a = ap.parse_args()
     if a.action == "verify" and not a.rerun and any((a.order, a.dispatch_log, a.repo, a.candidate)):
@@ -572,4 +651,8 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except UnicodeDecodeError as error:  # 2.2: one line and NOT_RUN (exit 2), never a traceback
+        print(f"EVIDENCE: NOT_RUN {gate_module().not_utf8(error)}")
+        sys.exit(2)
