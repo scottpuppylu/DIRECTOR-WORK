@@ -33,17 +33,23 @@
 #   environment: only the variables listed below; nothing from the host.
 #               No GIT_DIR: it would send every git in the container, also
 #               ones run in other folders, to this repository.
-#   network: TCP 443 to api.anthropic.com only (--login adds the sign-in
-#            hosts, --allow adds others, --offline means no network at all)
+#   network: names come from --allow-file (default dns_allow.txt next to this
+#            script: api.anthropic.com), plus --allow HOST and, with --login,
+#            the sign-in hosts. Only those names resolve (dns_allow.py in the
+#            container, no off switch) and only their addresses get TCP 443.
+#            --offline means no network at all.
+#   DNS upstream: DW_DNS_UPSTREAM (space-separated IPv4) if set, else the
+#            IPv4 nameservers in /etc/resolv.conf except 127.x.
 # Not mounted: the host home, ~/.ssh, ~/.config/gh, AppData, any token.
 #
 # --dry-run prints the docker command and runs nothing.
 set -euo pipefail
 
-IMAGE="dw-worker:1.1.0"
+IMAGE="dw-worker:1.2.0"
 WORKTREE="" DIRECTOR="" GITCOMMON="" WTNAME="" CLONE="" NAME=""
 OFFLINE=0 DRY=0
-ALLOW=("api.anthropic.com")
+ALLOW_FILE="$(dirname "$0")/dns_allow.txt"
+ALLOW=()
 LOGIN_HOSTS=("claude.ai" "platform.claude.com" "console.anthropic.com")
 
 die() { echo "run_worker: $*" >&2; exit 2; }
@@ -58,6 +64,7 @@ while [ $# -gt 0 ]; do
     --name) NAME="${2:?}"; shift 2 ;;
     --image) IMAGE="${2:?}"; shift 2 ;;
     --allow) ALLOW+=("${2:?}"); shift 2 ;;
+    --allow-file) ALLOW_FILE="${2:?}"; shift 2 ;;
     --login) ALLOW+=("${LOGIN_HOSTS[@]}"); shift ;;
     --offline) OFFLINE=1; shift ;;
     --dry-run) DRY=1; shift ;;
@@ -134,7 +141,42 @@ ARGS=(docker run --rm --init
 if [ "$OFFLINE" = 1 ]; then
   ARGS+=(--network none)
 else
-  ARGS+=(-e "DW_ALLOW_DOMAINS=${ALLOW[*]}")
+  # The allowlist: the file, then --login and --allow, each name once, in that order.
+  [ -f "$ALLOW_FILE" ] || die "--allow-file: no such file: $ALLOW_FILE"
+  NAMES=()
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%%#*}"
+    read -ra words <<< "${line//$'\r'/ }"   # read -a: "*.x" is not a glob here
+    NAMES+=(${words[@]+"${words[@]}"})
+  done < "$ALLOW_FILE"
+  NAMES+=("${ALLOW[@]}")
+  HOST_RE='^(\*\.)?[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$'
+  DOMAINS=()
+  for word in "${NAMES[@]}"; do
+    word="${word%.}"
+    [[ "$word" =~ $HOST_RE ]] && [ "${#word}" -le 253 ] || die "not a host name: $word"
+    word="${word,,}"
+    [[ " ${DOMAINS[*]} " == *" $word "* ]] || DOMAINS+=("$word")
+  done
+  [ "${#DOMAINS[@]}" -gt 0 ] || die "the allowlist is empty ($ALLOW_FILE); use --offline for no network"
+  # Upstream resolvers for dns_allow.py: 127.x (systemd-resolved, WSL) is not reachable from a container.
+  UPSTREAM=()
+  if [ -n "${DW_DNS_UPSTREAM:-}" ]; then
+    read -ra UPSTREAM <<< "$DW_DNS_UPSTREAM"
+  else
+    while read -r key value _; do
+      value="${value%$'\r'}"
+      [ "$key" = nameserver ] && [[ "$value" != 127.* ]] && UPSTREAM+=("$value")
+    done < <(cat "${DW_RESOLV_CONF:-/etc/resolv.conf}" 2>/dev/null || true)
+    KEEP=()
+    for ns in "${UPSTREAM[@]}"; do [[ "$ns" == *:* ]] || KEEP+=("$ns"); done
+    UPSTREAM=("${KEEP[@]}")
+  fi
+  [ "${#UPSTREAM[@]}" -gt 0 ] || die "no IPv4 nameserver outside 127.x in /etc/resolv.conf; set DW_DNS_UPSTREAM"
+  for ns in "${UPSTREAM[@]}"; do
+    [[ "$ns" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || die "DW_DNS_UPSTREAM: not an IPv4 address: $ns"
+  done
+  ARGS+=(--dns 127.0.0.1 -e "DW_ALLOW_DOMAINS=${DOMAINS[*]}" -e "DW_DNS_UPSTREAM=${UPSTREAM[*]}")
 fi
 if [ -t 0 ] && [ -t 1 ]; then ARGS+=(-it); else ARGS+=(-i); fi
 ARGS+=("$IMAGE")

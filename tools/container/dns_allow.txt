@@ -1,0 +1,5 @@
+# Names a DW worker container may resolve and reach on TCP 443 (1.2.0).
+# One name per line; # starts a comment. run_worker.sh adds --allow HOST and,
+# with --login, the sign-in hosts. "*.example.com" lets every name under
+# example.com resolve, but TCP 443 opens only to the names listed without "*.".
+api.anthropic.com

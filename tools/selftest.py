@@ -3162,7 +3162,7 @@ def test_container(tmp):
 
     def run(*args):
         argv = [bash, (box / "run_worker.sh").as_posix(), "--dry-run", *[str(a) for a in args]]
-        return subprocess.run(argv, capture_output=True, encoding="utf-8")
+        return subprocess.run(argv, capture_output=True, encoding="utf-8", env={**os.environ, "DW_DNS_UPSTREAM": "192.0.2.53"})
 
     base = ("--worktree", wt.as_posix(), "--director", director.as_posix(), "--git-common", gitc.as_posix())
     done = run(*base)
@@ -3184,7 +3184,7 @@ def test_container(tmp):
     names = sorted(words[i + 1].split("=")[0] for i, w in enumerate(words) if w == "-e")
     check("only the listed environment variables, and no GIT_DIR / GIT_WORK_TREE (they would send every git to this repo)",
           names == ["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", "DW_ALLOW_DOMAINS",
-                    "DW_WORKER_NAME", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_0",
+                    "DW_DNS_UPSTREAM", "DW_WORKER_NAME", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_0",
                     "GIT_CONFIG_VALUE_1", "XDG_CACHE_HOME"] and "--env-file" not in words, str(names))
     check("default allowlist is api.anthropic.com; git never auto-gcs or prunes worktrees",
           "DW_ALLOW_DOMAINS=api.anthropic.com" in words and "GIT_CONFIG_KEY_0=gc.auto" in words and "GIT_CONFIG_VALUE_0=0" in words
@@ -3207,7 +3207,7 @@ def test_container(tmp):
           and generated(":/repo-git/worktrees/w1/gitdir:ro") == "/work/.git\n", str(mounts))
     check("--login adds the sign-in hosts; the command comes last",
           "DW_ALLOW_DOMAINS=api.anthropic.com claude.ai platform.claude.com console.anthropic.com" in words
-          and words[-4:] == ["dw-worker:1.1.0", "claude", "-p", "hi"], done.stdout + done.stderr)
+          and words[-4:] == ["dw-worker:1.2.0", "claude", "-p", "hi"], done.stdout + done.stderr)
     done = run(*base, "--worktree-name", "w1")
     check("--worktree-name on a main checkout exits 2", done.returncode == 2 and "linked worktree" in done.stderr, done.stderr)
     done = run("--worktree", linked.as_posix(), "--director", director.as_posix(), "--git-common", gitc.as_posix())
@@ -3418,7 +3418,7 @@ def test_worker_clone(tmp):
 
     def run(*args):
         return subprocess.run([bash, (box / "run_worker.sh").as_posix(), "--dry-run", *[str(a) for a in args]],
-                              capture_output=True, encoding="utf-8")
+                              capture_output=True, encoding="utf-8", env={**os.environ, "DW_DNS_UPSTREAM": "192.0.2.53"})
 
     done = run("--clone", clone.as_posix(), "--name", "w1", "--director", director.as_posix())
     words = shlex.split(done.stdout) if done.returncode == 0 else []
@@ -3431,7 +3431,8 @@ def test_worker_clone(tmp):
     names = sorted(words[i + 1].split("=")[0] for i, w in enumerate(words) if w == "-e")
     check("--clone: DW_WORKER_NAME is --name; no GIT_CONFIG_* (no shared worktrees to protect)",
           "DW_WORKER_NAME=w1" in words and names == ["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB",
-                                                     "DW_ALLOW_DOMAINS", "DW_WORKER_NAME", "XDG_CACHE_HOME"], str(names))
+                                                     "DW_ALLOW_DOMAINS", "DW_DNS_UPSTREAM", "DW_WORKER_NAME", "XDG_CACHE_HOME"],
+          str(names))
     check("--clone prints no WARN", "WARN" not in done.stderr, done.stderr)
     done = run("--clone", c, "--director", director.as_posix())
     check("--clone without --name exits 2", done.returncode == 2 and "--name" in done.stderr, done.stderr)
@@ -3452,6 +3453,238 @@ def test_worker_clone(tmp):
     check("--git-common: DW_WORKER_NAME defaults to the folder name", "DW_WORKER_NAME=repo" in words, done.stdout)
     done = run("--worktree", repo_p, "--git-common", (repo / ".git").as_posix(), "--name", "w9", "--director", director.as_posix())
     check("--git-common with --name uses it", "DW_WORKER_NAME=w9" in shlex.split(done.stdout or "''"), done.stdout + done.stderr)
+
+
+def test_dns_allow(tmp):
+    """DNS allowlist (1.2.0): dns_allow.py's pure functions, then the real UDP and TCP servers on 127.0.0.1 with a fake
+    upstream on another local port (no network), then run_worker.sh's allowlist and upstream handling (--dry-run).
+    The container itself (firewall, dwdns user) is tested by hand: TASK REPORT."""
+    global total
+    import socket
+    import struct
+    import threading
+    box = TOOLS / "container"
+    folder = tmp / "dns_allow"
+    folder.mkdir()
+
+    def check(name, ok, detail=""):
+        global total
+        total += 1
+        if not ok:
+            failures.append(f"dns_allow {name}: {str(detail)[-600:]}")
+
+    spec = importlib.util.spec_from_file_location("dns_allow_for_test", box / "dns_allow.py")
+    dns = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(dns)
+
+    def query(name, qtype=1, qid=0x1234, flags=0x0100, qd=1, extra=b"", qclass=1, ar=0):
+        wire = b"".join(bytes([len(p)]) + p for p in name.encode("latin-1").split(b".") if p) + b"\0"
+        return struct.pack("!6H", qid, flags, qd, 0, 0, ar) + wire + struct.pack("!2H", qtype, qclass) + extra
+
+    def rcode(packet):
+        return packet[3] & 0xF if packet else None
+
+    names = dns.parse_list("# comment\nAPI.Anthropic.com.  claude.ai # tail\n\n*.Example.org\nclaude.ai\n")
+    check("parse_list: comments, case, trailing dot, duplicates", names == ["*.example.org", "api.anthropic.com", "claude.ai"], names)
+    for bad in ("exa!mple.com", "a..b", "-a.com", "a*.com", "*.*.com", "http://x.com", "x" * 64 + ".com", "a_b.com"):
+        try:
+            dns.parse_list("ok.com\n" + bad)
+            check(f"parse_list refuses {bad[:20]!r}", False, "no error")
+        except ValueError as err:
+            check(f"parse_list refuses {bad[:20]!r} and names line 2", "line 2" in str(err), err)
+    shipped = dns.parse_list((box / "dns_allow.txt").read_text(encoding="utf-8"))
+    check("dns_allow.txt parses and is api.anthropic.com only", shipped == ["api.anthropic.com"], shipped)
+    allow = set(names)
+    check("allowed: exact name", dns.allowed("api.anthropic.com", allow) and dns.allowed("claude.ai", allow))
+    check("allowed: an exact entry does not allow its subdomains or look-alikes",
+          not dns.allowed("x.api.anthropic.com", allow) and not dns.allowed("api.anthropic.com.evil.net", allow)
+          and not dns.allowed("anthropic.com", allow) and not dns.allowed("xclaude.ai", allow))
+    check("allowed: *.example.org takes a.example.org and a.b.example.org, not example.org or badexample.org",
+          dns.allowed("a.example.org", allow) and dns.allowed("a.b.example.org", allow)
+          and not dns.allowed("example.org", allow) and not dns.allowed("badexample.org", allow))
+
+    kind, q = dns.decide(query("API.anthropic.COM"), allow)
+    check("decide: IN A for a listed name (any case) is forwarded", kind == "forward" and q["name"] == "api.anthropic.com", (kind, q))
+    check("decide: IN AAAA is forwarded", dns.decide(query("claude.ai", 28), allow)[0] == "forward")
+    for label, packet, want in (("TXT on a listed name", query("claude.ai", 16), 5),
+                                ("ANY on a listed name", query("claude.ai", 255), 5),
+                                ("class CH", query("claude.ai", qclass=3), 5),
+                                ("opcode 2 (status)", query("claude.ai", flags=0x1100), 5),
+                                ("a name not on the list", query("example.com"), 3),
+                                ("a random subdomain of a listed name", query("q8x1.api.anthropic.com"), 3),
+                                ("the root name", query(""), 3),
+                                ("two questions", query("claude.ai", qd=2), 1),
+                                ("a compression pointer in the name", struct.pack("!6H", 1, 0x100, 1, 0, 0, 0) + b"\xc0\x0c\0\1\0\1", 1),
+                                ("a 64-byte label", struct.pack("!6H", 1, 0x100, 1, 0, 0, 0) + b"\x40" + b"a" * 64 + b"\0\0\1\0\1", 1),
+                                ("a name over 255 bytes", query(".".join(["a" * 63] * 5)), 1),
+                                ("a cut-off question", query("claude.ai")[:-3], 1)):
+        kind, out = dns.decide(packet, allow)
+        check(f"decide: {label} -> rcode {want}, same ID, nothing forwarded",
+              kind == "reply" and rcode(out) == want and out[:2] == packet[:2] and out[2] & 0x80, (kind, out))
+    check("decide: a short packet or a response is dropped",
+          dns.decide(b"\x12\x34\x01", allow) == ("drop", None) and dns.decide(query("claude.ai", flags=0x8100), allow) == ("drop", None))
+
+    worker = query("Api.AnThRoPiC.com", qid=0xBEEF, ar=1, extra=b"\0\0\x29\x10\0\0\0\0\0\0\x08SECRETS!")
+    kind, q = dns.decide(worker, allow)
+    sent = dns.upstream_query(q, 0x0F0F)
+    check("upstream query: new ID, lower-case name, RD, one question, no extra records (nothing the worker chose)",
+          kind == "forward" and sent == query("api.anthropic.com", qid=0x0F0F) and b"SECRETS" not in sent, sent)
+    upstream_answer = (sent[:2] + b"\x81\x80" + b"\0\1\0\1\0\0\0\0" + sent[12:]
+                       + b"\xc0\x0c\0\1\0\1\0\0\0\x3c\0\4" + bytes([160, 79, 104, 10]))
+    out = dns.answer_for_worker(upstream_answer, sent, q, worker)
+    check("answer_for_worker: the worker's ID and question (its letter case) come back, the answer record is kept",
+          out is not None and out[:2] == b"\xbe\xef" and out[12:12 + len(sent) - 12] == worker[12:q["end"]]
+          and out.endswith(bytes([160, 79, 104, 10])), out)
+    for label, bad in (("another ID", b"\0\0" + upstream_answer[2:]),
+                       ("not a response", upstream_answer[:2] + b"\x01\x00" + upstream_answer[4:]),
+                       ("another question", upstream_answer.replace(b"anthropic", b"anthropiq")),
+                       ("cut short", upstream_answer[:14])):
+        check(f"answer_for_worker refuses an upstream answer with {label}", dns.answer_for_worker(bad, sent, q, worker) is None)
+
+    # The real servers, on free local ports, with a fake upstream that answers every A query with 192.0.2.7.
+    seen = []
+    up = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    up.bind(("127.0.0.1", 0))
+    up.settimeout(5)
+    up_tcp = socket.socket()
+    up_tcp.bind(("127.0.0.1", up.getsockname()[1]))
+    up_tcp.listen(4)
+    up_tcp.settimeout(5)
+
+    def fake_answer(packet):
+        seen.append(packet)
+        return packet[:2] + b"\x81\x80\0\1\0\1\0\0\0\0" + packet[12:] + b"\xc0\x0c\0\1\0\1\0\0\0\x3c\0\4" + bytes([192, 0, 2, 7])
+
+    def fake_udp():
+        try:
+            while True:
+                data, peer = up.recvfrom(4096)
+                up.sendto(fake_answer(data), peer)
+        except OSError:
+            return
+
+    def fake_tcp():
+        try:
+            while True:
+                conn, _ = up_tcp.accept()
+                with conn:
+                    data = dns.read_tcp_message(conn)
+                    out = fake_answer(data)
+                    conn.sendall(struct.pack("!H", len(out)) + out)
+        except OSError:
+            return
+
+    for target in (fake_udp, fake_tcp):
+        threading.Thread(target=target, daemon=True).start()
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    import io
+    log = io.StringIO()
+    resolver = dns.Resolver(["api.anthropic.com"], ["127.0.0.1"], log=log, upstream_port=up.getsockname()[1])
+    servers = []
+    try:
+        ready = threading.Event()
+        servers = dns.serve(resolver, port, ready)
+        ready.wait(5)
+        client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        client.settimeout(5)
+        client.sendto(query("api.ANTHROPIC.com", qid=0x4242), ("127.0.0.1", port))
+        out = client.recvfrom(4096)[0]
+        check("UDP: a listed name is answered through the upstream, with the worker's ID and question",
+              out[:2] == b"\x42\x42" and rcode(out) == 0 and out.endswith(bytes([192, 0, 2, 7]))
+              and seen and seen[-1][12:] == query("api.anthropic.com")[12:] and seen[-1][:2] != b"\x42\x42", (out, seen))
+        count = len(seen)
+        client.sendto(query("leak-0123.example.com", 16), ("127.0.0.1", port))
+        out = client.recvfrom(4096)[0]
+        check("UDP: a name not on the list gets NXDOMAIN and nothing reaches the upstream",
+              rcode(out) == 3 and len(seen) == count, (out, len(seen)))
+        client.close()
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as conn:
+            for name, want in (("api.anthropic.com", 0), ("example.com", 3)):
+                packet = query(name)
+                conn.sendall(struct.pack("!H", len(packet)) + packet)
+                out = dns.read_tcp_message(conn)
+                check(f"TCP: {name} -> rcode {want} on one connection", rcode(out) == want, out)
+        check("refused names are logged once each, printable only",
+              log.getvalue().count("refused leak-0123.example.com type 16") == 1 and "refused example.com type 1" in log.getvalue(), log.getvalue())
+    finally:
+        for s in servers:
+            s.shutdown()
+            s.server_close()
+        up.close()
+        up_tcp.close()
+    check("main: no DW_DNS_UPSTREAM exits 2", subprocess.run(
+        [sys.executable, "-I", "-B", str(box / "dns_allow.py")], capture_output=True, encoding="utf-8",
+        env={**{k: v for k, v in os.environ.items() if k != "DW_DNS_UPSTREAM"}, "DW_ALLOW_DOMAINS": "a.com"}).returncode == 2)
+
+    spec = importlib.util.spec_from_file_location("doctor_for_dns_test", TOOLS / "doctor.py")
+    doctor = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(doctor)
+    bash = doctor.git_bash() if os.name == "nt" else shutil.which("bash")
+    if not bash:
+        print("SKIP run_worker.sh allowlist cases: no bash (Git Bash on Windows)")
+        return
+    clone, director = folder / "c", folder / "D"
+    (clone / ".git" / "hooks").mkdir(parents=True)
+    (clone / ".git" / "config").write_text("[core]\n", encoding="utf-8")
+    director.mkdir()
+
+    def run(*args, env=None):
+        argv = [bash, (box / "run_worker.sh").as_posix(), "--dry-run", "--clone", clone.as_posix(), "--name", "w",
+                "--director", director.as_posix(), *[str(a) for a in args]]
+        full = {k: v for k, v in os.environ.items() if k not in ("DW_DNS_UPSTREAM", "DW_RESOLV_CONF")}
+        full.update(env or {"DW_DNS_UPSTREAM": "192.0.2.53"})
+        done = subprocess.run(argv, capture_output=True, encoding="utf-8", env=full)
+        words = shlex.split(done.stdout) if done.returncode == 0 else []
+        values = {w.split("=", 1)[0]: w.split("=", 1)[1] for i, w in enumerate(words) if i and words[i - 1] == "-e"}
+        return done, words, values
+
+    done, words, values = run("--login", "--allow", "Example.COM.", "--allow", "claude.ai")
+    check("run_worker: --dns 127.0.0.1; the file, then --login, then --allow, each once, lower case",
+          "--dns" in words and words[words.index("--dns") + 1] == "127.0.0.1"
+          and values.get("DW_ALLOW_DOMAINS") == "api.anthropic.com claude.ai platform.claude.com console.anthropic.com example.com"
+          and values.get("DW_DNS_UPSTREAM") == "192.0.2.53", done.stdout + done.stderr)
+    resolv = folder / "resolv.conf"
+    resolv.write_text("nameserver 127.0.0.53\nnameserver ::1\nnameserver 10.0.0.2 # x\nsearch lan\nnameserver 10.0.0.3\n", encoding="utf-8")
+    done, words, values = run(env={"DW_RESOLV_CONF": resolv.as_posix()})
+    check("run_worker: upstream from resolv.conf without 127.x and IPv6", values.get("DW_DNS_UPSTREAM") == "10.0.0.2 10.0.0.3", done.stdout + done.stderr)
+    resolv.write_text("nameserver 127.0.0.53\n", encoding="utf-8")
+    done, _, _ = run(env={"DW_RESOLV_CONF": resolv.as_posix()})
+    check("run_worker: only 127.x in resolv.conf exits 2 (no silent fallback)", done.returncode == 2 and "DW_DNS_UPSTREAM" in done.stderr, done.stderr)
+    done, _, _ = run(env={"DW_DNS_UPSTREAM": "8.8.8.8 evil"})
+    check("run_worker: a bad DW_DNS_UPSTREAM exits 2", done.returncode == 2 and "evil" in done.stderr, done.stderr)
+    listed = folder / "allow.txt"
+    listed.write_text("*.Example.org # wild\r\n\r\nzz.test\n", encoding="utf-8")
+    (folder / "zz.example.org").write_text("", encoding="utf-8")
+    done, _, values = run("--allow-file", listed.as_posix())
+    check("run_worker: --allow-file replaces dns_allow.txt; *. stays literal (no glob), CRLF is fine",
+          values.get("DW_ALLOW_DOMAINS") == "*.example.org zz.test", done.stdout + done.stderr)
+    for label, args in (("a bad name in --allow", ("--allow", "bad_name")),
+                        ("a missing --allow-file", ("--allow-file", (folder / "none.txt").as_posix())),
+                        ("an empty allowlist", ("--allow-file", resolv.as_posix().replace("resolv.conf", "empty.txt")))):
+        if label == "an empty allowlist":
+            (folder / "empty.txt").write_text("# nothing\n", encoding="utf-8")
+        done, _, _ = run(*args)
+        check(f"run_worker: {label} exits 2", done.returncode == 2, done.stdout + done.stderr)
+    done, words, values = run("--offline", env={})
+    check("run_worker --offline: no --dns, no allowlist, no upstream needed",
+          done.returncode == 0 and "--dns" not in words and "DW_ALLOW_DOMAINS" not in values and "DW_DNS_UPSTREAM" not in values,
+          done.stdout + done.stderr)
+    entry = (box / "entrypoint.sh").read_text(encoding="utf-8")
+    firewall = (box / "init_firewall.sh").read_text(encoding="utf-8")
+    docker_file = (box / "Dockerfile").read_text(encoding="utf-8")
+    check("entrypoint: firewall dns, dns_allow.py as dwdns with no capabilities, firewall https, then dw",
+          entry.index("init_firewall.sh dns") < entry.index("--reuid=dwdns") < entry.index("init_firewall.sh https") < entry.index("--reuid=dw ")
+          and entry.count("--bounding-set=-all") == 2 and entry.count("--no-new-privs") == 2, entry)
+    check("init_firewall: only dwdns reaches the upstream on 53; 53 on 127.0.0.1 goes to 5353",
+          firewall.count("--uid-owner dwdns -j ACCEPT") == 2 and firewall.count("-d 127.0.0.1 -p udp --dport 53 -j REDIRECT --to-ports 5353") == 1
+          and firewall.count("-d 127.0.0.1 -p tcp --dport 53 -j REDIRECT --to-ports 5353") == 1
+          and "/etc/resolv.conf" not in firewall, firewall)
+    check("Dockerfile: dns_allow.py copied, user dwdns made after the cached layers",
+          "dns_allow.py /usr/local/bin/" in docker_file and docker_file.index("useradd --system --uid 999") > docker_file.index("COPY entrypoint.sh"),
+          docker_file)
 
 
 def main():
@@ -3489,6 +3722,7 @@ def main():
         test_doctor(tmp)
         test_container(tmp)
         test_worker_clone(tmp)
+        test_dns_allow(tmp)
         test_evidence(tmp)
         test_order_checks(tmp)
         test_preflight(tmp)
