@@ -5,16 +5,28 @@
                                  [--anchor-rev REV --anchor-path PATH [--repo DIR]] [--cite "AUDIT_RANGE ..."]
   python -I -X utf8 audit_log.py head --log FILE        print AUDIT_HEAD file=... seq=n sha=... (the Director's anchor)
   python -I -X utf8 audit_log.py cite --log FILE --from A --to B   print AUDIT_RANGE ... for a TASK REPORT
+  python -I -X utf8 audit_log.py recover --log FILE     after a break: keep a copy, close the gap with a recovery line
 
-One JSON object per line: seq, ts, session_id, agent_id, tool, tool_use_id, kind (result / failure / decision), input
-(the tool input masked by secret_mask.py, at most 500 characters), result (status ok / error / interrupted, or the
+One JSON object per line: seq, ts, session_id, agent_id, tool, tool_use_id, kind (result / failure / decision /
+recovery), input
+(the tool input masked by secret_mask.py, at most 500 characters; since 2.2.0 each string is masked before the input
+is serialized, and a secret-named field is replaced whole), result (status ok / error / interrupted, or the
 decision deny / ask / remind / pause; with the sha256 and length of the masked output, never the output itself), duration_ms,
 rule (decision lines), prev (the hash of the line before; 64 zeros for seq 1) and hash (sha256 of the line's other
 fields as sorted compact JSON). hook_guard.py --audit FILE adds the decision lines, so a blocked call is on the chain.
 Lines are added under a lock file (FILE.lock, os.open O_CREAT|O_EXCL; busy for 5 s -> exit 1; a lock older than 30 s
 is taken over). append also masks the Bash tool's output: when stdout or stderr holds a secret it prints
 updatedToolOutput with the same fields, masked (a PostToolUse field; the PowerShell tool's output is NOT_VERIFIED and
-left as it is). When the line cannot be written append exits 1, except that a masked output is still returned (exit 0).
+left as it is). Masking the output and writing the line are two results: when the line cannot be written append exits
+1, except that a masked output is still returned (exit 0) and then additionalContext and stderr say the line is missing.
+
+recover (2.2.0) is for a log that verify calls broken (a line cut off by a crash, a line that is not JSON, a line off
+the chain). Under the lock it copies the whole file, untouched, to FILE.damaged-<UTC time>, keeps every line up to the
+first bad one (so the last good hash and every AUDIT_HEAD anchor before it stay valid) and adds one kind=recovery line
+on the chain: damage = first_line, lines, bytes and sha256 of the part taken out, the copy's name and its sha256. Then
+append goes on as usual. verify prints `GAP seq=n: ...` for each recovery line (not a break), counts gaps=n, and is
+BROKEN only when the copy next to the log no longer has that sha256. Lines after the first bad one stay in the copy
+only. A log with nothing broken is left as it is (exit 0); a missing log gives exit 2.
 
 verify recomputes the chain and prints the first break (BROKEN seq=n / BROKEN line=n) with exit 1; a missing log,
 anchor commit or file gives exit 2. A chain that was rewritten whole, every hash recomputed, passes on its own: only an
@@ -56,10 +68,11 @@ def _load_mask():
     spec = importlib.util.spec_from_file_location("secret_mask", pathlib.Path(__file__).with_name("secret_mask.py"))
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.mask
+    return module
 
 
-MASK = _load_mask()
+_MASKER = _load_mask()
+MASK, MASK_TREE = _MASKER.mask, _MASKER.mask_tree
 
 
 class AuditError(Exception):
@@ -129,7 +142,9 @@ def text_of(value):
 
 
 def summary(tool_input):
-    text, _ = MASK(text_of({} if tool_input is None else tool_input))
+    # mask each string first, then serialize (F12): masking the JSON text missed a quoted secret whose quotes JSON
+    # escapes. No second pass over the JSON: it would turn `"secret_mode": false` into text that is not JSON
+    text = text_of(MASK_TREE({} if tool_input is None else tool_input))
     return text if len(text) <= INPUT_LIMIT else text[:INPUT_LIMIT - 1] + "…"
 
 
@@ -201,13 +216,13 @@ def last_entry(path):
     if not tail.strip():
         return None
     if not tail.endswith(b"\n"):
-        raise AuditError("the last line is cut off; run verify")
+        raise AuditError("the last line is cut off; run verify, then recover")
     try:
         entry = json.loads(tail.rstrip(b"\n").rsplit(b"\n", 1)[-1].decode("utf-8"))
     except ValueError:
-        raise AuditError("the last line is not JSON; run verify") from None
+        raise AuditError("the last line is not JSON; run verify, then recover") from None
     if not isinstance(entry, dict) or type(entry.get("seq")) is not int or entry.get("hash") != digest(entry):
-        raise AuditError("the last line does not check out; run verify")
+        raise AuditError("the last line does not check out; run verify, then recover")
     return entry
 
 
@@ -226,6 +241,73 @@ def append_entry(path, fields):
             fh.flush()
             os.fsync(fh.fileno())
     return entry
+
+
+def good_prefix(raw):
+    """(bytes of the lines before the first break, the last good entry or None, how many good lines)."""
+    pos, last, count = 0, None, 0
+    while True:
+        end = raw.find(b"\n", pos)
+        if end < 0:
+            return pos, last, count
+        try:
+            entry = json.loads(raw[pos:end].decode("utf-8"))
+        except ValueError:
+            return pos, last, count
+        if (not isinstance(entry, dict) or type(entry.get("seq")) is not int or entry["seq"] != (last["seq"] if last else 0) + 1
+                or entry.get("prev") != (last["hash"] if last else GENESIS) or entry.get("hash") != digest(entry)):
+            return pos, last, count
+        pos, last, count = end + 1, entry, count + 1
+
+
+def recover(path):
+    """Keep a copy of a broken log and close the gap with a recovery line; None when nothing is broken."""
+    path = pathlib.Path(path)
+    with locked(path):
+        raw = path.read_bytes()
+        keep, last, good = good_prefix(raw)
+        if keep == len(raw):
+            return None
+        copy = path.with_name(f"{path.name}.damaged-{datetime.datetime.now(datetime.timezone.utc):%Y%m%dT%H%M%S%fZ}")
+        with open(copy, "xb") as fh:
+            fh.write(raw)
+            fh.flush()
+            os.fsync(fh.fileno())
+        cut = raw[keep:]
+        entry = {"session_id": None, "agent_id": None, "tool": None, "tool_use_id": None, "input": "", "kind": "recovery",
+                 "result": {"status": "recovered"}, "duration_ms": None,
+                 "damage": {"first_line": good + 1, "lines": cut.count(b"\n") + (not cut.endswith(b"\n")),
+                            "bytes": len(cut), "sha256": hashlib.sha256(cut).hexdigest(), "copy": copy.name,
+                            "copy_sha256": hashlib.sha256(raw).hexdigest()},
+                 "seq": last["seq"] + 1 if last else 1, "prev": last["hash"] if last else GENESIS,
+                 "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds")}
+        entry["hash"] = digest(entry)
+        temp = path.with_name(f"{path.name}.recover-tmp")
+        with open(temp, "wb") as fh:
+            fh.write(raw[:keep] + (canonical(entry) + "\n").encode("utf-8"))
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temp, path)
+    return entry
+
+
+def gaps(entries, log):
+    """[(GAP line, problem or None)] for each recovery line; a problem when the copy beside the log was changed."""
+    out = []
+    for _, entry in entries:
+        damage = entry.get("damage")
+        if entry.get("kind") != "recovery" or not isinstance(damage, dict):
+            continue
+        name = str(damage.get("copy"))
+        copy = pathlib.Path(log).with_name(pathlib.Path(name).name)
+        state, problem = "copy not found", None
+        if copy.is_file():
+            state = "copy checked"
+            if hashlib.sha256(copy.read_bytes()).hexdigest() != damage.get("copy_sha256"):
+                state, problem = "copy changed", f"seq={entry.get('seq')}: the copy {name} is not the one recovered"
+        out.append((f"GAP seq={entry.get('seq')}: from line {damage.get('first_line')} ({damage.get('lines')} lines, "
+                    f"{damage.get('bytes')} bytes, sha256={str(damage.get('sha256'))[:16]}) kept in {name}, {state}", problem))
+    return out
 
 
 def masked_output(call):
@@ -332,6 +414,10 @@ def cmd_verify(a):
         raise CannotRun("--anchor-rev and --anchor-path go together")
     entries, bad = load(log)
     problems = [bad or chain_problem(entries, a.from_seq, a.to_seq)]
+    found_gaps = gaps(entries, log)
+    for line, problem in found_gaps:
+        print(line)
+        problems.append(problem)
     texts = []
     if a.anchor_log:
         if not os.path.isfile(a.anchor_log):
@@ -355,7 +441,10 @@ def cmd_verify(a):
         print(f"BROKEN {problem}")
     head = entries[-1][1] if entries else {}
     print(f"AUDIT_VERIFY file={show(log)} entries={len(entries)} head_seq={head.get('seq', 0)}"
-          f"{f' anchors={anchors}' if texts else ''}{' cite=checked' if cite else ''} {'BROKEN' if problems else 'OK'}")
+          f"{f' anchors={anchors}' if texts else ''}{f' gaps={len(found_gaps)}' if found_gaps else ''}"
+          f"{' cite=checked' if cite else ''} {'BROKEN' if problems else 'OK'}")
+    if bad or chain_problem(entries):
+        print(f"  ~ to go on writing: audit_log.py recover --log {log} (keeps a copy, adds a recovery line)")
     return 1 if problems else 0
 
 
@@ -383,6 +472,20 @@ def cmd_cite(a):
     return 0
 
 
+def cmd_recover(a):
+    if not os.path.isfile(a.log):
+        raise CannotRun(f"{a.log}: no such log")
+    entry = recover(a.log)
+    if entry is None:
+        print(f"AUDIT_RECOVER file={show(a.log)} nothing broken; left as it is")
+        return 0
+    damage = entry["damage"]
+    print(f"AUDIT_RECOVER file={show(a.log)} kept={damage['first_line'] - 1} lines; took out {damage['lines']} lines "
+          f"({damage['bytes']} bytes) from line {damage['first_line']}; copy={damage['copy']} recovery seq={entry['seq']}")
+    print(f"AUDIT_HEAD file={show(a.log)} seq={entry['seq']} sha={entry['hash']}")
+    return 0
+
+
 def cmd_append(a):
     try:
         call = json.loads(sys.stdin.read())
@@ -398,10 +501,12 @@ def cmd_append(a):
     except (AuditError, OSError, ValueError) as error:
         failed = error
     if updated is not None:
-        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "updatedToolOutput": updated}},
-                         ensure_ascii=False))
+        out = {"hookEventName": "PostToolUse", "updatedToolOutput": updated}
+        if failed:
+            out["additionalContext"] = f"audit_log: output masked, but the audit line was NOT written: {failed}"
+        print(json.dumps({"hookSpecificOutput": out}, ensure_ascii=False))
     if failed:
-        print(f"audit_log: not written: {failed}", file=sys.stderr)
+        print(f"audit_log: masked={'yes' if updated is not None else 'no'} written=no: {failed}", file=sys.stderr)
         return 0 if updated is not None else 1
     return 0
 
@@ -426,6 +531,8 @@ def main():
     p.add_argument("--log", required=True)
     p.add_argument("--from", dest="from_seq", type=int, required=True)
     p.add_argument("--to", dest="to_seq", type=int, required=True)
+    p = sub.add_parser("recover", help="keep a copy of a broken log and go on with a recovery line")
+    p.add_argument("--log", required=True)
     a = ap.parse_args()
     sys.stdout.reconfigure(encoding="utf-8")
     try:
@@ -435,8 +542,12 @@ def main():
         print(f"NOT_RUN {error}")
         return 2
     try:
-        return {"append": cmd_append, "verify": cmd_verify, "head": cmd_head, "cite": cmd_cite}[a.cmd](a)
+        return {"append": cmd_append, "verify": cmd_verify, "head": cmd_head, "cite": cmd_cite,
+                "recover": cmd_recover}[a.cmd](a)
     except CannotRun as error:
+        print(f"NOT_RUN {error}")
+        return 2
+    except (AuditError, OSError) as error:
         print(f"NOT_RUN {error}")
         return 2
 

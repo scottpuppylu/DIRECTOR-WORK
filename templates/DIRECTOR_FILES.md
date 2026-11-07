@@ -13,6 +13,8 @@
 ```text
 # DIRECTOR_STATE — <專案名稱>
 UPDATED: <讀 date>
+PO_PAGE_URL: <待決頁網址 https://claude.ai/...；用不了寫 NONE reason=<原因>>
+PO_PAGE_PINNED: <yes；置頂失敗寫 no reason=<原因>>
 ## 專案概況
 目標 / 目前階段 / 已知 PO 決定 / repo、分支、worktree / build 與測試方式、時間 / 共用重資源 / 輸出位置與磁碟 / 成品怎麼看
 ## 各工作線狀態

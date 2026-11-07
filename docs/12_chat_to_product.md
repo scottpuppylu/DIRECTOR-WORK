@@ -19,7 +19,7 @@
 | BOOTSTRAP 步驟 | 一般模式 | 小白模式 |
 |---|---|---|
 | 3、4、7、8、10 建置 | 照順序做完才談需求 | 快速路徑：談完需求、開第一位 worker 前才做（壓縮門檻只設定那位 worker 的資料夾） |
-| 6 待決頁 | `PO_PENDING.md` 加聊天；選擇頁先問，同意且可用才用 | 同左，問法用白話（「需要我把選擇題和圖片放在你自己的 Claude 頁面，讓你點選嗎？直接在這裡回答也可以。」）；沒同意或用不了，在聊天問、總監存進 `PO_PENDING.md`（`docs/11`「選擇頁的授權與備援」） |
+| 6 待決頁 | 第一則回覆之前發布網頁並置頂，題目同時記進 `PO_PENDING.md`、在聊天問 | 同左，問法用白話；用不了或使用者說不要，在聊天問、總監存進 `PO_PENDING.md`（`docs/11`「待決頁網頁的授權與備援」） |
 | 7.7 `hook_guard.py` | 問要不要裝 | 不問、不裝 |
 | 9 無關 plugin | 列清單問 | 不問；`plugins_off` 留空，什麼都不關 |
 | 12 工作線編制 | 草案問 PO | 總監照 `docs/05` 定第一批（通常一條 worker 線），登記 DD，寫進初衷卡「由總監決定的事」；開線的同意併進「卡片對，請開助手」那一句，不另外問 |
@@ -64,13 +64,13 @@
 
    舊專案還沒有 `DECISION_REGISTER.md` 才只給 `BRIEF.md` 一個，結果和以前相同。「沒有工單的需求」只有 B 開頭的列算待排項目；DD、PO、OD 的列只是決策紀錄，列出來不代表缺工單。「TRACES_TO 找不到的編號」有東西，是工單對到不存在的編號，改工單。
 
-### 四、選擇頁：要使用者選的放這裡
+### 四、待決頁網頁：要使用者選的放這裡
 
 適用：中途有兩個以上做法、使用者看了才能決定的事，例如 A 風格或 B 風格、版面、配色、角色長相。不適用：純技術選擇（總監自己決定）、要使用者動手的事（照 `docs/03` 待決頁）。
 
-前提：先問 PO，PO 同意且工具可用才發布；否則走聊天和本機 `PO_PENDING.md`（和 `BOOTSTRAP.md` 步驟 6、`docs/11`「選擇頁的授權與備援」一致）。
+前提：網頁在第一則回覆之前就發布並置頂（`BOOTSTRAP.md` 步驟 6；啟動提示詞已同意），網址看 `DIRECTOR_STATE.md` 的 `PO_PAGE_URL`。`PO_PAGE_URL: NONE` 時走聊天和本機 `PO_PENDING.md`（`docs/11`「待決頁網頁的授權與備援」）。選擇題和成品截圖放同一頁。
 
-1. **發布**：複製 `templates/choice_page.html`，用 Artifact 工具發布，`capabilities` 給 `{"db": {}, "user": {}, "assets": {}, "comments": {}}`（`comments` 用來叫醒總監，見第六節），`icon` 用 `checklist`。私人頁面，只有使用者看得到；網址寫進 `DIRECTOR_OPERATING_RULES.md`，第一份回報附上。
+1. **發布**：複製 `templates/choice_page.html`，用 Artifact 工具發布，`capabilities` 給 `{"db": {}, "user": {}, "assets": {}, "comments": {}}`（`comments` 用來叫醒總監，見第六節），`icon` 用 `checklist`，`pin: true`。私人頁面，只有使用者看得到；網址寫進 `DIRECTOR_STATE.md` 的 `PO_PAGE_URL`（置頂結果寫 `PO_PAGE_PINNED`，`BOOTSTRAP` 第 6 步第 3 點），第一份回報附上。
 2. **開題**（2.1 起）：題目內容和題目狀態分開放。先用 `ArtifactData` 寫一筆版本 `choiceRevisions/<編號>-r<版>`，寫了就不再改：
 
    ```json
@@ -84,7 +84,7 @@
    再寫 `decisions/<編號>`：`{"code": "CH-01", "status": "open", "priority": 1, "revision": 1, "snapshotHash": "sha256:…"}`。
    - `snapshotHash` 用 `choice_reconcile.py register --snapshot <這一版的 JSON>` 算，同一份也記進本機帳本（第六節）。
    - **改題就開新版**：寫 `CH-01-r2`，再把 `decisions/CH-01` 的 `revision`、`snapshotHash` 改成新版。不要改舊版的內容；使用者對舊版的回覆仍照舊版的選項讀。
-   - 每題都要有 `brief`（對到哪幾條 B）、`recommended` 和 `why`（總監建議和理由，用使用者的話）。對不到初衷卡的題目不要開，先回頭問要不要改卡。
+   - 每題都要有 `brief`（對到哪幾條 B）、`recommended` 和 `why`（總監建議和理由，用使用者的話）。對不到初衷卡的題目不要開，先回頭問要不要改卡。例外：第一輪的模式題 `CH-00` 在初衷卡之前，`brief` 寫 `[]`。
    - 圖：先截真實成品的圖，用 Artifact 工具 `asset: true` 上傳到這一頁，`url` 用上傳結果給的網址。不要用示意圖假裝是成品。
    - 一題只問一件事；選項最多四個。
    - 2.0 開的舊題（`decisions` 裡直接放題目、沒有 `revision`）照樣能看能答；頁面標「舊題，當時選項未留存」，因為那時沒有存下使用者當時看到的選項。

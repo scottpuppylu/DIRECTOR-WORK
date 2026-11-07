@@ -6,6 +6,10 @@ and passwords in URLs. Each one becomes [MASKED:<kind>], with no part of the sec
 
 Used as a module by the action log (mask before writing). It masks common formats only: a token in a format it has
 not seen goes through. A 40-character git SHA or a sha256 on its own is never masked.
+
+mask_tree(value) masks a JSON-like structure before it is serialized (2.2.0, F12): every string (keys too) goes through
+mask(), and the whole value of a key named like a secret (password, api_key, github_token ...) becomes
+[MASKED:field]. Masking the serialized text instead misses `password="a b"`, whose quotes JSON escapes.
 """
 import argparse
 import pathlib
@@ -35,6 +39,7 @@ KEEP_PREFIX = [
     ("assignment", re.compile(r"(?i)(\b" + SECRET_NAME + r"[\"']?\s*[:=]\s*)(\"[^\"\n]*\"|'[^'\n]*'|[^\s\"',;]+)")),
 ]
 MASK = re.compile(r"\[MASKED:\w+\]")
+FIELD = re.compile(SECRET_NAME, re.I)
 
 
 def mask(text):
@@ -61,6 +66,20 @@ def mask(text):
     for kind, pattern in KEEP_PREFIX:
         text = pattern.sub(tail(kind), text)
     return text, sorted(found)
+
+
+def mask_tree(value, key=None):
+    """A copy of a JSON-like value with each string masked; a secret-named key's whole value becomes [MASKED:field].
+    None, booleans and an empty string under such a key stay as they are (nothing to hide)."""
+    if isinstance(key, str) and FIELD.fullmatch(key) and value not in (None, "") and not isinstance(value, bool):
+        return "[MASKED:field]"
+    if isinstance(value, str):
+        return mask(value)[0]
+    if isinstance(value, dict):
+        return {(mask(k)[0] if isinstance(k, str) else k): mask_tree(v, k) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [mask_tree(v) for v in value]
+    return value
 
 
 def main():
