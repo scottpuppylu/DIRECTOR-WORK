@@ -1,0 +1,204 @@
+<title>專案選擇頁</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<!-- DIRECTOR-WORK templates/choice_page.html：使用者的選擇頁（docs/12）。總監用 Artifact 工具發布，capabilities {"db":{},"user":{},"assets":{}}。
+     資料都在 db，不寫進本檔：brief/current（初衷卡摘要）、decisions/<id>（要使用者選的題）、notes（使用者給總監的話）。欄位見 docs/12。 -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=Noto+Serif+TC:wght@600;700&family=IBM+Plex+Mono:wght@500&display=swap">
+<style>
+/* Layout: one reading column. The locked brief sits on top like a pinned card; open choices follow, each option a picture card side by side; answered and closed below. */
+:root{
+  --bg:#f4f4f0; --surface:#ffffff; --ink:#1f2421; --muted:#5f6862; --line:#d9dcd5;
+  --pin:#2d5b4f; --pin-soft:#e2eee9; --ask:#b5562a; --ask-soft:#f8e8de; --pick:#2b4f8a; --pick-soft:#e3eaf6;
+  --display:"Noto Serif TC","Songti TC","PMingLiU",serif;
+  --body:"Noto Sans TC","PingFang TC","Microsoft JhengHei",system-ui,sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#121513; --surface:#1b201d; --ink:#e6eae6; --muted:#9ba59f; --line:#2e3631;
+  --pin:#7cc0ab; --pin-soft:#1d2e29; --ask:#ec9a6f; --ask-soft:#3a2519; --pick:#8db4f0; --pick-soft:#1c2a40; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#121513; --surface:#1b201d; --ink:#e6eae6; --muted:#9ba59f; --line:#2e3631;
+  --pin:#7cc0ab; --pin-soft:#1d2e29; --ask:#ec9a6f; --ask-soft:#3a2519; --pick:#8db4f0; --pick-soft:#1c2a40; color-scheme:dark}
+body{background:var(--bg);color:var(--ink);font-family:var(--body);font-size:15px;line-height:1.65}
+.wrap{max-width:820px;margin:0 auto;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:24px 48px;display:flex;flex-direction:column;gap:26px}
+header{display:flex;flex-direction:column;gap:4px}
+h1{margin:0;font-family:var(--display);font-size:1.7rem;font-weight:700;text-wrap:balance}
+.sub{margin:0;color:var(--muted);font-size:.9rem}
+h2{margin:0 0 10px;font-size:.78rem;font-weight:700;letter-spacing:.14em;color:var(--muted)}
+.list{display:flex;flex-direction:column;gap:14px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.brief{border:1px solid var(--pin);background:var(--pin-soft)}
+.brief .meta{font-family:var(--mono);font-size:.75rem;color:var(--pin)}
+.brief dl{margin:0;display:grid;grid-template-columns:auto 1fr;gap:6px 12px}
+.brief dt{font-family:var(--mono);font-size:.78rem;color:var(--pin);padding-top:2px}
+.brief dd{margin:0;min-width:0}
+.brief .kind{color:var(--muted);font-size:.8rem;margin-right:6px}
+.card.open{border-top:3px solid var(--ask)}
+.card.answered{border-top:3px solid var(--pick)}
+.head{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.code{font-family:var(--mono);font-size:.75rem;background:var(--ask-soft);color:var(--ask);padding:2px 7px;border-radius:4px}
+.answered .code{background:var(--pick-soft);color:var(--pick)}
+.closed .code{background:var(--pin-soft);color:var(--pin)}
+.trace{font-family:var(--mono);font-size:.72rem;color:var(--pin);border:1px solid var(--pin);padding:0 6px;border-radius:999px}
+.title{margin:0;font-weight:700;font-size:1.05rem}
+.q{margin:0}
+.ctx{margin:0;color:var(--muted);font-size:.88rem;white-space:pre-line}
+.opts{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px}
+.opt{display:flex;flex-direction:column;gap:6px;text-align:left;border:2px solid var(--line);background:var(--bg);color:var(--ink);border-radius:10px;padding:10px;font:inherit;cursor:pointer;min-width:0}
+.opt:hover{border-color:var(--pick)}
+.opt[aria-pressed="true"]{border-color:var(--pick);background:var(--pick-soft)}
+.opt img{width:100%;max-width:100%;aspect-ratio:4/3;object-fit:cover;border-radius:6px;border:1px solid var(--line);display:block;background:var(--surface)}
+.opt .ol{font-weight:700}
+.opt .od{font-size:.85rem;color:var(--muted)}
+.rec{display:inline-block;font-size:.7rem;font-weight:700;color:var(--ask);margin-left:6px;letter-spacing:.06em}
+.why{margin:0;font-size:.85rem;background:var(--ask-soft);border-radius:8px;padding:8px 10px}
+.gallery{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}
+.shot{margin:0;display:flex;flex-direction:column;gap:4px;min-width:0}
+.shot img,.shot video{width:100%;height:auto;border-radius:6px;border:1px solid var(--line);display:block}
+.shot figcaption{font-size:.8rem;color:var(--muted)}
+textarea{width:100%;box-sizing:border-box;min-height:64px;border:1px solid var(--line);border-radius:8px;padding:8px 10px;font:inherit;background:var(--bg);color:var(--ink);resize:vertical}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.send{border:0;border-radius:8px;padding:9px 18px;font:inherit;font-weight:700;background:var(--pin);color:var(--surface);cursor:pointer}
+.send:disabled{opacity:.45;cursor:default}
+button:focus-visible,textarea:focus-visible,summary:focus-visible,a:focus-visible{outline:2px solid var(--ask);outline-offset:2px}
+.msg{font-size:.85rem;color:var(--muted)}
+.ans{font-size:.9rem;background:var(--pick-soft);border-radius:8px;padding:8px 10px;white-space:pre-line}
+.res{font-size:.9rem;background:var(--pin-soft);border-radius:8px;padding:8px 10px}
+.empty{border:1px dashed var(--line);border-radius:10px;padding:16px;color:var(--muted)}
+details summary{cursor:pointer;color:var(--muted);font-size:.85rem;font-weight:700;letter-spacing:.06em}
+details .list{margin-top:10px}
+@media (prefers-reduced-motion: reduce){*{transition:none!important}}
+</style>
+
+<main class="wrap">
+  <header>
+    <h1 id="name">專案選擇頁</h1>
+    <p class="sub">總監要你決定的事都在這裡。點一個選項、按送出，總監下一輪就會讀到。</p>
+    <p class="msg" id="status">正在讀取…</p>
+  </header>
+
+  <section aria-labelledby="h-brief">
+    <h2 id="h-brief">專案初衷卡</h2>
+    <div id="brief" class="empty">還沒有初衷卡。總監和你談完需求、你確認之後，會顯示在這裡。</div>
+  </section>
+
+  <section aria-labelledby="h-open">
+    <h2 id="h-open">等你選</h2>
+    <div class="list" id="open"></div>
+  </section>
+
+  <section aria-labelledby="h-ans">
+    <h2 id="h-ans">你已回覆，總監處理中</h2>
+    <div class="list" id="answered"></div>
+  </section>
+
+  <section aria-labelledby="h-note">
+    <h2 id="h-note">給總監的話</h2>
+    <div class="card">
+      <label for="note-text" class="msg">想改需求、想加什麼、哪裡看起來不對，寫在這裡。初衷卡只有你能改：要改就寫在這裡，總監會改好再請你確認。</label>
+      <textarea id="note-text" placeholder="例如：主角的顏色想再亮一點"></textarea>
+      <div class="row"><button class="send" id="note-send" type="button">送出</button><span class="msg" id="note-msg"></span></div>
+      <div class="list" id="notes"></div>
+    </div>
+  </section>
+
+  <details>
+    <summary>已結案（最近 15 項）</summary>
+    <div class="list" id="closed"></div>
+  </details>
+</main>
+
+<script>
+const S={db:null,canWrite:true,decisions:[],notes:[],brief:null,loaded:false,picks:{}};
+const $=id=>document.getElementById(id);
+function el(tag,cls,text){const e=document.createElement(tag);if(cls)e.className=cls;if(text!=null)e.textContent=text;return e}
+function fmt(iso){if(!iso)return"";try{return new Date(iso).toLocaleString("zh-TW",{month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit"})}catch(e){return iso}}
+function optLabel(d,key){const o=(d.options||[]).find(o=>o.key===key);return o?o.label:key}
+function traces(d,h){(d.brief||[]).forEach(b=>h.append(el("span","trace",b)))}
+
+function renderBrief(){
+  const box=$("brief");const b=S.brief;
+  if(b&&b.name){$("name").textContent=b.name;document.title=b.name+" 選擇頁"}
+  if(!b||!Array.isArray(b.items)||!b.items.length)return;
+  const c=el("div","card brief");
+  c.append(el("p","meta",(b.status==="LOCKED"?"已鎖定":"草稿，等你確認")+"｜第 "+(b.version||1)+" 版"+(b.lockedAt?"｜"+fmt(b.lockedAt):"")));
+  if(b.summary)c.append(el("p","q",b.summary));
+  const dl=el("dl");
+  b.items.forEach(i=>{dl.append(el("dt",null,i.id));const dd=el("dd");if(i.kind)dd.append(el("span","kind",i.kind));dd.append(document.createTextNode(i.text||""));dl.append(dd)});
+  c.append(dl);box.className="";box.replaceChildren(c)}
+
+function media(list){
+  const g=el("div","gallery");
+  list.forEach(im=>{const f=el("figure","shot");
+    if(im.kind==="video"){const v=el("video");v.src=im.url;v.controls=true;v.preload="metadata";v.playsInline=true;f.append(v)}
+    else{const a=el("a");a.href=im.url;a.target="_blank";a.rel="noopener";const i=el("img");i.src=im.url;i.alt=im.caption||"";i.loading="lazy";a.append(i);f.append(a)}
+    if(im.caption)f.append(el("figcaption",null,im.caption));g.append(f)});
+  return g}
+
+function renderOpen(d){
+  const c=el("article","card open");
+  const h=el("div","head");h.append(el("span","code",d.code||d.id));traces(d,h);
+  c.append(h,el("p","title",d.title||""));
+  if(d.question)c.append(el("p","q",d.question));
+  if(d.context)c.append(el("p","ctx",d.context));
+  if(Array.isArray(d.images)&&d.images.length)c.append(media(d.images));
+  const opts=el("div","opts");let send;
+  (d.options||[]).forEach(o=>{
+    const b=el("button","opt");b.type="button";b.setAttribute("aria-pressed",S.picks[d.id]===o.key?"true":"false");
+    if(o.image&&o.image.url){const i=el("img");i.src=o.image.url;i.alt=o.image.caption||o.label||"";i.loading="lazy";b.append(i)}
+    const l=el("span","ol",o.label);if(d.recommended===o.key)l.append(el("span","rec","總監建議"));
+    b.append(l);if(o.desc)b.append(el("span","od",o.desc));
+    b.addEventListener("click",()=>{S.picks[d.id]=o.key;opts.querySelectorAll(".opt").forEach(x=>x.setAttribute("aria-pressed","false"));b.setAttribute("aria-pressed","true");send.disabled=!S.canWrite});
+    opts.append(b)});
+  if((d.options||[]).length)c.append(opts);
+  if(d.recommended&&d.why)c.append(el("p","why","總監為什麼建議「"+optLabel(d,d.recommended)+"」："+d.why));
+  const ta=el("textarea");ta.id="note-"+d.id;ta.placeholder="想補充的話（可以不寫）";c.append(ta);
+  const row=el("div","row");send=el("button","send",(d.options||[]).length?"送出選擇":"我知道了");send.type="button";
+  send.disabled=!S.canWrite||((d.options||[]).length>0&&!S.picks[d.id]);
+  const msg=el("span","msg");row.append(send,msg);c.append(row);
+  send.addEventListener("click",async()=>{
+    send.disabled=true;msg.textContent="送出中…";
+    const choice=(d.options||[]).length?S.picks[d.id]:"done";
+    try{await S.db.doc("decisions/"+d.id).update({status:"answered",answer:{choice,note:ta.value.trim(),at:new Date().toISOString()}});msg.textContent="已送出"}
+    catch(e){msg.textContent=e&&(e.code==="permission_denied"||e.code==="invalid_argument")?"你沒有這一頁的寫入權限":"送出失敗，請稍後再試";send.disabled=false}});
+  return c}
+
+function renderAnswered(d){
+  const c=el("article","card answered");const h=el("div","head");h.append(el("span","code",d.code||d.id));traces(d,h);c.append(h,el("p","title",d.title||""));
+  const a=d.answer||{};c.append(el("div","ans",(a.choice==="done"?"已讀":"你選了："+optLabel(d,a.choice))+(a.note?"\n補充："+a.note:"")+"\n（"+fmt(a.at)+"）"));return c}
+
+function renderClosed(d){
+  const c=el("article","card closed");const h=el("div","head");h.append(el("span","code",d.code||d.id));c.append(h,el("p","title",d.title||""));
+  const a=d.answer||{};if(a.choice)c.append(el("p","msg","你的回覆："+(a.choice==="done"?"已讀":optLabel(d,a.choice))+(a.note?"｜"+a.note:"")));
+  if(d.resolution)c.append(el("div","res","總監處理："+d.resolution));return c}
+
+function render(){
+  renderBrief();
+  const open=S.decisions.filter(d=>d.status==="open").sort((a,b)=>(a.priority??9)-(b.priority??9));
+  const ans=S.decisions.filter(d=>d.status==="answered");
+  const closed=S.decisions.filter(d=>d.status==="closed").sort((a,b)=>String(b.closedAt||"").localeCompare(String(a.closedAt||""))).slice(0,15);
+  const O=$("open");O.replaceChildren(...open.map(renderOpen));if(!open.length)O.append(el("div","empty","現在沒有要你選的。總監有新問題時會放在這裡。"));
+  const A=$("answered");A.replaceChildren(...ans.map(renderAnswered));if(!ans.length)A.append(el("div","empty","沒有等總監處理的回覆。"));
+  const C=$("closed");C.replaceChildren(...closed.map(renderClosed));if(!closed.length)C.append(el("div","empty","還沒有結案的項目。"));
+  const N=$("notes");const notes=S.notes.slice().sort((a,b)=>String(b.at).localeCompare(String(a.at))).slice(0,5);
+  N.replaceChildren(...notes.map(n=>el("p","msg",fmt(n.at)+"｜"+(n.status==="read"?"總監已讀｜":"未讀｜")+n.text)))}
+
+async function init(){
+  const db=await claude.use("db");
+  if(!db){$("status").textContent="這個檢視讀不到資料。請登入 claude.ai 後再開這一頁。";return}
+  S.db=db;
+  try{const user=await claude.use("user");if(user&&user.can){const w=await Promise.resolve(user.can("data.write"));if(w===false)S.canWrite=false}}catch(e){}
+  if(!S.canWrite)$("note-send").disabled=true;
+  const timer=setTimeout(()=>{if(!S.loaded)$("status").textContent="資料暫時連不上，連上後會自動更新。"},10000);
+  db.collection("decisions").onSnapshot(snap=>{S.decisions=snap.docs.filter(d=>d.exists).map(d=>({id:d.id,...d.data()}));
+    if(!snap.metadata.fromCache){S.loaded=true;clearTimeout(timer);$("status").textContent="最後同步："+fmt(new Date().toISOString())}render()},
+    e=>{clearTimeout(timer);$("status").textContent="讀取失敗（"+(e&&e.code||"原因不明")+"），請重新開這一頁。"});
+  db.doc("brief/current").onSnapshot(snap=>{S.brief=snap.exists?snap.data():null;render()},()=>{});
+  db.collection("notes").onSnapshot(snap=>{S.notes=snap.docs.filter(d=>d.exists).map(d=>({id:d.id,...d.data()}));render()},()=>{});
+  $("note-send").addEventListener("click",async()=>{
+    const t=$("note-text").value.trim();if(!t)return;const b=$("note-send");b.disabled=true;$("note-msg").textContent="送出中…";
+    try{await db.collection("notes").add({text:t,at:new Date().toISOString(),status:"new"});$("note-text").value="";$("note-msg").textContent="已送出"}
+    catch(e){$("note-msg").textContent="送出失敗，請稍後再試"}b.disabled=!S.canWrite});
+}
+render();init();
+</script>

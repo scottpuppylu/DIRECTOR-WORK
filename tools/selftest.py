@@ -948,11 +948,11 @@ def test_trace(tmp):
 
 
 def test_purpose():
-    """PURPOSE.md keeps its 7 aims and 9 cores and says only the PO edits it; every CHANGELOG version answers to it."""
+    """PURPOSE.md keeps its 8 aims and 9 cores and says only the PO edits it; every CHANGELOG version answers to it."""
     global total
     root = TOOLS.parent
     text = (root / "PURPOSE.md").read_text(encoding="utf-8")
-    for heading, count in (("初衷", 7), ("不能破壞的核心", 9)):
+    for heading, count in (("初衷", 8), ("不能破壞的核心", 9)):
         total += 1
         section = re.search(rf"^## {heading}\n(.*?)(?=^## |\Z)", text, re.M | re.S)
         items = re.findall(r"^\d+\. \*\*", section.group(1), re.M) if section else []
@@ -965,6 +965,41 @@ def test_purpose():
         total += 1
         if "對齊初衷" not in body:
             failures.append(f"CHANGELOG {version}: no 對齊初衷 line (PURPOSE.md, 改規則前的檢查)")
+
+
+def test_chat_to_product(tmp):
+    """2.0.0 (PURPOSE aim 8): mode choice first, a locked BRIEF that orders trace to, and a choice page for A/B picks."""
+    global total
+    root = TOOLS.parent
+    wanted = [("BOOTSTRAP.md", "一般模式還是小白模式"), ("BOOTSTRAP.md", "## 14. 談需求、寫專案初衷卡"),
+              ("README.md", "0. 先問我要用一般模式還是小白模式"), ("README.md", "`docs/12_chat_to_product.md`"),
+              ("docs/12_chat_to_product.md", "## 為什麼"), ("docs/12_chat_to_product.md", "--decisions <WS>/DIRECTOR/BRIEF.md"),
+              ("templates/BRIEF.md", "只有使用者能改這張卡"), ("templates/BRIEF.md", "| B-1 |"),
+              ("templates/WORK_ORDER.md", "B-2"), ("templates/choice_page.html", "<title>"),
+              ("templates/choice_page.html", 'collection("decisions")'), ("templates/choice_page.html", 'collection("notes")'),
+              ("templates/choice_page.html", 'doc("brief/current")'), ("templates/choice_page.html", "總監建議")]
+    for path, needle in wanted:
+        total += 1
+        if needle not in (root / path).read_text(encoding="utf-8"):
+            failures.append(f"chat to product: {path} lacks {needle!r} (docs/12)")
+    for needle in ("schedule/current", "Baseball"):
+        total += 1
+        if needle in (root / "templates/choice_page.html").read_text(encoding="utf-8"):
+            failures.append(f"chat to product: templates/choice_page.html still has the project-specific {needle!r}")
+    example = json.loads((root / "director_work.example.json").read_text(encoding="utf-8"))
+    total += 1
+    if example.get("mode") not in ("general", "beginner") or not re.match(example.get("trace_id_pattern", ""), "B-2"):
+        failures.append("director_work.example.json: mode must be general or beginner and trace_id_pattern must accept B-2")
+    folder = tmp / "brief"
+    for name in ("orders", "reports"):
+        (folder / name).mkdir(parents=True)
+    (folder / "orders" / "WO-001-parser.md").write_text(TYPED_ORDER.format(base="abc123").replace("DD-1", "B-2, B-9"), encoding="utf-8")
+    base = ("--orders", folder / "orders", "--reports", folder / "reports", "--config", root / "director_work.example.json",
+            "--decisions", root / "templates/BRIEF.md")
+    expect("trace against the BRIEF template flags an ID the brief lacks", "trace_report.py", 0, *base,
+           says=["## TRACES_TO 找不到的編號\n- WO-001: B-9", "## 編號格式不符 trace_id_pattern\n- 無"], lacks="- WO-001: B-2\n")
+    expect("trace against the BRIEF template lists brief rows no order serves", "trace_report.py", 0, *base,
+           says="## 沒有工單的需求\n- B-1\n", lacks="- B-2\n")
 
 
 def test_vocabulary():
@@ -4702,6 +4737,7 @@ def main():
         test_trace(tmp)
         test_metrics(tmp)
         test_purpose()
+        test_chat_to_product(tmp)
         test_scope(tmp)
         test_submodule_ignore(tmp)
         test_shared_code()

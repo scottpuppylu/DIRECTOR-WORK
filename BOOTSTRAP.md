@@ -4,6 +4,11 @@
 照文件做不下去時（文件沒寫、寫錯、工具失敗），在 `DIRECTOR/DIRECTOR_LOG.md` 記一行 `BOOTSTRAP_STUCK 第 <n> 步 <原因>`；第 3 步之前卡住的，建好後補記。這是 `PURPOSE.md`「新專案導入時卡住的次數」的來源。
 `<RULES>` 指本規則包在本機的位置，`<REPO>` 指新專案的 git repo，`<WS>` 指放共用狀態的位置（見第 3 步）。
 
+## 先問模式（第一則回覆）
+
+讀完啟動提示詞，第一則回覆只問一題：**一般模式還是小白模式？** 各附一句說明（`docs/12` 第一節）。啟動提示詞已寫明模式就不問。使用者回答前不做下面任何一步。
+小白模式下，第 6、7.7、9、12、13 步照 `docs/12` 第二節改做：技術問題不問，總監照預設決定並登記 DD；安全的事照樣問，只是用白話。
+
 ## 0. 先確認環境（唯讀）
 
 1. `git -C <REPO> rev-parse --show-toplevel`、`git -C <REPO> status`、`git -C <REPO> worktree list`。不是 git repo 就停下問 PO。
@@ -17,7 +22,7 @@
 1. 把本規則包放到專案外的位置：`git clone https://github.com/scottpuppylu/DIRECTOR-WORK <RULES>`（PO 給了本機路徑就直接用）。第 3 步再把整個 `tools/` 複製到 `DIRECTOR/tools/`。
    PO 給了連結，就算同意下載這一個專案。跑工具前先讀過它的程式碼；第一輪會跑 `setup_project_settings.py`、`context_probe.py`、`usage_report.py`、`memory_size_check.py`、`gate_check.py`，其他的等要用時再讀。
    記下規則包的版本（`<RULES>/VERSION` 加上 `git -C <RULES> rev-parse --short HEAD`），第 3 步寫進 `DIRECTOR_OPERATING_RULES.md`。
-2. 讀 `README.md`、`PURPOSE.md`、本檔、`docs/01` 到 `docs/10`（含 `06b`）。在 Claude Desktop 上另讀 `docs/11`。
+2. 讀 `README.md`、`PURPOSE.md`、本檔、`docs/01` 到 `docs/10`（含 `06b`）和 `docs/12`。在 Claude Desktop 上另讀 `docs/11`。
 3. 之後每輪只讀 README 標「每輪必讀」的檔。
 
 ## 2. 盤點專案（唯讀，結論寫檔）
@@ -68,10 +73,11 @@ DIRECTOR/
 1. 預設用 `DIRECTOR/PO_PENDING.md`。要改用外部服務的頁面（可共享、可記錄回覆的那種），先問 PO：專案內容會因此放上外部服務。
 2. 格式照 `templates/PO_PENDING.md`。任何一步產生的問題都放這裡。
 3. 從這一步起，總監每一輪的第一個動作都是讀待決頁上 PO 已回覆的項目（`docs/03`）。
+4. 選擇頁（要使用者看圖選 A 或 B 的地方）在 Claude Desktop 上照 `docs/12` 第四節發布。小白模式直接用它當待決頁；一般模式要用，照第 1 點先問。
 
 ## 7. 壓縮門檻（25 萬）
 
-1. 填好 `DIRECTOR/director_work.json`（`window`: 250000，`plugins_off` 先留空）。
+1. 填好 `DIRECTOR/director_work.json`（`window`: 250000，`plugins_off` 先留空，`mode` 填一開始選的 `general` 或 `beginner`）。
 2. 報告模式：`python -I -X utf8 <WS>/DIRECTOR/tools/setup_project_settings.py --repo <REPO> --config <WS>/DIRECTOR/director_work.json`
 3. 確認每個 worktree 都是 `MISSING` 或 `OK`。`NOT_IGNORED` 代表 `.claude/settings.local.json` 會被 commit；沒有 `.gitignore` 的新 repo 一定會這樣。處理：
    - 先把 `.claude/settings.local.json` 加進 `<REPO>/.git/info/exclude`（只在本機、不進版控，所有 worktree 共用）：`echo .claude/settings.local.json >> <REPO>/.git/info/exclude`。重跑報告模式要變成 `MISSING`。
@@ -109,7 +115,7 @@ DIRECTOR/
 
 ## 12. 工作線編制草案（問 PO）
 
-在 `ACTIVE_WORKSTREAMS.md` 寫草案：要幾條 worker 線、各做什麼、要不要總管和清理員、各線的模型和 effort（`docs/05`）。第 2 步記下沒有產品方向時，先在待決頁問方向，草案寫成假設。**開新 session 會花額度，第一批由 PO 同意後才開。**
+在 `ACTIVE_WORKSTREAMS.md` 寫草案：要幾條 worker 線、各做什麼、要不要總管和清理員、各線的模型和 effort（`docs/05`）。第 2 步記下沒有產品方向時，草案寫成假設，等第 14 步初衷卡鎖定後再定。**開新 session 會花額度，第一批由 PO 同意後才開。** 小白模式由總監照 `docs/05` 定第一批並登記 DD，開線前用一句白話問使用者可不可以開始做。
 
 ## 13. 第一份回報給 PO
 
@@ -120,7 +126,13 @@ DIRECTOR/
 3. 驗證結果：壓縮門檻（報告模式 OK 與探測數字）、固定成本基準、記憶索引大小。沒驗證的照實寫 NOT_VERIFIED。
 4. 和本專案既有規則的衝突點，以及你照哪一邊做。
 5. 待決頁上要 PO 處理的項目代號與一句話摘要（plugin 清單、工作線編制、git 身分……）。
-6. 下一步：PO 回覆後要做的第一件事。
+6. 下一步：PO 回覆後要做的第一件事。專案還沒有鎖定的初衷卡時，下一步就是第 14 步。
+
+小白模式只寫三句白話（`docs/12` 第二節），技術細節留在檔案。
+
+## 14. 談需求、寫專案初衷卡（開工前）
+
+照 `docs/12` 第三節：和使用者談到 `templates/BRIEF.md` 每一列都填得出來，寫成 `DIRECTOR/BRIEF.md`，整張貼給使用者確認。使用者說對才改成 `LOCKED`，之後只有使用者能改。之後每張工單的 `TRACES_TO` 都寫 B 編號，派工前跑 `trace_report.py --decisions DIRECTOR/BRIEF.md`（`docs/12` 第五節）。卡沒鎖定前不派工單。
 
 ## 一定要先問 PO 的事
 
