@@ -14,7 +14,7 @@ Python 3.9 以上，只用標準函式庫。一律用 `python -I -X utf8 <tool> 
 | `round_check.py`（1.3.0） | 修正輪數：RESUME_STATE 的 `FIX_ROUNDS:` 到第 4 輪（之後每組）沒有根因研究就 FAIL | 不寫 | 不花 |
 | `report_vs_audit.py`（1.3.0） | 用動作紀錄核對 TASK REPORT：報告說跑過的指令（`RAN:` 和 TESTS / EVIDENCE / DONE 裡的 selftest、Unity、Blender、雜湊檢查）紀錄裡有沒有、exit 和時間對不對 | 不寫 | 不花 |
 | `trace_report.py` | 從工單、報告、裁決產生追溯表：需求 → 工單 → AC → 證據 → 裁決 | 不寫 | 不花 |
-| `metrics_report.py` | 從總監的檔案數出 `PURPOSE.md` 的成效數字：返工、中斷後重做、PO 介入、導入卡住，以及規格審查的花費 | 不寫 | 不花 |
+| `metrics_report.py` | 從總監的檔案數出 `PURPOSE.md` 的成效數字：返工、中斷後重做、PO 介入、導入卡住，以及規格審查的花費；`--run` 另數接手演練的決策、重問、PO 操作和第一個可用預覽的時間 | 不寫 | 不花 |
 | `vocabulary.json` | 判定、下一步、RESULT、治理模式、證據等級等固定用詞的唯一來源；`gate_check.py` 讀它 | — | — |
 | `scope_check.py` | 比對實際改動和工單的 SCOPE / FORBIDDEN | 不寫 | 不花 |
 | `evidence_record.py` | 跑驗收指令，留下 exit code、輸出結尾、產物 SHA-256；之後可重新比對 | `run` 寫一份小 JSON，不覆蓋舊的 | 不花 |
@@ -242,7 +242,7 @@ python -I -X utf8 doctor.py --probe --director <DIRECTOR>        # 容器裡：�
   - `MISSING`：沒設定。
   - `WARN`、`INFO`、`VERSION` 只是說明，不算失敗。
 - 啟動資料夾（1.3.0）：settings 只從 session 啟動的資料夾讀。doctor 從 `~/.claude/projects` 的對話紀錄數出最近 `--launch-days` 天（預設 30）各 worktree 啟動過幾個 session，印 `INFO launch:`。有防護、卻沒有 session 從那裡啟動，印 `settings unread`；session 從沒有防護的 worktree 啟動、別的 worktree 卻有，印 `WARN launch folder unguarded`。有 `--sessions` 檔時，權限一項取各角色最寬鬆的結論，並檢查檔案權限。
-- 最後一行 `DOCTOR: enforced=n not_verified=m not_enforced=k missing=j warn=w`；有 NOT_ENFORCED 或 MISSING 就 exit 1。不在 git repo 裡 exit 2。
+- 最後一行 `DOCTOR: enforced=n not_verified=m not_enforced=k missing=j warn=w`；有 NOT_ENFORCED 或 MISSING 就 exit 1。不在 git repo 裡 exit 2。沒有 git 程式（2.1.0）也是 exit 2，印 `doctor: git not found (...)` 和裝 Git 或放上 PATH 的提示，不再當掉；git 拒絕讀別人擁有的 repo（dubious ownership）時另外說明。
 - **原生 Windows 上 doctor 一定 exit 1**：`isolation: NOT_ENFORCED (native Windows, no OS-level isolation for shell)`。這是實話，不是設定錯。
 - claude 版本：
   - 生效的那個依序取 `CLAUDE_CODE_EXECPATH`、`CLAUDE_PID` 那個程序的執行檔、PATH 上第一個 claude。另外列出 PATH 上每一個，以及 `~/.local/bin` 和 npm 全域資料夾裡不在 PATH 上的（標 `other`）。版本來自 `<exe> --version`，只在本機印，不呼叫模型。
@@ -364,6 +364,32 @@ python -I -X utf8 metrics_report.py --director <DIRECTOR> [--since YYYY-MM-DD] [
 - 額度不在這裡算，跑 `usage_report.py`。沒有東西可數時印 `UNKNOWN`，不印 0：來源檔不存在、一份裁決都沒有（返工）、一份工單都沒有（改版）、`DIRECTOR_LOG` 沒有 `RESUMED` 行（中斷後遺失）。只數得到檔案裡記下的事。
 - 文末「沒計入的檔案」列出像工單（檔名 `WO-` 開頭或放在 `orders` 資料夾）卻沒有 `ISSUED_BY =` 行的檔案；加 `--since` 時另列被略過的工單和沒有日期、照算的工單。
 
+### metrics_report --run（2.1.0，shadow：只讀、只多印一節）
+
+```text
+python -I -X utf8 metrics_report.py --run <run 資料夾> [--compare <基準 run 資料夾>] [--director <DIRECTOR>]
+```
+
+接手演練（`docs/06b`「接手演練」）每一輪一個 run 資料夾，放在 `DIRECTOR/research/<run>/`：
+
+- `run.json`：`{"v": 1, "run_id": "...", "started_at": "2026-11-08T10:00:00+08:00"}`。沒有這個檔，就用最早的 `run_started` 事件當開始時間。
+- `events/*.json`：每個檔是一筆事件或一串事件。每筆都要有 `v: 1`、`event_id`、`type`、`at`（ISO 8601，**要帶時區**，`Z` 也可以）；可以另記 `recorded_at`、`source`。各 type 另外要的欄位：
+
+| type | 另外要的欄位 | 算進哪裡 |
+|---|---|---|
+| `run_started` | 無 | 開始時間（沒有 `run.json` 時） |
+| `asked` | `decision_id`、`topic_id`、`scope_id`、`ask_id` | 決策「提出」；重問 |
+| `answer_received` | `decision_id`、`ask_id` | 決策「已回覆」 |
+| `applied`、`closed` | `decision_id` | 只記錄，不另算 |
+| `withdrawn` | `decision_id` | 決策「撤回」（已回覆的不算撤回） |
+| `po_action` | 無；可加 `kind`（click、type、paste…）和 `count`（正整數，預設 1） | PO 操作次數 |
+| `preview_ready` | 無 | 第一個可用預覽 = 最早的 `preview_ready` − 開始時間（分鐘） |
+
+- 同一個 `event_id` 只算一次（照檔名順序取第一筆）；內容不同的會註明。缺欄位、不認得的 type、時間沒帶時區的事件不算，列出檔名和第幾筆。
+- 決策依 `decision_id` 去重：提出、已回覆、還在等（提出 − 已回覆 − 撤回）、撤回。重問：同一個 `topic_id` + `scope_id` 有幾個不同的 `ask_id`，減 1 再加總；同一個 `ask_id` 重送不算重問。
+- `--compare`：省下 = 基準 − 本次（正數表示本次比較少），PO 操作另印百分比，基準是 0 時百分比寫 UNKNOWN。沒有開始時間或沒有 `preview_ready` 時預覽時間寫 UNKNOWN，不寫 0。
+- 不加 `--run` 時輸出和以前完全相同；`--director` 和 `--run` 至少給一個。run 資料夾不存在：exit 1。
+
 ## scope_check.py
 
 ```text
@@ -389,6 +415,7 @@ python -I -X utf8 evidence_record.py verify <紀錄.json> --rerun-recorded   # �
 ```
 
 - 紀錄放 repo 外的工作資料夾。只留最後 40 行（`--tail`）、每行最多 400 字；要完整輸出就加 `--log <檔案>`。
+- 沒有 git（2.1.0，例如從 ZIP 解開的規則包）：`run` 照樣跑指令、寫紀錄，`git` 欄是 `{"head": null, "dirty": null}`，stderr 印一行 `git metadata not available (git not found ...)`。這種紀錄在 `gate_check --match --evidence-dir` 算「沒有 git HEAD 的紀錄」（Strict 失敗、Standard 提示）。`verify` 不加 `--rerun` 照常可用；`--rerun` 要 git，沒有就 `NOT_RUN git not found ...`、exit 2，絕不算通過。
 - 螢幕只印一行結論，指令本身的 exit code 原樣傳回。
 - 指令和輸出結尾會照原樣存檔，不要把密鑰放進指令。
 - `verify` 先查紀錄有沒有 `run` 寫的每個欄位（缺欄位或型別不對：`NOT_RUN not an evidence record`，exit 2；沒有 `schema` 的舊紀錄照讀，印提示），再比對產物雜湊。結論行把三件事分開印：`integrity=same|changed`（產物和紀錄時相同）、`test=not-rerun|passed|failed(...)`（只有 `--rerun` 跑核准的檢查而且 exit 0 才是 `passed`；不重跑就是 `not-rerun`，不算重跑過）、`artifacts=N missing=M`（紀錄時就缺的、現在不見的都算 missing）。有任何一項不對就是 `MISMATCH`，exit 1；產物缺了絕不會 OK。會變動的產物（含時間戳）重跑後一定不同，這種就只比 exit code 和人工看的部分。
@@ -541,6 +568,7 @@ python -I -X utf8 status_gen.py --out <DIRECTOR>/status.py --config templates/st
 - 一般段：LOG（log 尾段）、HASH（雜湊檔尾段、`--checksum` 檔的 SHA-256）、DISK（GiB）、GIT（分支、領先 / 落後、改動數、最近的 commit）、OUT（最新輸出）。
 - 總監段（設定檔，都選用）：`po_page`（待決頁的計數：每項一個 regex，或 JSON 頁的 `list` 加 `field` / `value`）、`orders`（沒有結案字樣的工單）、`pending_sends`（還沒勾的 `- [ ]`）、`audit`（每份動作紀錄最近 `hours` 小時的筆數、被擋次數、讀 log 次數、session 數；讀 log 的判斷照抄 `poll_hint.py`）、`processes`（命令列含某字串的程序有沒有在跑）。
 - 讀不到的路徑印 MISSING；磁碟低於門檻、讀不到待決頁或程序沒在跑時 exit 1。
+- 2.1.0（shadow）：待決頁是文字頁（沒有 `extract`）時，若有項目 `STATUS: open` 但 `ANSWER:` 已填（不算空白或 `<…>` 佔位），多印一行 `PO hint: N item(s) still STATUS open with an ANSWER filled in (ID…)`：PO 可能已回覆但沒改狀態，計數會漏掉，要到頁上讀。exit code 不變。
 - 已存在的 `--out` 要加 `--force` 才覆蓋。
 
 ## round_check.py（1.3.0）
@@ -602,7 +630,9 @@ python -I -X utf8 choice_reconcile.py status   --db <DIRECTOR>/choice_inbox.sqli
 python -I -X utf8 selftest.py
 ```
 
-改過任何工具、`vocabulary.json`、`docs/02`、範本或每輪必讀的文件就跑一次。也會檢查：文件和範本裡的固定用詞和 `vocabulary.json` 一致；README 標「每輪必讀」的文件合計不超過上限（`MUST_READ_LIMIT`，2026-11-06 為 12,392 bytes）。要提高上限，commit 訊息寫明原因。GitHub Actions 在每次 push 和 PR 跑同一支（`.github/workflows/selftest.yml`）。
+改過任何工具、`vocabulary.json`、`docs/02`、範本或每輪必讀的文件就跑一次。也會檢查：文件和範本裡的固定用詞和 `vocabulary.json` 一致；README 標「每輪必讀」的文件合計不超過上限（`MUST_READ_LIMIT`，2.1.0 起為 9,550 bytes：四份必讀從 12,433 減到 9,550）。要提高上限，commit 訊息寫明原因。GitHub Actions 在每次 push 和 PR 跑同一支（`.github/workflows/selftest.yml`），另外在 PATH 上沒有 git 時再跑一次。
+
+- 沒有 git（2.1.0）：要建 git 測試資料的測試組整組略過，每組印一行 `SKIP <測試組>: needs git, none on PATH`，最後一行寫 `skipped N git group(s)`；其餘照跑，有失敗照樣 exit 1。有 git 時這些測試組照常跑，建資料失敗仍是失敗。`test_no_git` 自己把 git 從 PATH 拿掉，確認 `evidence_record run` 仍寫紀錄、`--rerun` 是 NOT_RUN、doctor 說沒有 git。
 
 ## 建議另外寫的（依專案）
 

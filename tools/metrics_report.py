@@ -21,8 +21,19 @@ A number with nothing to count from prints UNKNOWN, never 0: no verdict, no orde
 source file. --since drops log lines, verdicts and orders dated before the day, and PO entries CREATED before it;
 a PO entry with no CREATED date is counted and shown as UNDATED. Files that look like orders (WO-*.md, or under a folder named orders) but were not counted
 are listed by name at the end, with the reason. Exit 0, or 1 when DIRECTOR is missing.
+
+  metrics_report.py [--director DIRECTOR] --run RUN_DIR [--compare BASE_RUN_DIR]     (2.1.0, shadow: only reads)
+
+--run adds the rehearsal numbers of one run folder (docs/06b 接手演練; format in tools/README.md): time to the first
+usable preview, decisions by decision_id (asked, answered, waiting, withdrawn), re-asks (per topic_id + scope_id, the
+distinct ask_id count minus 1) and PO operations (po_action, each `count` times, default 1). Events come from
+RUN_DIR/events/*.json; a repeated event_id counts once; an event with a missing field or a time without its zone is
+listed and left out. The start is run.json `started_at`, else the earliest run_started event. --compare prints
+saved = baseline - this run; the percentage is UNKNOWN when the baseline is 0. Exit 1 when a run folder is missing.
+Without --run the output is the same as before.
 """
 import argparse
+import datetime
 import importlib.util
 import json
 import pathlib
@@ -38,6 +49,10 @@ CONFIG_VERSION = 1
 PO_DEFAULTS = {"po_pending_files": ["PO_PENDING.md"], "po_item_pattern": r"^\s*ID\s*:\s*(OD|ACT)-\w+",
                "po_open_pattern": r"^\s*STATUS\s*:\s*open\b"}
 CREATED = re.compile(r"\bCREATED\s*:\s*(\d{4}-\d{2}-\d{2})")
+RUN_VERSION = 1
+REQUIRED = {"run_started": (), "asked": ("decision_id", "topic_id", "scope_id", "ask_id"),
+            "answer_received": ("decision_id", "ask_id"), "applied": ("decision_id",), "closed": ("decision_id",),
+            "withdrawn": ("decision_id",), "po_action": (), "preview_ready": ()}  # event type -> the string fields it needs
 
 
 def po_entries(text, item):
@@ -109,13 +124,146 @@ def next_step(text):
     return re.split(r"[:：]", step, maxsplit=1)[-1].strip()
 
 
+def stamp(value):
+    """An ISO 8601 time with its zone, as an aware datetime; None when it is missing, unreadable or has no zone."""
+    if not isinstance(value, str):
+        return None
+    try:
+        moment = datetime.datetime.fromisoformat(value.strip()[:-1] + "+00:00" if value.strip().endswith("Z") else value.strip())
+    except ValueError:
+        return None
+    return moment if moment.tzinfo is not None else None
+
+
+def run_events(folder):
+    """(events, notes) from folder/events/*.json, each file one event or a list of them. An event needs v=1, a string
+    event_id, a known type and an `at` time with its zone; a repeated event_id counts once (the first in file order)."""
+    events, seen, notes = [], {}, {"bad": [], "duplicate": 0, "conflict": 0}
+    for path in sorted((folder / "events").glob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError) as e:
+            notes["bad"].append(f"{path.name}（{type(e).__name__}）")
+            continue
+        for n, event in enumerate(data if isinstance(data, list) else [data]):
+            where = f"{path.name}#{n + 1}" if isinstance(data, list) else path.name
+            fields = REQUIRED.get(event.get("type")) if isinstance(event, dict) else None
+            if (fields is None or event.get("v") != RUN_VERSION or not isinstance(event.get("event_id"), str)
+                    or stamp(event.get("at")) is None or any(not isinstance(event.get(key), str) for key in fields)):
+                notes["bad"].append(where)
+                continue
+            if event["event_id"] in seen:
+                notes["duplicate"] += 1
+                notes["conflict"] += seen[event["event_id"]] != event
+                continue
+            seen[event["event_id"]] = event
+            events.append(event)
+    return events, notes
+
+
+def run_numbers(folder):
+    """The rehearsal numbers of one run folder (docs/06b 接手演練): decisions, re-asks, PO operations, first preview."""
+    events, notes = run_events(folder)
+    of = lambda kind: [event for event in events if event["type"] == kind]
+    asked = {event["decision_id"] for event in of("asked")}
+    answered = {event["decision_id"] for event in of("answer_received")} & asked
+    withdrawn = {event["decision_id"] for event in of("withdrawn")} & asked - answered
+    asks = {}
+    for event in of("asked"):
+        asks.setdefault((event["topic_id"], event["scope_id"]), set()).add(event["ask_id"])
+    counts = [event.get("count", 1) for event in of("po_action")]
+    bad_count = sum(1 for count in counts if not (isinstance(count, int) and not isinstance(count, bool) and count > 0))
+    kinds = {}
+    for event in of("po_action"):
+        count = event.get("count", 1)
+        if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+            kinds[event.get("kind", "?")] = kinds.get(event.get("kind", "?"), 0) + count
+    started = None
+    run_file = folder / "run.json"
+    if run_file.is_file():
+        try:
+            started = stamp(json.loads(run_file.read_text(encoding="utf-8-sig")).get("started_at"))
+        except (OSError, ValueError, AttributeError):
+            notes["bad"].append("run.json")
+    starts = [stamp(event["at"]) for event in of("run_started")]
+    if started is None and starts:
+        started = min(starts)
+    previews = [stamp(event["at"]) for event in of("preview_ready")]
+    first = (min(previews) - started).total_seconds() / 60 if started and previews else None
+    return {"events": len(events), "notes": notes, "asked": len(asked), "answered": len(answered),
+            "withdrawn": len(withdrawn), "waiting": len(asked - answered - withdrawn),
+            "reasks": sum(len(ids) - 1 for ids in asks.values()), "po": sum(kinds.values()) if events else None,
+            "po_kinds": kinds, "po_bad_count": bad_count, "started": started is not None, "previews": len(previews),
+            "first_preview": first if first is None or first >= 0 else None, "preview_before_start": first is not None and first < 0}
+
+
+def preview_cell(n):
+    if n["first_preview"] is not None:
+        return f"{n['first_preview']:.1f} 分鐘"
+    if n["preview_before_start"]:
+        return "UNKNOWN：第一個 preview_ready 早於開始時間"
+    return "UNKNOWN：" + ("沒有開始時間（run.json 的 started_at 或 run_started 事件）" if not n["started"] else "沒有 preview_ready 事件")
+
+
+def run_report(folder, base_folder):
+    """Print the --run section (and --compare): only reads the run folders."""
+    n = run_numbers(folder)
+    notes = n["notes"]
+    print(f"\n# 接手演練數字\n\nrun：{folder.name}。事件 {n['events']} 筆" + (f"；重複 event_id 略過 {notes['duplicate']} 筆" if notes["duplicate"] else "")
+          + (f"（其中內容不同 {notes['conflict']} 筆，取第一筆）" if notes["conflict"] else "")
+          + (f"；格式不對沒算 {len(notes['bad'])} 筆：{'、'.join(notes['bad'])}" if notes["bad"] else "") + "。\n")
+    print("| 指標 | 數字 | 來源 |\n|---|---|---|")
+    print(f"| 第一個可用預覽 | {preview_cell(n)} | 開始時間 → 最早的 `preview_ready` |")
+    decisions = (f"提出 {n['asked']}、已回覆 {n['answered']}、還在等 {n['waiting']}、撤回 {n['withdrawn']}" if n["asked"]
+                 else "UNKNOWN：沒有 asked 事件")
+    print(f"| 決策 | {decisions} | `asked` / `answer_received` / `withdrawn`，依 decision_id 去重 |")
+    print(f"| 重問 | {n['reasks'] if n['asked'] else 'UNKNOWN：沒有 asked 事件'} | 同一 topic_id + scope_id 的不同 ask_id 數減 1 |")
+    ops = (f"{n['po']}" + (f"（{'、'.join(f'{k} {v}' for k, v in sorted(n['po_kinds'].items()))}）" if n["po_kinds"] else "")
+           if n["po"] is not None else "UNKNOWN：沒有事件")
+    if n["po_bad_count"]:
+        ops += f"；count 不是正整數沒算 {n['po_bad_count']} 筆"
+    print(f"| PO 操作 | {ops} | `po_action`（每筆 count 次，預設 1） |")
+    if base_folder is None:
+        return
+    b = run_numbers(base_folder)
+    print(f"\n## 和基準比\n\n基準 run：{base_folder.name}。省下 = 基準 − 本次；正數是本次比較少。\n")
+    print("| 指標 | 基準 | 本次 | 省下 |\n|---|---|---|---|")
+    if b["po"] is None or n["po"] is None:
+        saved = "UNKNOWN：有一邊沒有事件"
+    else:
+        saved = f"{b['po'] - n['po']}" + (f"（{(b['po'] - n['po']) * 100 / b['po']:.0f}%）" if b["po"]
+                                          else "（百分比 UNKNOWN：基準是 0）")
+    print(f"| PO 操作 | {b['po'] if b['po'] is not None else 'UNKNOWN'} | {n['po'] if n['po'] is not None else 'UNKNOWN'} | {saved} |")
+    both = b["first_preview"] is not None and n["first_preview"] is not None
+    print(f"| 第一個可用預覽 | {preview_cell(b)} | {preview_cell(n)} | "
+          + (f"{b['first_preview'] - n['first_preview']:.1f} 分鐘 |" if both else "UNKNOWN |"))
+    print(f"| 重問 | {b['reasks']} | {n['reasks']} | " + (f"{b['reasks'] - n['reasks']} |" if b["asked"] and n["asked"] else "UNKNOWN |"))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--director", required=True, help="the DIRECTOR folder")
+    ap.add_argument("--director", help="the DIRECTOR folder")
     ap.add_argument("--since", metavar="YYYY-MM-DD")
     ap.add_argument("--config", help="director_work.json (default: DIRECTOR/director_work.json when it exists)")
+    ap.add_argument("--run", metavar="RUN_DIR", help="a rehearsal run folder: events/*.json and run.json (docs/06b)")
+    ap.add_argument("--compare", metavar="BASE_RUN_DIR", help="with --run: the baseline run to subtract from")
     a = ap.parse_args()
+    if not a.director and not a.run:
+        ap.error("give --director, --run, or both")
+    if a.compare and not a.run:
+        ap.error("--compare needs --run")
     sys.stdout.reconfigure(encoding="utf-8")
+    code = director_report(a, ap) if a.director else 0
+    if code == 0 and a.run:
+        for folder in filter(None, (a.run, a.compare)):
+            if not pathlib.Path(folder).is_dir():
+                print(f"FAIL run folder not found: {folder}")
+                return 1
+        run_report(pathlib.Path(a.run), pathlib.Path(a.compare) if a.compare else None)
+    return code
+
+
+def director_report(a, ap):
     root = pathlib.Path(a.director)
     if not root.is_dir():
         print(f"FAIL folder not found: {a.director}")

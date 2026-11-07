@@ -172,8 +172,30 @@ def can_resolve(name):
 
 def git_dirs(repo):
     """(git dir, common dir), absolute; empty strings when git cannot tell."""
-    return tuple(subprocess.run(["git", "rev-parse", "--path-format=absolute", flag], cwd=repo, capture_output=True,
-                                text=True).stdout.strip() for flag in ("--git-dir", "--git-common-dir"))
+    out = []
+    for flag in ("--git-dir", "--git-common-dir"):
+        try:  # explicit UTF-8: git prints paths in UTF-8; the locale codec (cp950, cp1252) breaks non-ASCII paths
+            out.append(subprocess.run(["git", "rev-parse", "--path-format=absolute", flag], cwd=repo, capture_output=True,
+                                      encoding="utf-8", errors="replace").stdout.strip())
+        except OSError:
+            out.append("")
+    return tuple(out)
+
+
+def git_top(cwd):
+    """(top-level folder, None) or (None, why): git missing, git's safe.directory refusal and no repo read differently."""
+    try:
+        top = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=cwd, capture_output=True, encoding="utf-8",
+                             errors="replace")
+    except OSError as error:
+        return None, f"git not found ({error}); install Git or put it on PATH, doctor checks a git worktree"
+    if top.returncode == 0:
+        return top.stdout.strip(), None
+    err = top.stderr.strip()
+    if "dubious ownership" in err:
+        return None, (f"git refuses this repo, it belongs to another user (dubious ownership): {err.splitlines()[0][:200]}; "
+                      "use your own copy, or ask the PO before adding it to safe.directory")
+    return None, "not inside a git repo; pass --repo <worktree>"
 
 
 def git_mode(dirs):
@@ -285,11 +307,11 @@ def main():
         counts[status] = counts.get(status, 0) + 1
         print(f"{status:24} {name}: {detail}")
 
-    top = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=a.repo or os.getcwd(), capture_output=True, text=True)
-    if top.returncode != 0:
-        print("doctor: not inside a git repo; pass --repo <worktree>", file=sys.stderr)
+    top, why = git_top(a.repo or os.getcwd())
+    if why:
+        print(f"doctor: {why}", file=sys.stderr)
         return 2
-    repo = pathlib.Path(top.stdout.strip())
+    repo = pathlib.Path(top)
     home = pathlib.Path(a.home) if a.home else pathlib.Path.home()
     managed = pathlib.Path(a.managed) if a.managed else pathlib.Path(
         r"C:\Program Files\ClaudeCode\managed-settings.json" if os.name == "nt" else "/etc/claude-code/managed-settings.json")

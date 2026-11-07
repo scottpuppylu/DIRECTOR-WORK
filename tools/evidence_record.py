@@ -176,12 +176,21 @@ def execute(command, cwd, tail_lines, timeout, log_path, program=None):
 
 
 def git_state(cwd):
+    """The git metadata of a run: optional. No git program or no worktree gives nulls; the record is still written."""
     def ask(*args):
-        done = subprocess.run(["git", "-C", cwd, *args], capture_output=True)
+        try:
+            done = subprocess.run(["git", "-C", cwd, *args], capture_output=True)
+        except OSError as error:  # no git program on PATH (rules pack unpacked from a ZIP, minimal machine)
+            missing.append(str(error))
+            return None
         return done.stdout.decode("utf-8", "replace") if done.returncode == 0 else None
 
+    missing = []
     head = ask("rev-parse", "HEAD")
-    status = ask("status", "--porcelain")
+    status = ask("status", "--porcelain") if not missing else None
+    if missing:
+        print(f"EVIDENCE: git metadata not available (git not found: {missing[0][:120]}); recording the run anyway",
+              file=sys.stderr)
     return {"head": head.strip() if head else None, "dirty": bool(status.strip()) if status is not None else None}
 
 
@@ -250,7 +259,11 @@ GIT_ENV["GIT_NO_REPLACE_OBJECTS"] = "1"
 
 
 def git_trusted(repo, *args, raw=False):
-    done = subprocess.run(["git", "-c", "core.useReplaceRefs=false", "-C", str(repo), *args], capture_output=True, env=GIT_ENV)
+    try:
+        done = subprocess.run(["git", "-c", "core.useReplaceRefs=false", "-C", str(repo), *args], capture_output=True,
+                              env=GIT_ENV)
+    except OSError as error:  # the trusted rerun needs git: no git program is a refusal (NOT_RUN), never a pass
+        raise Refused(f"git not found, the trusted rerun needs it: {error}")
     if done.returncode:
         raise Refused(f"git {' '.join(args)} failed in {repo}: {decode(done.stderr).strip()[:200]}")
     return done.stdout if raw else decode(done.stdout).strip()
@@ -327,8 +340,11 @@ def materialize(repo, commit, dest):
     for mode, kind, sha, path in entries:
         if kind == "commit":
             (dest / path).mkdir(parents=True, exist_ok=True)
-    proc = subprocess.Popen(["git", "-c", "core.useReplaceRefs=false", "-C", str(repo), "cat-file", "--batch"],
-                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=GIT_ENV)
+    try:
+        proc = subprocess.Popen(["git", "-c", "core.useReplaceRefs=false", "-C", str(repo), "cat-file", "--batch"],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=GIT_ENV)
+    except OSError as error:
+        raise Refused(f"git not found, the trusted rerun needs it: {error}")
 
     def feed():
         try:
