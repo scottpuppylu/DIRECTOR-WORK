@@ -1,7 +1,8 @@
 """Check the format of a RESUME_STATE, work order, task report or gate verdict, so a rule fails in a script instead of
 relying on the model remembering it.
 
-Prints OK / FAIL per file with one line per problem; exit 1 when anything fails. Only reads.
+Prints OK / FAIL per file with one line per problem; exit 1 when anything fails. Only reads, except `--snapshot`,
+which writes one snapshot file.
 Passing means the file follows the format and the rules below. It does not mean the work is correct: reviewing the
 evidence and the product is still the Director's job (docs/02, docs/07).
 
@@ -65,6 +66,30 @@ evidence and the product is still the Director's job (docs/02, docs/07).
              --evidence-dir and --dispatch-log; what they would show is NOT_CHECKED without them. Exit 1 when
              anything is lacking. Only reads, like every check here.
 
+2.1 (shadow: these only add `~` notes and never change the exit code; an order without the new fields passes as before):
+  --brief BRIEF.md
+             alone: print the brief's `BRIEF_REVISION = n` and `BRIEF_FINGERPRINTS_V1 = {"B-2": "<sha256>"}` lines for an
+             order to pin. A row's fingerprint is sha256 of UTF-8 `brief-row-v1\n` + the compact JSON array
+             [ID, 類別, 內容, 怎麼算做到] of the 編號 table row (cells read by split_cells, ID without ** or backticks).
+             With --order / --match / --preflight: `~ BRIEF_STALE <WO> <B> <AC-1,AC-2 | WHOLE_ORDER>` when a pinned row
+             changed or is gone (舊條件驗過，新條件待重驗 / 需求已取消), `~ BRIEF_UNCONFIRMED` (依據未確認) for a row listed
+             twice or not 4 cells wide, an order without pins that traces brief rows, or a traced row it did not pin. With
+             --dispatch-log, the latest whole line `BRIEF_LOCKED rev=<n> sha=<64 hex> snapshot=<path>` (path from the log's
+             folder) is the basis: a brief that is not it is compared through the locked snapshot (a draft is not the basis).
+  --snapshot DIR
+             with --brief (狀態 LOCKED, 版次 a number): write DIR/<版次>-<sha>.md atomically (temp file in DIR, fsync,
+             rename; an identical file is kept) and print the BRIEF_LOCKED line to log. With --hash ORDER: keep the order
+             as DIR/<WO-ID>-rev<n>-<sha>.md for --order-history.
+  --order-history DIR
+             with --match: evidence carried over by EVIDENCE_EQUIVALENT is compared with the fingerprints the old order
+             (found in DIR by its hash) pinned; a changed condition is `~ BRIEF_STALE`, no old order `~ BRIEF_UNCONFIRMED`.
+  --po-acceptance PO_ACCEPTANCE.json
+             the PO's acceptance records (schema po-acceptance-v1: candidate_id, commit, entry, entry_sha256,
+             manifest_sha256, offered_message_ref, reply_ref, outcome seen / changes / accepted / null, replied_at,
+             excerpt); a record missing a binding is `~ UNBOUND_PO_REPLY`. With --candidate the commit must be it.
+  A verdict may carry `ORDER_SHA256:` and `REPORT_SHA256:` (gate_check.py --hash of each file); with --match a
+             mismatch is `~ VERDICT_RECORD`.
+
 The hash only detects a changed order after the fact; it cannot stop anyone from editing it. An evidence record shows
 a command ran and passed, not that it tests the right thing.
 Lines starting with `~` are notes for the newer format (v0.10): they never fail a file.
@@ -79,6 +104,7 @@ The fixed words come from vocabulary.json next to this file.
 import argparse
 import hashlib
 import json
+import os
 import pathlib
 import re
 import sys
@@ -360,6 +386,384 @@ def equivalent_records(text):
             for m in (EQUIVALENT.fullmatch(line) for line in log_lines(text)) if m]
 
 
+# 2.1 (題1 P-1/P-4, 題4 P-2): the BRIEF's rows, what an order pinned of them, and the PO's reviews. Shadow: all of it
+# only adds notes; a file without the new fields reads as before.
+BRIEF_ROW_TAG = "brief-row-v1\n"
+UNCONFIRMED = "依據未確認"
+BRIEF_LOCKED = re.compile(LOG_DATE + r"BRIEF_LOCKED[ \t]+rev=(\d+)[ \t]+sha=([0-9a-fA-F]{64})(?:[ \t]+snapshot=([^\s|`]+))?"
+                          r"[ \t]*(?:\|[^`]*)?")
+PO_REVIEW = re.compile(LOG_DATE + r"PO_PRODUCT_REVIEW[ \t]+([A-Za-z]+-\d+)((?:[ \t]+[a-z_]+=[^\s|`]+)+)[ \t]*(?:\|[^`]*)?")
+PO_OUTCOMES = {"seen": "seen", "changes": "changes", "accepted": "accepted", "看過": "seen", "要求修改": "changes",
+               "接受": "accepted"}
+PO_ACCEPTANCE_SCHEMA = "po-acceptance-v1"
+HEX64 = re.compile(r"[0-9a-f]{64}")
+
+
+def id_prefix(name):
+    m = re.match(r"[A-Za-z]+", name)
+    return m.group(0).upper() if m else ""
+
+
+def id_sort(name):
+    m = re.fullmatch(r"([A-Za-z]+)-(\d+)", name)
+    return (m.group(1).upper(), int(m.group(2))) if m else (name, 0)
+
+
+def brief_table(text):
+    """({ID: [ID, 類別, 內容, 怎麼算做到]}, {ambiguous IDs}, problem or None) from the BRIEF's table whose header's first
+    cell is 編號 (lines inside a ``` / ~~~ fence are examples, not rows). An ID may be written in ** or backticks. A row
+    listed twice, or a row or header that is not 4 cells wide, makes its ID ambiguous: it gets no fingerprint
+    (依據未確認). problem: the brief has no such table."""
+    rows, ambiguous, width, found = {}, set(), None, False
+    for line in log_lines(text):
+        if not line.lstrip().startswith("|"):
+            width = None
+            continue
+        cells = split_cells(line)
+        if cells[0] == "編號":
+            width, found = len(cells), True
+            continue
+        ident = re.fullmatch(r"\*{0,2}`?([A-Za-z]+-\d+)`?\*{0,2}", cells[0]) if width is not None else None
+        if not ident:
+            continue
+        name = ident.group(1)
+        if name in rows or name in ambiguous or width != 4 or len(cells) != 4:
+            rows.pop(name, None)
+            ambiguous.add(name)
+            continue
+        rows[name] = [name] + cells[1:]
+    return rows, ambiguous, (None if found else "no table whose header starts with 編號")
+
+
+def brief_fingerprint(row):
+    """sha256 of UTF-8 `brief-row-v1\n` + the row as a compact JSON array [ID, 類別, 內容, 怎麼算做到] (ensure_ascii off,
+    separators `,` and `:`). Line endings, the spaces around a cell and the 版次 do not change it; a change to any of
+    the four cells does."""
+    data = BRIEF_ROW_TAG + json.dumps(list(row), ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(data.encode("utf-8")).hexdigest()
+
+
+def brief_revision(text):
+    m = re.search(r"^\s*[-*]?\s*版次\s*[:：]\s*(\d+)", text, re.M)
+    return int(m.group(1)) if m else None
+
+
+def brief_is_locked(text):
+    return bool(re.search(r"^\s*[-*]?\s*狀態\s*[:：]\s*LOCKED\b", text, re.M))
+
+
+def brief_locks(text):
+    """[(rev, sha, snapshot path or None)] from whole `BRIEF_LOCKED rev=<n> sha=<64 hex> [snapshot=<path>]` lines, read
+    like DISPATCH lines; the last one is the brief the PO locked."""
+    return [(int(m.group(1)), m.group(2).lower(), m.group(3))
+            for m in (BRIEF_LOCKED.fullmatch(line) for line in log_lines(text)) if m]
+
+
+def load_brief(path, log_text=None, log_path=None, notes=None):
+    """The brief to compare orders with: {"rows", "ambiguous", "problem", "revision", "label", "sha"}. With a log that
+    has BRIEF_LOCKED lines, a brief that is not the latest locked one is replaced by that lock's snapshot (a draft is
+    not the basis) when the snapshot is there with the logged hash; otherwise the brief is read and noted as
+    依據待確認."""
+    notes = notes if notes is not None else []
+    data = pathlib.Path(path).read_bytes()
+    text, label, sha = data.decode("utf-8-sig", errors="replace"), str(path), order_hash(data)
+    locks = brief_locks(log_text) if log_text else []
+    if locks and locks[-1][1] != sha:
+        rev, locked, snap = locks[-1]
+        snap_path = pathlib.Path(log_path).parent / snap if snap and log_path else None
+        if snap_path and snap_path.is_file() and order_hash(snap_path.read_bytes()) == locked:
+            notes.append(f"BRIEF: {path} is not the latest BRIEF_LOCKED (rev={rev} sha={locked[:12]}); a draft is not the "
+                         f"basis: compared with the locked snapshot {snap}")
+            text, label, sha = snap_path.read_bytes().decode("utf-8-sig", errors="replace"), snap, locked
+        else:
+            notes.append(f"BRIEF_UNCONFIRMED: {path} is not the latest BRIEF_LOCKED (rev={rev} sha={locked[:12]}) and its "
+                         f"snapshot {snap or '(none named)'} is missing or changed: 依據待確認")
+    elif log_text is not None and not locks:
+        notes.append("BRIEF: the log has no BRIEF_LOCKED line, so which brief the PO locked is 依據待確認 "
+                     "(`gate_check.py --brief BRIEF.md --snapshot DIRECTOR/brief-history` prints it)")
+    if not brief_is_locked(text):
+        notes.append(f"BRIEF: {label} does not say 狀態：LOCKED; a draft is 依據待確認")
+    rows, ambiguous, problem = brief_table(text)
+    return {"rows": rows, "ambiguous": ambiguous, "problem": problem, "revision": brief_revision(text), "label": label,
+            "sha": sha}
+
+
+def order_brief(text, notes=None):
+    """(BRIEF_REVISION or None, {B: fingerprint} or None) of an order. A value in another form is noted and read as
+    absent (shadow: never a problem). The fingerprints are a JSON object on the `BRIEF_FINGERPRINTS_V1 =` line; a
+    trailing ` # comment` is allowed."""
+    revision = pins = None
+    rev = re.search(r"^[ \t]*BRIEF_REVISION[ \t]*=[ \t]*(\S*)", text, re.M)
+    if rev and rev.group(1).isdigit():
+        revision = int(rev.group(1))
+    elif rev and notes is not None:
+        notes.append(f"BRIEF_REVISION: not a number ({rev.group(1) or 'empty'}); read as absent")
+    line = re.search(r"^[ \t]*BRIEF_FINGERPRINTS_V1[ \t]*=[ \t]*(.*)$", text, re.M)
+    if line:
+        m = re.search(r"\{.*\}", line.group(1))
+        try:
+            value = json.loads(m.group(0)) if m else None
+        except ValueError:
+            value = None
+        if isinstance(value, dict) and all(isinstance(k, str) and isinstance(v, str) and HEX64.fullmatch(v)
+                                           for k, v in value.items()):
+            pins = value
+        elif notes is not None:
+            notes.append('BRIEF_FINGERPRINTS_V1: not a JSON object {"B-2": "<64 lower-case hex>"}; read as absent')
+    return revision, pins
+
+
+def order_traces(text):
+    """(IDs on the TRACES_TO line, {AC: IDs of its 追溯 cell} or None when the AC table has no 追溯 column)."""
+    line = re.search(r"^[ \t]*TRACES_TO[ \t]*=[ \t]*(.*)$", text, re.M)
+    traced = ORDER_ID.findall(re.split(r"\s+#", line.group(1))[0]) if line else []
+    rows = ac_table(text)
+    per_ac = ({ac: ORDER_ID.findall(row.get("traces", "")) for ac, row in rows.items()}
+              if any("traces" in row for row in rows.values()) else None)
+    return traced, per_ac
+
+
+def brief_domain(brief, extra=()):
+    """The ID prefixes that are brief rows: those of the brief's rows, else of extra (an order's pins), else B."""
+    names = (set(brief["rows"]) | brief["ambiguous"]) if brief else set()
+    return {id_prefix(n) for n in names} or {id_prefix(n) for n in extra} or {"B"}
+
+
+def brief_acs(b, per_ac):
+    acs = [ac for ac, ids in (per_ac or {}).items() if b in ids]
+    return ",".join(acs) if acs else "WHOLE_ORDER"
+
+
+def brief_notes(order_text, order_path, brief, notes):
+    """Shadow notes for one order against the brief: BRIEF_STALE for a pinned row that changed or is gone,
+    BRIEF_UNCONFIRMED (依據未確認) for an ambiguous row, an order with no pins that traces brief rows, and a traced
+    row without a pin. A raised 版次 with the rows unchanged is no note."""
+    key = order_key(order_ids(order_text, order_path)) or "<WO-ID>"
+    revision, pins = order_brief(order_text, notes)
+    traced, per_ac = order_traces(order_text)
+    rows, ambiguous, domain = brief["rows"], brief["ambiguous"], brief_domain(brief, pins or ())
+    wanted = [b for b in dict.fromkeys(traced + [i for ids in (per_ac or {}).values() for i in ids])
+              if id_prefix(b) in domain]
+    if pins is None:
+        if wanted:
+            notes.append(f"BRIEF_UNCONFIRMED {key} {','.join(sorted(wanted, key=id_sort))}: {UNCONFIRMED}: the order has "
+                         "no BRIEF_FINGERPRINTS_V1, so a changed brief row is not detected (`gate_check.py --brief "
+                         "BRIEF.md` prints the lines to add)")
+        return
+    for b in sorted(set(wanted) | set(pins), key=id_sort):
+        acs = brief_acs(b, per_ac)
+        if b in ambiguous:
+            notes.append(f"BRIEF_UNCONFIRMED {key} {b}: {UNCONFIRMED}: {brief['label']} lists {b} twice or not as 4 cells")
+        elif b not in pins:
+            notes.append(f"BRIEF_UNCONFIRMED {key} {b}: {UNCONFIRMED}: the order traces {b} but BRIEF_FINGERPRINTS_V1 "
+                         "has no fingerprint for it")
+        elif b not in rows:
+            notes.append(f"BRIEF_STALE {key} {b} {acs}: {b} is no longer in {brief['label']}: 需求已取消，待調整範圍")
+        elif brief_fingerprint(rows[b]) != pins[b]:
+            same = revision is not None and revision == brief["revision"]
+            notes.append(f"BRIEF_STALE {key} {b} {acs}: the brief row changed since the order pinned it (BRIEF_REVISION "
+                         f"{revision if revision is not None else '?'}, brief 版次 "
+                         f"{brief['revision'] if brief['revision'] is not None else '?'})"
+                         + ("; 同版內容有變: the 版次 was not raised" if same else "") + ": 舊條件驗過，新條件待重驗")
+
+
+def find_order_snapshot(folder, sha):
+    """The file in folder whose order_hash is sha, or None."""
+    for path in sorted(pathlib.Path(folder).iterdir()) if folder and pathlib.Path(folder).is_dir() else []:
+        if path.is_file() and order_hash(path.read_bytes()) == sha:
+            return path
+    return None
+
+
+def carried_notes(ac, name, bound, binding, notes):
+    """Evidence carried over by EVIDENCE_EQUIVALENT (F-4): the brief rows this AC traced in the old order (found by its
+    hash in --order-history) against the brief now (or the new order's pins without --brief)."""
+    key = order_key(binding["ids"]) or "<WO-ID>"
+    brief, history = binding.get("brief"), binding.get("history")
+    old = find_order_snapshot(history, bound["sha"])
+    if old is None:
+        notes.append(f"BRIEF_UNCONFIRMED {key} {ac}: {name} is carried over from REVISION {bound['rev']} by "
+                     f"EVIDENCE_EQUIVALENT, but the order it was recorded for (sha {bound['sha'][:12]}) is not in "
+                     + (f"--order-history {history}" if history else "an --order-history folder")
+                     + ", so its brief condition is not compared: 沿用依據未確認")
+        return
+    old_text = old.read_bytes().decode("utf-8-sig", errors="replace")
+    _, old_pins = order_brief(old_text)
+    traced, per_ac = order_traces(old_text)
+    pinned = binding.get("pinned") or {}
+    domain = brief_domain(brief, set(old_pins or ()) | set(pinned))
+    for b in [b for b in (per_ac.get(ac, []) if per_ac is not None else traced) if id_prefix(b) in domain]:
+        was = (old_pins or {}).get(b)
+        now = (brief_fingerprint(brief["rows"][b]) if b in brief["rows"] else None) if brief else pinned.get(b)
+        if was is None:
+            notes.append(f"BRIEF_UNCONFIRMED {key} {b} {ac}: {name} is carried over from REVISION {bound['rev']}, whose "
+                         f"order ({old.name}) pinned no fingerprint for {b}: 沿用依據未確認")
+        elif now != was:
+            notes.append(f"BRIEF_STALE {key} {b} {ac}: {name} was recorded for REVISION {bound['rev']} under the old "
+                         f"condition of {b} and carried over by EVIDENCE_EQUIVALENT: 舊條件驗過，新條件待重驗")
+
+
+def write_snapshot(data, folder, name):
+    """(path, written) of folder/name holding data, written atomically: a temp file in the same folder, fsync, then a
+    rename over the name. A file already there with the same hash is kept, so a retry writes nothing."""
+    import tempfile
+    folder = pathlib.Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / name
+    if target.is_file() and order_hash(target.read_bytes()) == order_hash(data):
+        return target, False
+    fd, tmp = tempfile.mkstemp(prefix=".snapshot-", suffix=".part", dir=str(folder))
+    try:
+        with os.fdopen(fd, "wb") as out:
+            out.write(data)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(tmp, str(target))
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return target, True
+
+
+def print_brief(path, folder=None):
+    """Print the brief's BRIEF_REVISION and BRIEF_FINGERPRINTS_V1 lines; with folder, write its snapshot and print the
+    BRIEF_LOCKED line. True when the brief has no 編號 table."""
+    data = pathlib.Path(path).read_bytes()
+    text, sha = data.decode("utf-8-sig", errors="replace"), order_hash(data)
+    rows, ambiguous, problem = brief_table(text)
+    if problem:
+        print(f"FAIL brief {path}\n  - {problem}")
+        return True
+    revision = brief_revision(text)
+    print(f"BRIEF {path}: 版次 {revision if revision is not None else '?'}, {len(rows)} row(s), sha {sha}")
+    print(f"  BRIEF_REVISION = {revision if revision is not None else '<版次>'}")
+    print("  BRIEF_FINGERPRINTS_V1 = " + json.dumps({b: brief_fingerprint(rows[b]) for b in sorted(rows, key=id_sort)},
+                                                  ensure_ascii=False))
+    for b in sorted(ambiguous, key=id_sort):
+        print(f"  ~ BRIEF_UNCONFIRMED {b}: {UNCONFIRMED}: listed twice or not as 4 cells; no fingerprint")
+    if folder:
+        target, written = write_snapshot(data, folder, f"{revision}-{sha}.md")
+        print(f"  SNAPSHOT {target} ({'written' if written else 'already there, kept'})")
+        print(f"  BRIEF_LOCKED rev={revision} sha={sha} snapshot={pathlib.Path(folder).name}/{target.name}")
+    return False
+
+
+def po_reviews(text):
+    """The PO's product reviews in the Director's log, whole lines read like DISPATCH: `PO_PRODUCT_REVIEW <WO-ID>
+    candidate=<7-40 hex> outcome=seen|changes|accepted [ref=<message>] [manifest=<64 hex>] [brief=B-2:<64 hex>,...]`
+    (看過 / 要求修改 / 接受 read as the three outcomes). [{"order", "candidate", "outcome", "ref", "manifest", "brief",
+    "problem", "line"}]; problem names what does not bind, or is None."""
+    found = []
+    for line in log_lines(text):
+        m = PO_REVIEW.fullmatch(line)
+        if not m:
+            continue
+        tokens = dict(token.split("=", 1) for token in m.group(2).split())
+        brief, problem = {}, []
+        for part in filter(None, tokens.get("brief", "").split(",")):
+            b, _, fp = part.partition(":")
+            if ORDER_ID.fullmatch(b) and HEX64.fullmatch(fp.lower()):
+                brief[b] = fp.lower()
+            else:
+                problem.append(f"brief={part} is not B-n:<64 hex>")
+        candidate = tokens.get("candidate", "").lower()
+        if not re.fullmatch(r"[0-9a-f]{7,40}", candidate):
+            problem.append("candidate= is not a commit (7 to 40 hex digits)")
+        outcome = PO_OUTCOMES.get(tokens.get("outcome", ""))
+        if outcome is None:
+            problem.append("outcome= is not seen / changes / accepted")
+        manifest = tokens.get("manifest", "").lower() or None
+        if manifest is not None and not HEX64.fullmatch(manifest):
+            problem.append("manifest= is not 64 hex digits")
+        found.append({"order": m.group(1), "candidate": candidate, "outcome": outcome, "ref": tokens.get("ref"),
+                      "manifest": manifest, "brief": brief, "problem": "; ".join(problem) or None, "line": line.strip()})
+    return found
+
+
+def acceptance_records(text):
+    """(records, problem) of a PO_ACCEPTANCE.json: one object, a list of them, or {"records": [...]}."""
+    try:
+        data = json.loads(text)
+    except ValueError as error:
+        return [], f"not JSON ({error})"
+    if isinstance(data, dict) and isinstance(data.get("records"), list):
+        data = data["records"]
+    if isinstance(data, dict):
+        data = [data]
+    return (data, None) if isinstance(data, list) else ([], "not a JSON object or list")
+
+
+def acceptance_problems(record, candidate=None):
+    """What keeps one PO_ACCEPTANCE record from binding the PO's reply to one product: candidate ID, commit (40 hex),
+    entry file, manifest SHA-256 and the message it was offered in; an outcome needs the reply's message too."""
+    if not isinstance(record, dict):
+        return ["not a JSON object"]
+    out = []
+    if record.get("schema") != PO_ACCEPTANCE_SCHEMA:
+        out.append(f"schema is {json.dumps(record.get('schema'), ensure_ascii=False)}, not {PO_ACCEPTANCE_SCHEMA}")
+    for key in ("candidate_id", "entry", "offered_message_ref"):
+        if not (isinstance(record.get(key), str) and record[key].strip()):
+            out.append(f"{key} missing")
+    commit = record.get("commit")
+    if not (isinstance(commit, str) and re.fullmatch(r"[0-9a-fA-F]{40}", commit)):
+        out.append("commit is not 40 hex digits")
+    elif candidate and commit.lower() != candidate:
+        out.append(f"commit {commit[:12]} is not the --candidate {candidate[:12]}")
+    for key, needed in (("manifest_sha256", True), ("entry_sha256", False)):
+        value = record.get(key)
+        if (value is not None or needed) and not (isinstance(value, str) and HEX64.fullmatch(value.lower())):
+            out.append(f"{key} is not 64 hex digits")
+    outcome = record.get("outcome")
+    if outcome is not None and not (isinstance(outcome, str) and outcome in PO_OUTCOMES):
+        out.append("outcome is not seen / changes / accepted / null")
+    elif outcome is not None and not (isinstance(record.get("reply_ref"), str) and record["reply_ref"].strip()):
+        out.append("an outcome without reply_ref: the PO's reply is not bound to a message")
+    return out
+
+
+def check_po_acceptance(text, notes, candidate=None):
+    """PO_ACCEPTANCE.json (題4 P-2), notes only: each record bound, or UNBOUND_PO_REPLY with what it lacks."""
+    records, problem = acceptance_records(text)
+    if problem:
+        notes.append(f"UNBOUND_PO_REPLY file: {problem}; no record read")
+        return []
+    if not records:
+        notes.append("PO_ACCEPTANCE: no record")
+    for n, record in enumerate(records, 1):
+        tag = record.get("candidate_id") if isinstance(record, dict) and isinstance(record.get("candidate_id"), str) \
+            and record["candidate_id"].strip() else f"#{n}"
+        bad = acceptance_problems(record, candidate)
+        if bad:
+            notes.append(f"UNBOUND_PO_REPLY {tag}: {'; '.join(bad)}")
+        else:
+            state = {"seen": "看過", "changes": "看過，要求再改", "accepted": "已驗收"}.get(
+                PO_OUTCOMES.get(record.get("outcome") or ""), "已送出，還沒回覆")
+            notes.append(f"PO_ACCEPTANCE {tag}: {record['commit'][:12]} {record['entry']}: {state} "
+                         f"({record.get('reply_ref') or record['offered_message_ref']})")
+    return []
+
+
+def verdict_record_notes(text, order_path, report_path, notes):
+    """A verdict's optional `ORDER_SHA256:` / `REPORT_SHA256:` lines against the --match order and report now."""
+    for key, path, what in (("ORDER_SHA256", order_path, "order"), ("REPORT_SHA256", report_path, "report")):
+        m = re.search(rf"^\s*{key}\s*[:=]\s*(\S*)", text, re.M)
+        if not m:
+            continue
+        value = m.group(1).strip("`").lower()
+        if path is None or not pathlib.Path(path).is_file():
+            notes.append(f"VERDICT_RECORD: {key} given, but no --match {what} to compare it with")
+            continue
+        now = order_hash(pathlib.Path(path).read_bytes())
+        if not HEX64.fullmatch(value):
+            notes.append(f"VERDICT_RECORD: {key} is not 64 hex digits: {value or 'empty'}")
+        elif value != now:
+            notes.append(f"VERDICT_RECORD: {key} {value[:12]} is not the {what}'s hash now ({now[:12]}); the verdict "
+                         f"judged another {what}")
+
+
 def order_binding(data, path=None):
     """(binding, problem): what `evidence_record.py run --order` writes into a record's `order` field, {"id", "rev",
     "sha", "path"}. sha is order_hash of the file's bytes, the hash `--hash` prints for the DISPATCH line, so a record
@@ -628,6 +1032,8 @@ def check_binding(ac, name, record, binding, problems, notes, strict):
         out.append(f"{ac}: {name}: recorded for {bound['id']} REVISION {bound['rev']} (sha {bound['sha'][:12]}), the order "
                    f"is REVISION {rev} (sha {now[:12]}); record again with `{fix}`, or the Director logs the whole line "
                    f"`EVIDENCE_EQUIVALENT {key} rev={bound['rev']} sha={bound['sha']} to rev={rev}`")
+    elif binding.get("history") or binding.get("brief"):  # 2.1: the keys evidence_record.py's binding does not have
+        carried_notes(ac, name, bound, binding, notes)
 
 
 def check_evidence(ac, evidence, folder, head, problems, notes, strict=False, candidate=None, approved=None, binding=None):
@@ -709,15 +1115,17 @@ def check_evidence(ac, evidence, folder, head, problems, notes, strict=False, ca
 
 
 def check_match(report, order, notes, evidence_dir=None, dispatch=None, order_path=None, log_name=None, candidate=None,
-                equivalent=None):
+                equivalent=None, brief=None, history=None):
     """The report's ACCEPTANCE rows against the order's acceptance criteria and its hash.
     dispatch: the records of --dispatch-log (None when the flag is absent), order_path: the order file's path,
     candidate: the commit under review (40 hex digits, lower-case) from --candidate, or None, equivalent: the
-    EVIDENCE_EQUIVALENT lines of --dispatch-log."""
+    EVIDENCE_EQUIVALENT lines of --dispatch-log, brief: load_brief of --brief, history: the --order-history folder
+    (both only add notes on carried-over evidence)."""
     problems = []
     order_text = order.decode("utf-8-sig")
     binding = {"ids": order_ids(order_text, order_path), "rev": int(order_revision(order_text)), "sha": order_hash(order),
-               "path": str(order_path) if order_path is not None else None, "equivalent": equivalent or []}
+               "path": str(order_path) if order_path is not None else None, "equivalent": equivalent or [],
+               "brief": brief, "history": history, "pinned": order_brief(order_text)[1]}
     order_problems = []
     wanted, got = ac_table(order_text, order_problems), ac_table(report, problems)
     checks = order_checks(order_text, order_problems) or {}
@@ -909,9 +1317,10 @@ def check_verdict(text, notes):
     return problems
 
 
-def verdict_binding(text, orders, candidate, notes):
+def verdict_binding(text, orders, candidate, notes, reports=None):
     """With --match or --candidate: the verdict must answer a --match order at its REVISION and judge the candidate.
-    orders: [(order text, order path)] of the --match pairs; candidate: 40 hex digits, lower-case, or None."""
+    orders: [(order text, order path)] of the --match pairs; candidate: 40 hex digits, lower-case, or None; reports:
+    {str(order path): report path} of the pairs, for the verdict's optional REPORT_SHA256 (notes only)."""
     problems, named = [], order_line(text)
     named_ids = id_prefixes([named[0].strip()]) if named else set()
     hits = [(t, p) for t, p in orders if named_ids & id_prefixes(order_ids(t, p))]
@@ -931,6 +1340,7 @@ def verdict_binding(text, orders, candidate, notes):
         elif named[1] != wanted:
             problems.append(f"ORDER: the verdict is for REVISION {named[1]}, the order is at REVISION {wanted}; "
                             "the verdict judges an older or newer order")
+        verdict_record_notes(text, order_path, (reports or {}).get(str(order_path)), notes)
     if candidate:
         head = re.search(r"^\s*CANDIDATE_HEAD\s*[:=]\s*(\S*)", text, re.M)
         value = head.group(1).strip("`").lower() if head else ""
@@ -1009,7 +1419,7 @@ def check_test_request(text, notes):
 
 
 CHECKS = {"resume": check_resume, "order": check_order, "report": check_report, "verdict": check_verdict,
-          "test-request": check_test_request}
+          "test-request": check_test_request, "po-acceptance": check_po_acceptance}
 
 
 def dated(kind, text):
@@ -1030,11 +1440,27 @@ def main():
     ap.add_argument("--preflight", nargs=2, action="append", default=[], metavar=("REPORT", "ORDER"),
                     help="list what an older review lacks for a Strict review now (LACKS lines)")
     ap.add_argument("--repo", metavar="DIR", help="with --preflight: a trusted checkout to resolve a short HEAD in")
+    ap.add_argument("--brief", metavar="BRIEF", help="the brief's fingerprints; with --order / --match / --preflight: "
+                    "BRIEF_STALE notes (shadow)")
+    ap.add_argument("--snapshot", metavar="DIR", help="with --brief or --hash: keep a snapshot in DIR (atomic write)")
+    ap.add_argument("--order-history", metavar="DIR", help="with --match: old orders, found by hash, for carried-over evidence")
     ap.add_argument("--warn", action="store_true", help="report problems as WARN and exit 0")
     ap.add_argument("--since", metavar="YYYY-MM-DD", help="skip files dated before this day")
     a = ap.parse_args()
     sys.stdout.reconfigure(encoding="utf-8")
     jobs = [(kind, path) for kind in CHECKS for path in getattr(a, kind.replace("-", "_"))] + [("match", pair) for pair in a.match]
+    if a.snapshot and not (a.brief or a.hash):
+        ap.error("--snapshot works with --brief or --hash")
+    if a.brief and not pathlib.Path(a.brief).is_file():
+        ap.error(f"--brief: file not found: {a.brief}")
+    if a.brief and a.snapshot:
+        brief_text = pathlib.Path(a.brief).read_text(encoding="utf-8-sig")
+        if not brief_is_locked(brief_text) or brief_revision(brief_text) is None:
+            ap.error("--brief with --snapshot: the brief must say 狀態：LOCKED and 版次：<number>; a draft is not snapshotted")
+    if a.order_history and not a.match:
+        ap.error("--order-history works with --match")
+    if a.order_history and not pathlib.Path(a.order_history).is_dir():
+        ap.error(f"--order-history: folder not found: {a.order_history}")
     missing = [path for path in a.hash if not pathlib.Path(path).is_file()]
     for path in a.hash:
         if path in missing:
@@ -1046,10 +1472,16 @@ def main():
         print(f"{digest}  {path}\n  DISPATCH {order_key(ids) or pathlib.Path(path).stem} rev={order_revision(text)} sha={digest}")
         if identity:
             print(f"  - {identity}")
-    if not jobs and a.hash and not a.preflight:
-        return 1 if missing else 0
+        if a.snapshot:
+            name = f"{order_key(ids) or pathlib.Path(path).stem}-rev{order_revision(text)}-{digest}.md"
+            target, written = write_snapshot(data, a.snapshot, name)
+            print(f"  SNAPSHOT {target} ({'written' if written else 'already there, kept'})")
+    brief_failed = print_brief(a.brief, a.snapshot) if a.brief and (a.snapshot or not (jobs or a.preflight)) else False
+    if not jobs and (a.hash or a.brief) and not a.preflight:
+        return 1 if missing or brief_failed else 0
     if not jobs and not a.preflight:
-        ap.error("give at least one of --resume / --order / --report / --verdict / --test-request / --match / --preflight / --hash")
+        ap.error("give at least one of --resume / --order / --report / --verdict / --test-request / --po-acceptance / "
+                 "--match / --preflight / --hash / --brief")
     if a.repo and not a.preflight:
         ap.error("--repo works with --preflight")
     if a.since and not DATE.fullmatch(a.since):
@@ -1058,12 +1490,12 @@ def main():
         ap.error("--evidence-dir works with --match or --preflight")
     if a.evidence_dir and not pathlib.Path(a.evidence_dir).is_dir():
         ap.error(f"--evidence-dir: folder not found: {a.evidence_dir}")
-    if a.dispatch_log and not (a.match or a.preflight):
-        ap.error("--dispatch-log works with --match or --preflight")
+    if a.dispatch_log and not (a.match or a.preflight or a.brief):
+        ap.error("--dispatch-log works with --match, --preflight or --brief")
     if a.dispatch_log and not pathlib.Path(a.dispatch_log).is_file():
         ap.error(f"--dispatch-log: file not found: {a.dispatch_log}")
-    if a.candidate and not (a.match or a.verdict):
-        ap.error("--candidate works with --match or --verdict")
+    if a.candidate and not (a.match or a.verdict or a.po_acceptance):
+        ap.error("--candidate works with --match, --verdict or --po-acceptance")
     if a.candidate and not re.fullmatch(r"[0-9a-fA-F]{40}", a.candidate):
         ap.error(f"--candidate takes the full commit, 40 hex digits (git rev-parse <branch>), got: {a.candidate}")
     candidate = a.candidate.lower() if a.candidate else None
@@ -1071,6 +1503,15 @@ def main():
     dispatch = dispatch_records(log_text) if log_text is not None else None
     equivalent = equivalent_records(log_text) if log_text is not None else []
     matched = [(pathlib.Path(o).read_text(encoding="utf-8-sig"), pathlib.Path(o)) for _, o in a.match if pathlib.Path(o).is_file()]
+    pairs = {str(pathlib.Path(o)): pathlib.Path(r) for r, o in a.match}
+    brief = None
+    if a.brief and (jobs or a.preflight):
+        brief_lines = []
+        brief = load_brief(a.brief, log_text, a.dispatch_log, brief_lines)
+        print(f"BRIEF {brief['label']}: 版次 {brief['revision'] if brief['revision'] is not None else '?'}, "
+              f"{len(brief['rows'])} row(s); notes only, never fails")
+        for line in ([brief["problem"]] if brief["problem"] else []) + brief_lines:
+            print(f"  ~ {line}")
 
     failed = skipped = undated = 0
     for report_path, order_path in a.preflight:
@@ -1088,6 +1529,11 @@ def main():
               + (f"{len(lacks)} item(s) to migrate" if lacks else "nothing lacking") + "; only read")
         for line in [f"  LACKS {item}" for item in lacks] + [f"  NOT_CHECKED {item}" for item in unchecked]:
             print(line)
+        if brief:
+            extra = []
+            brief_notes(order.decode("utf-8-sig"), files[1], brief, extra)
+            for line in extra:
+                print(f"  ~ {line}")
     for kind, path in jobs:
         files = [pathlib.Path(p) for p in (path if kind == "match" else [path])]
         text = files[0].read_text(encoding="utf-8-sig") if all(f.is_file() for f in files) else None
@@ -1106,11 +1552,15 @@ def main():
             problems = ["file not found"]
         elif kind == "match":
             problems = check_match(text, files[1].read_bytes(), notes, a.evidence_dir, dispatch, files[1], a.dispatch_log,
-                                   candidate, equivalent)
+                                   candidate, equivalent, brief, a.order_history)
+        elif kind == "po-acceptance":
+            problems = check_po_acceptance(text, notes, candidate)
         else:
             problems = CHECKS[kind](text, notes)
             if kind == "verdict" and (a.match or candidate):
-                problems += verdict_binding(text, matched, candidate, notes)
+                problems += verdict_binding(text, matched, candidate, notes, pairs)
+        if brief and text is not None and kind in ("order", "match"):
+            brief_notes(text if kind == "order" else files[1].read_text(encoding="utf-8-sig"), files[-1], brief, notes)
         failed += bool(problems)
         print(f"{('WARN' if a.warn else 'FAIL') if problems else 'OK  '} {kind} {name}")
         for line in [f"  - {p}" for p in problems] + [f"  ~ {n}" for n in notes]:
