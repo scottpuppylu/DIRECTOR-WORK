@@ -9,6 +9,7 @@ seen, one row per source key), decisions (at most one adopted reply per question
   choice_reconcile.py ingest   --db D --export EXPORT.json     replies read from the page db (ArtifactData), see below
   choice_reconcile.py plan     --db D --question CH-01 --revision 1 [--wo WO-012] [--orders DIR]
   choice_reconcile.py advance  --db D --question CH-01 --revision 1 --from QUEUED --to CLAIMED [--session S] [--result T]
+  choice_reconcile.py settle   --db D --key <source key> --to NOTED|SUPERSEDED|CLOSED [--result T]
   choice_reconcile.py status   --db D [--now ISO] [--late-min 10] [--stuck-min 30] [--json]
 
 EXPORT.json: {"source": "<artifact id>", "decisions": [...], "choiceReplies": [...], "notes": [...]}, each item the doc
@@ -20,8 +21,14 @@ QUEUED; RECORDED -> RECEIPT_PENDING for a duplicate, stale, conflicting or inval
 IMMEDIATE: the same question revision always gets the same WO-ID. advance changes a state only when it still is --from,
 so of two Directors only one wins (the other gets exit 1 and the current state).
 
-Shadow mode: status and ingest only print hints and always exit 0; nothing here blocks other tools or the old flow.
-Exit 2 for a usage error or an unreadable file; plan / advance exit 1 when the state change did not happen.
+settle closes an inbox row no decision adopts: a read note (NOTED), a reply a newer one replaced (SUPERSEDED), or a
+duplicate / conflicting / invalid reply answered back to the user (CLOSED); a 2.0 answer whose question is already
+closed is ingested as CLOSED. status counts as "not handed over" only ok / legacy replies still RECORDED.
+
+Shadow mode: nothing here blocks other tools or the old flow. Bad data, a bad --now, a broken ledger or a missing
+folder print one line "CHOICE_RECONCILE: SHADOW_ERROR <reason>" and exit 0 (register: exit 2, the page needs its hash).
+Exit 2 for a usage error; plan / advance / settle exit 1 when the state change did not happen (only MOVED / PLANNED /
+SETTLED mean it did).
 """
 import argparse
 import datetime
@@ -32,7 +39,9 @@ import re
 import sqlite3
 import sys
 
-STATES = ("RAW", "RECORDED", "PLANNED", "QUEUED", "CLAIMED", "RECONCILE", "RECEIPT_PENDING", "CLOSED")
+STATES = ("RAW", "RECORDED", "PLANNED", "QUEUED", "CLAIMED", "RECONCILE", "RECEIPT_PENDING", "CLOSED", "NOTED", "SUPERSEDED")
+SETTLE = {"RECORDED": {"NOTED", "SUPERSEDED", "CLOSED"}, "RECEIPT_PENDING": {"CLOSED", "SUPERSEDED"}}  # inbox rows no decision adopts
+WAITING = ("ok", "legacy")  # verdicts of a reply the Director still has to act on
 MOVES = {"RAW": {"RECORDED"}, "RECORDED": {"PLANNED", "RECEIPT_PENDING"}, "PLANNED": {"QUEUED"},
          "QUEUED": {"CLAIMED", "RECONCILE"}, "RECONCILE": {"CLAIMED", "QUEUED"}, "CLAIMED": {"RECEIPT_PENDING"},
          "RECEIPT_PENDING": {"CLOSED"}, "CLOSED": set()}
@@ -68,10 +77,12 @@ def connect(path, timeout=5.0):
 
 def load_json(path):
     try:
-        return json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+        data = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
-        print(f"CHOICE_RECONCILE: cannot read {path}: {error}")
-        sys.exit(2)
+        raise ValueError(f"cannot read {path}: {error}")
+    if not isinstance(data, dict):
+        raise ValueError(f"{path} is not a JSON object")
+    return data
 
 
 def cmd_register(args):
@@ -154,6 +165,8 @@ def cmd_ingest(args):
             elif other:
                 verdict = "duplicate"
         state = "RECORDED" if verdict in ("ok", "legacy", "note") else "RECEIPT_PENDING"
+        if verdict == "legacy" and (decisions.get(qid) or {}).get("status") == "closed":
+            verdict, state = "legacy-closed", "CLOSED"  # a 2.0 answer the Director already closed
         con.execute("INSERT INTO inbox VALUES (?,?,?,?,?,?,?,?,?)",
                     (skey, kind, qid, rev, sub, json.dumps(payload, ensure_ascii=False, sort_keys=True), now_iso(), state, verdict))
         counts[verdict] = counts.get(verdict, 0) + 1
@@ -213,7 +226,11 @@ def cmd_advance(args):
         print(f"REFUSED {key}: {args.from_} -> {args.to} is not a step (allowed: {sorted(MOVES.get(args.from_, set()))})")
         return 2
     con = connect(args.db, timeout=args.busy_timeout)
-    con.execute("BEGIN IMMEDIATE")
+    try:
+        con.execute("BEGIN IMMEDIATE")
+    except sqlite3.OperationalError as error:
+        print(f"BUSY {key}: {error}; another Director holds the ledger, try again")
+        return 1
     done = con.execute("UPDATE decisions SET state=?, updated_at=? WHERE decision_key=? AND state=?",
                        (args.to, now_iso(), key, args.from_)).rowcount
     if not done:
@@ -245,9 +262,12 @@ def cmd_status(args):
         return 0
     now = datetime.datetime.fromisoformat(args.now.replace("Z", "+00:00")) if args.now else datetime.datetime.now(datetime.timezone.utc)
     con = connect(args.db)
-    items = []
+    items, notes = [], 0
     for skey, qid, rev, state, verdict, received in con.execute(
             "SELECT source_key, question_id, revision, state, verdict, received_at FROM inbox WHERE state='RECORDED' ORDER BY received_at"):
+        if verdict not in WAITING:  # a note: read it, then settle --to NOTED
+            notes += 1
+            continue
         m = minutes(received, now)
         items.append({"key": skey, "question": qid, "revision": rev, "state": state, "verdict": verdict, "minutes": m,
                       "hint": "沒交出去" if m is not None and m >= args.late_min else ""})
@@ -261,15 +281,35 @@ def cmd_status(args):
         if state == "RECONCILE":
             hint = "結果不明，先查證再決定"
         items.append({"key": key, "state": state, "wo": wo, "claimed_by": claimed, "minutes": m, "hint": hint})
-    pending = con.execute("SELECT COUNT(*) FROM inbox WHERE state='RECEIPT_PENDING'").fetchone()[0]
+    pending = con.execute("SELECT COUNT(*) FROM inbox WHERE state='RECEIPT_PENDING' AND source_key NOT IN "
+                          "(SELECT source_key FROM decisions)").fetchone()[0]
     stuck = sum(1 for i in items if i["hint"] == "收到但卡住")
     late = sum(1 for i in items if i["hint"] == "沒交出去")
     if args.json:
-        print(json.dumps({"items": items, "receipts_pending": pending}, ensure_ascii=False))
+        print(json.dumps({"items": items, "receipts_pending": pending, "notes": notes}, ensure_ascii=False))
     else:
         for i in items:
             print(f"- {i['key']} {i['state']} {i.get('wo') or ''} {i['minutes']} 分 {i['hint']}".rstrip())
-    print(f"CHOICE_RECONCILE: open={len(items)} not_handed={late} stuck={stuck} receipts_pending={pending} (shadow: hints only)")
+    print(f"CHOICE_RECONCILE: open={len(items)} not_handed={late} stuck={stuck} receipts_pending={pending} notes={notes} (shadow: hints only)")
+    return 0
+
+
+def cmd_settle(args):
+    """Close an inbox row no decision adopts: a note read (NOTED), a reply a newer one replaced (SUPERSEDED), or one
+    answered back to the user (CLOSED)."""
+    con = connect(args.db, timeout=args.busy_timeout)
+    con.execute("BEGIN IMMEDIATE")
+    row = con.execute("SELECT state FROM inbox WHERE source_key=?", (args.key,)).fetchone()
+    adopted = con.execute("SELECT 1 FROM decisions WHERE source_key=?", (args.key,)).fetchone()
+    if not row or adopted or args.to not in SETTLE.get(row[0], set()):
+        con.execute("ROLLBACK")
+        why = "unknown key" if not row else "adopted by a decision; use advance" if adopted else f"{row[0]} -> {args.to} is not allowed"
+        print(f"REFUSED {args.key}: {why}")
+        return 1
+    note = f" ({args.result})" if args.result else ""
+    con.execute("UPDATE inbox SET state=?, verdict=verdict || ? WHERE source_key=? AND state=?", (args.to, note, args.key, row[0]))
+    con.execute("COMMIT")
+    print(f"SETTLED {args.key} {row[0]} -> {args.to}")
     return 0
 
 
@@ -277,7 +317,7 @@ def main(argv=None):
     sys.stdout.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser(description="local ledger for choice-page replies (shadow)")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("register", "ingest", "plan", "advance", "status"):
+    for name in ("register", "ingest", "plan", "advance", "settle", "status"):
         p = sub.add_parser(name)
         p.add_argument("--db", required=True, type=pathlib.Path)
         p.add_argument("--busy-timeout", type=float, default=5.0)
@@ -293,13 +333,27 @@ def main(argv=None):
     adv.add_argument("--to", required=True, choices=STATES)
     adv.add_argument("--session")
     adv.add_argument("--result")
+    stl = sub.choices["settle"]
+    stl.add_argument("--key", required=True)
+    stl.add_argument("--to", required=True, choices=("NOTED", "SUPERSEDED", "CLOSED"))
+    stl.add_argument("--result")
     st = sub.choices["status"]
     st.add_argument("--now")
     st.add_argument("--late-min", type=int, default=10)
     st.add_argument("--stuck-min", type=int, default=30)
     st.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
-    return {"register": cmd_register, "ingest": cmd_ingest, "plan": cmd_plan, "advance": cmd_advance, "status": cmd_status}[args.cmd](args)
+    run = {"register": cmd_register, "ingest": cmd_ingest, "plan": cmd_plan, "advance": cmd_advance, "settle": cmd_settle,
+           "status": cmd_status}[args.cmd]
+    try:
+        return run(args)
+    except (sqlite3.Error, OSError, ValueError, TypeError, KeyError, AttributeError) as error:
+        reason = f"{type(error).__name__}: {error}".replace("\n", " ")[:300]
+        if args.cmd == "register":  # registering a snapshot is not shadow: the page needs its hash
+            print(f"CHOICE_RECONCILE: cannot register: {reason}")
+            return 2
+        print(f"CHOICE_RECONCILE: SHADOW_ERROR {reason}")  # shadow: a hint, never a failed command
+        return 0
 
 
 if __name__ == "__main__":

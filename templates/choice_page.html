@@ -115,7 +115,7 @@ details .list{margin-top:10px}
 <script>
 /* 2.1：每一區自己重畫（renderOpenList / renderAnsweredList / renderClosedList / renderNotesList / renderBrief），資料回呼只重畫自己那區。
    等你選的區重畫前後保留補充文字、選取範圍、方向、捲動和焦點；中文組字中先不重畫。送出時每題一把鎖（S.inFlight），用當下的選項再檢查一次。 */
-const S={db:null,comments:null,canWrite:true,decisions:[],revisions:{},replies:[],receipts:[],notes:[],brief:null,loaded:false,
+const S={db:null,comments:null,canWrite:true,decisions:[],revisions:{},revLoaded:false,revError:false,replies:[],receipts:[],notes:[],brief:null,loaded:false,
   picks:{},drafts:{},subIds:{},inFlight:{},msgs:{},sent:{},firstSeen:{},composing:false,deferOpen:false,openSig:null,noteBusy:false,noteSub:null};
 const LATE_MIN=10,STUCK_MIN=30;
 const STAGE={seen:1,claimed:1,handed:2,closed:3};
@@ -132,8 +132,9 @@ function minsSince(iso){const t=Date.parse(iso||"");return isNaN(t)?null:Math.fl
 function fp(d){return JSON.stringify([d.title||"",d.question||"",(d.options||[]).map(o=>[o.key,o.label||"",o.desc||""])])}
 function hashStr(s){let h=5381;for(let i=0;i<s.length;i++)h=((h<<5)+h+s.charCodeAt(i))|0;return(h>>>0).toString(36)}
 function viewOf(d){
-  if(d.revision!=null){const snap=S.revisions[d.id+"@"+d.revision]||{};
-    return{...d,...snap,id:d.id,status:d.status,revision:d.revision,snapshotHash:d.snapshotHash||snap.snapshotHash||"",v2:true,key:d.id+"@r"+d.revision}}
+  if(d.revision!=null){const found=S.revisions[d.id+"@"+d.revision],snap=found||{};
+    const state=found?"ok":S.revError||S.revLoaded?"missing":"loading";
+    return{...d,...snap,id:d.id,status:d.status,revision:d.revision,snapshotHash:d.snapshotHash||snap.snapshotHash||"",v2:true,snap:state,key:d.id+"@r"+d.revision}}
   return{...d,v2:false,key:d.id+"@"+hashStr(fp(d))}}
 function receiptOf(v){let best=null;
   S.receipts.forEach(r=>{if(r.questionId===v.id&&r.revision===v.revision&&(!best||(STAGE[r.stage]||0)>(STAGE[best.stage]||0)))best=r});return best}
@@ -158,7 +159,7 @@ function choiceText(st){const a=st.answer||{};if(a.choice==="done")return"已讀
 /* 叫醒總監：資料存進 db 之後才呼叫，只說「有新回覆／新留言」和題號，不帶你寫的內容。anchor 用一直在頁面上的標題，不用會被重畫掉的按鈕。失敗不影響已存的回覆。 */
 async function anchorOf(node){try{return S.comments&&node?await S.comments.anchorFor(node):null}catch(e){return null}}
 async function notify(anchor,text){
-  const later="總監下一輪會讀到";
+  const later="總監下一輪會讀到；沒有人開始下一輪時不會被讀到，請在聊天提醒總監";
   if(!S.comments||!anchor)return later;
   try{if(await S.comments.canSendToClaude()!=="available")return later;
     await S.comments.sendToClaude({anchor,text:text.slice(0,300)});return"已通知總監"}
@@ -177,14 +178,21 @@ function renderBrief(){
 
 function media(list){
   const g=el("div","gallery");
-  list.forEach(im=>{const f=el("figure","shot");
-    if(im.kind==="video"){const v=el("video");v.src=im.url;v.controls=true;v.preload="metadata";v.playsInline=true;f.append(v)}
-    else{const a=el("a");a.href=im.url;a.target="_blank";a.rel="noopener";const i=el("img");i.src=im.url;i.alt=im.caption||"";i.loading="lazy";a.append(i);f.append(a)}
+  list.forEach(im=>{const f=el("figure","shot");const url=safeUrl(im&&im.url);
+    if(!url)f.append(el("p","late","這張圖的網址不安全，沒有顯示。"));
+    else if(im.kind==="video"){const v=el("video");v.src=url;v.controls=true;v.preload="metadata";v.playsInline=true;f.append(v)}
+    else{const a=el("a");a.href=url;a.target="_blank";a.rel="noopener";const i=el("img");i.src=url;i.alt=im.caption||"";i.loading="lazy";a.append(i);f.append(a)}
     if(im.caption)f.append(el("figcaption",null,im.caption));g.append(f)});
   return g}
 
+/* db 裡的網址只接受 https:、/_blob/ 和相對路徑；javascript:、data:、http: 和 //別站 一律不放進 src / href。 */
+function safeUrl(u){const s=String(u||"").trim();if(!s||/[\u0000-\u001f\\]/.test(s))return"";
+  if(/^https:\/\//i.test(s)||s.startsWith("/_blob/"))return s;
+  if(s.startsWith("//")||/^[a-z][a-z0-9+.-]*:/i.test(s))return"";return s}
 function pickOk(v){const opts=v.options||[];return!opts.length||opts.some(o=>o.key===S.picks[v.key])}
-function sendBlocked(v){return!S.canWrite||!!S.inFlight[v.id]||!pickOk(v)}
+function sendBlocked(v){return!S.canWrite||!!S.inFlight[v.id]||(v.v2&&v.snap!=="ok")||!pickOk(v)}
+/* 2.1 新題的選項在 choiceRevisions；還沒讀到就不能送，免得送成空的「我知道了」。 */
+function snapNote(v){return!v.v2||v.snap==="ok"?"":v.snap==="loading"?"載入中…選項讀到後才能送出。":"這一版選項讀不到，請在聊天告訴總監。"}
 /* 按選項、送出開始和結束都只更新這張卡的按鈕和訊息，不重畫整區。 */
 function refreshCard(v){
   const c=$("open").querySelector('article[data-key="'+CSS.escape(v.key)+'"]');if(!c)return;
@@ -199,6 +207,7 @@ function renderOpen(st){
   c.append(h,el("p","title",d.title||""));
   if(d.question)c.append(el("p","q",d.question));
   if(d.context)c.append(el("p","ctx",d.context));
+  if(snapNote(d))c.append(el("p","late",snapNote(d)));
   st.prior.forEach(p=>c.append(el("p","late","你在第 "+p.revision+" 版選過「"+p.label+"」，後來題目改版了，請照現在的選項再選一次。")));
   Object.keys(S.drafts).forEach(k=>{if(k!==d.key&&k.startsWith(d.id+"@")&&S.drafts[k])c.append(el("p","late","題目更新了。你在舊版寫的補充（還沒送出）："+S.drafts[k]))});
   if(Array.isArray(d.images)&&d.images.length)c.append(media(d.images));
@@ -206,7 +215,7 @@ function renderOpen(st){
   (d.options||[]).forEach(o=>{
     const b=el("button","opt");b.type="button";b.dataset.opt=o.key;b.dataset.focus="o:"+d.key+":"+o.key;
     b.setAttribute("aria-pressed",S.picks[d.key]===o.key?"true":"false");
-    if(o.image&&o.image.url){const i=el("img");i.src=o.image.url;i.alt=o.image.caption||o.label||"";i.loading="lazy";b.append(i)}
+    if(o.image&&safeUrl(o.image.url)){const i=el("img");i.src=safeUrl(o.image.url);i.alt=o.image.caption||o.label||"";i.loading="lazy";b.append(i)}
     const l=el("span","ol",o.label);if(d.recommended===o.key)l.append(el("span","rec","總監建議"));
     b.append(l);if(o.desc)b.append(el("span","od",o.desc));
     b.addEventListener("click",()=>{S.picks[d.key]=o.key;refreshCard(d)});
@@ -215,7 +224,7 @@ function renderOpen(st){
   if(d.recommended&&d.why)c.append(el("p","why","總監為什麼建議「"+optLabel(d,d.recommended)+"」："+d.why));
   const ta=el("textarea");ta.id="note-"+d.id;ta.dataset.key=d.key;ta.dataset.focus="t:"+d.key;ta.placeholder="想補充的話（可以不寫）";ta.value=S.drafts[d.key]||"";
   ta.addEventListener("input",()=>{S.drafts[d.key]=ta.value});c.append(ta);
-  const row=el("div","row");const send=el("button","send",(d.options||[]).length?"送出選擇":"我知道了");send.type="button";send.dataset.focus="s:"+d.key;
+  const row=el("div","row");const send=el("button","send",(d.options||[]).length||d.v2&&d.snap!=="ok"?"送出選擇":"我知道了");send.type="button";send.dataset.focus="s:"+d.key;
   send.disabled=sendBlocked(d);
   const msg=el("span","msg",S.msgs[d.key]||"");msg.dataset.role="msg";row.append(send,msg);c.append(row);
   send.addEventListener("click",()=>submitChoice(d.id));
@@ -235,6 +244,7 @@ function restoreDrafts(saved){
   if(saved.focus&&!saved.fields.some(s=>s.focused)){const n=box.querySelector('[data-focus="'+CSS.escape(saved.focus)+'"]');if(n)n.focus({preventScroll:true})}}
 
 function renderOpenList(){
+  if(S.composing&&!$("open").contains(document.activeElement))S.composing=false;
   if(S.composing){S.deferOpen=true;return}
   const open=S.decisions.map(stateOf).filter(st=>st.state==="open").sort((a,b)=>(a.v.priority??9)-(b.v.priority??9));
   const sig=JSON.stringify(open.map(st=>[st.v,st.prior]));
@@ -284,6 +294,7 @@ async function submitChoice(id){
   const d=S.decisions.find(x=>x.id===id);const st=d&&stateOf(d);
   if(!st||st.state!=="open"){renderDecisions();return}
   const v=st.v,opts=v.options||[],key=v.key;
+  if(v.v2&&v.snap!=="ok"){S.msgs[key]=snapNote(v);refreshCard(v);return}
   const choice=opts.length?S.picks[key]:"done";const opt=opts.find(o=>o.key===choice);
   if(opts.length&&!opt){S.msgs[key]="你選的選項已經不在了，請重新選";delete S.picks[key];refreshCard(v);return}
   const raw=S.drafts[key]||"",note=raw.trim(),at=new Date().toISOString();
@@ -297,6 +308,7 @@ async function submitChoice(id){
     else await S.db.doc("decisions/"+id).update({status:"answered",answer:{choice,note,at,submissionId}});
     S.sent[key]=v.v2?{choice,note,clientAt:at,submissionId,revision:v.revision,selectedOptionSnapshot:snap}:{choice,note,at,submissionId};
     if(S.drafts[key]===raw)delete S.drafts[key];
+    Object.keys(S.drafts).forEach(k=>{if(k!==key&&k.startsWith(id+"@"))delete S.drafts[k]});
     delete S.subIds[key];delete S.picks[key];delete S.msgs[key];delete S.inFlight[id];
     renderDecisions();
     const told=await notify(await anchor,"選擇頁有新回覆："+(v.code||id)+(v.v2?"（第 "+v.revision+" 版）":"")+"。請照 docs/12 讀選擇頁處理。");
@@ -317,7 +329,9 @@ async function sendNote(){
   S.noteBusy=false;$("note-send").disabled=!S.canWrite}
 
 document.addEventListener("compositionstart",()=>{S.composing=true});
-document.addEventListener("compositionend",()=>{S.composing=false;if(S.deferOpen){S.deferOpen=false;renderOpenList()}});
+function endComposing(){S.composing=false;if(S.deferOpen){S.deferOpen=false;renderOpenList()}}
+document.addEventListener("compositionend",endComposing);
+document.addEventListener("focusout",()=>{if(S.composing)endComposing()});
 
 async function init(){
   const db=await claude.use("db");
@@ -331,7 +345,8 @@ async function init(){
   db.collection("decisions").onSnapshot(snap=>{S.decisions=docs(snap);
     if(!snap.metadata||!snap.metadata.fromCache){S.loaded=true;clearTimeout(timer);$("status").textContent="最後同步："+fmt(new Date().toISOString())}renderDecisions()},
     e=>{clearTimeout(timer);$("status").textContent="讀取失敗（"+(e&&e.code||"原因不明")+"），請重新開這一頁。"});
-  db.collection("choiceRevisions").onSnapshot(snap=>{const m={};docs(snap).forEach(r=>{m[r.questionId+"@"+r.revision]=r});S.revisions=m;renderDecisions()},()=>{});
+  db.collection("choiceRevisions").onSnapshot(snap=>{const m={};docs(snap).forEach(r=>{m[r.questionId+"@"+r.revision]=r});S.revisions=m;
+    if(!snap.metadata||!snap.metadata.fromCache)S.revLoaded=true;renderDecisions()},()=>{S.revError=true;renderDecisions()});
   db.collection("choiceReplies").onSnapshot(snap=>{S.replies=docs(snap);renderDecisions()},()=>{});
   db.collection("choiceReceipts").onSnapshot(snap=>{S.receipts=docs(snap);renderDecisions()},()=>{});
   db.doc("brief/current").onSnapshot(snap=>{S.brief=snap.exists?snap.data():null;renderBrief()},()=>{});

@@ -83,7 +83,7 @@
 
 1. **送出就叫醒**：使用者在頁面送出回覆或留言時，頁面用 comments 的 `sendToClaude` 留一則給總監的訊息，掛在頁面固定的標題上（不掛在會重畫的卡片上）。訊息只寫「選擇頁有新回覆：CH-01（第 2 版）」，不帶使用者寫的內容；內容一律從 db 讀。總監的對話開著、而且這一頁的監看是「auto-replies armed」時，總監馬上被叫醒。
    - 發布後、每次恢復（壓縮、換對話）後，用 `ArtifactComments` 列出監看，確認選擇頁是 armed。不是的，請使用者在聊天裡貼一次選擇頁網址，再用 `ArtifactComments` 的 watch 打開。
-   - 叫醒只是加速。對話沒開、通知沒送到，第四節第 4 步照樣會在下一輪第一個動作讀到。
+   - 叫醒只是加速。對話沒開、通知沒送到，第四節第 4 步照樣會在下一輪第一個動作讀到。但沒有人開始下一輪時不會被讀到：頁面會照實寫「沒有人開始下一輪時不會被讀到，請在聊天提醒總監」，使用者要在聊天說一聲。
 2. **先記帳再動手**：本機帳本 `<WS>/DIRECTOR/choice_inbox.sqlite3`，用 `tools/choice_reconcile.py`：
 
    ```text
@@ -95,13 +95,15 @@
    - `ingest` 把每筆回覆記一列，標出重複、同題不同答案、舊版、hash 不符、選項不存在。只有 `ok` 和 `legacy` 能派工；其他的照實回給使用者（寫回條 `resolution`），不要猜。
    - `plan` 給這一題這一版固定的工單編號；再跑一次還是同一張。工單照這個編號寫。
    - 狀態：`RECORDED → PLANNED → QUEUED → CLAIMED → RECEIPT_PENDING → CLOSED`。`advance` 只在狀態還是 `--from` 時才改；兩個總監同時接手，只有一個成功，另一個拿到 `LOST`，就不要再做。做到一半不知道有沒有做完的，改成 `RECONCILE`，先查證再決定。
-   - 2.1 是 shadow：帳本只提示、不擋任何工具。沒跑帳本不算違規，但重複派工要自己負責。
+   - 沒被採用的那幾列用 `settle` 結案：留言讀過 `--to NOTED`；被新回覆取代 `--to SUPERSEDED`；重複、衝突、不合格的回覆照實回給使用者後 `--to CLOSED`。已關閉的 2.0 舊答案直接記成 `CLOSED`。
+   - 2.1 是 shadow：帳本只提示、不擋任何工具；資料壞了只印一行 `CHOICE_RECONCILE: SHADOW_ERROR <原因>`，exit 0。沒跑帳本不算違規，但重複派工要自己負責。
 3. **回條**：總監每走一步，新增一筆 `choiceReceipts`：`{"questionId", "revision", "submissionId", "stage", "at", "wo", "resolution"}`，`stage` 是 `seen`、`claimed`、`handed`、`closed`。舊題照 2.0 也寫 `decisions` 的 `seenAt`，處理完改 `closed` 並寫 `resolution`、`closedAt`；留言改成 `read`。
+   - 2.1 新題的選項讀不到時（`choiceRevisions` 還沒載入或沒有這一版），頁面顯示「載入中」或「這一版選項讀不到，請在聊天告訴總監」，不能送出。圖片和影片的網址只接受 `https:`、`/_blob/` 和相對路徑。
    - 頁面上每一筆回覆顯示三種狀態：沒有回條是「已儲存，等總監讀取」；`seen` 或 `claimed` 是「總監已收件，處理中」；`handed`、`closed` 或題目已關是「已交接／處理完成」。
    - 逾時分兩種：存好超過 10 分鐘還沒有回條，標「（沒收到）」，是叫醒或讀取出了問題；收件超過 30 分鐘還沒交接，標「（收到但卡住）」，是處理出了問題。使用者看得到卡在哪一步，可以在聊天裡提醒。
    - 處理晚了照實寫在 `resolution`：幾點才讀到、晚了多久。
 4. 處理完，把叫醒用的留言串用 `ArtifactComments` resolve 掉。
-5. 每輪結束前自查：跑 `choice_reconcile.py status`，`stuck` 和「沒交出去」都是 0；選擇頁沒有「已回覆卻沒關閉」的題目。有總管時，總管例行查的「已回覆超過 10 分鐘還沒關閉」也包含選擇頁。
+5. 每輪結束前自查：跑 `choice_reconcile.py status`，`not_handed`、`stuck`、`receipts_pending`、`notes` 都是 0；選擇頁沒有「已回覆卻沒關閉」的題目。有總管時，總管例行查的「已回覆超過 10 分鐘還沒關閉」也包含選擇頁。
 
 ## 為什麼
 

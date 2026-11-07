@@ -4804,6 +4804,17 @@ def choice_page_problems(text):
             problems.append(f"missing state text {words}")
     if re.search(r"notify\([^)]*\b(?:note|raw|t)\b", script):
         problems.append("notify carries the user's text")
+    if 'v.v2&&v.snap!=="ok"' not in fn.get("sendBlocked", "") or 'if(v.v2&&v.snap!=="ok")' not in submit:
+        problems.append("v2 question can be sent without its revision snapshot")
+    if '"loading"' not in fn.get("viewOf", "") or '"missing"' not in fn.get("viewOf", ""):
+        problems.append("viewOf does not tell a loading snapshot from a missing one")
+    safe = fn.get("safeUrl", "")
+    if not ("https:" in safe and "/_blob/" in safe and 'startsWith("//")' in safe):
+        problems.append("no safeUrl that only lets https:, /_blob/ and relative urls through")
+    for m in re.finditer(r"\.(?:src|href)=(?!url\b|safeUrl\()([^;]*)", script):
+        problems.append(f"url from db not checked by safeUrl: {m.group(0)[:40]}")
+    if "沒有人開始下一輪時不會被讀到" not in script:
+        problems.append("does not say nobody reads it without a next round (F-5)")
     return problems
 
 
@@ -4819,6 +4830,9 @@ def test_choice_page():
         ("draft cleared before save", "  const raw=S.drafts[key]||\"\"", "  if(S.drafts[key]===raw)delete S.drafts[key];const raw=S.drafts[key]||\"\"", "draft cleared"),
         ("no IME guard", "  if(S.composing){S.deferOpen=true;return}\n", "", "IME"),
         ("no stuck state", "（收到但卡住）", "（慢）", "收到但卡住"),
+        ("v2 sendable without its snapshot", '||(v.v2&&v.snap!=="ok")||', "||", "snapshot"),
+        ("db url straight into img.src", "i.src=url;", "i.src=im.url;", "safeUrl"),
+        ("F-5 not said plainly", "沒有人開始下一輪時不會被讀到", "", "F-5"),
     )
     for name, old, new, want in mutations:
         changed = text.replace(old, new, 1)
@@ -4841,15 +4855,16 @@ def test_choice_reconcile(tmp):
     reply = {"questionId": "CH-05", "revision": 2, "snapshotHash": digest, "choice": "B", "submissionId": "s1", "note": ""}
     export = {"source": "art", "decisions": [
         {"id": "CH-05", "status": "open", "revision": 2},
-        {"id": "CH-01", "status": "answered", "options": [{"key": "A"}], "answer": {"choice": "A", "at": "2026-11-08T00:00:00Z", "submissionId": "L1"}}],
+        {"id": "CH-01", "status": "answered", "options": [{"key": "A"}], "answer": {"choice": "A", "at": "2026-11-08T00:00:00Z", "submissionId": "L1"}},
+        {"id": "CH-02", "status": "closed", "options": [{"key": "A"}], "answer": {"choice": "A", "at": "2026-11-01T00:00:00Z", "submissionId": "L2"}}],
         "choiceReplies": [dict(reply, id="R1"), dict(reply, id="R2"), dict(reply, id="R3", submissionId="s2", choice="A"),
                           dict(reply, id="R4", submissionId="s4", snapshotHash="sha256:0"), dict(reply, id="R5", submissionId="s5", choice="Z")],
         "notes": [{"id": "N1", "text": "留言", "status": "new"}]}
     (folder / "export.json").write_text(json.dumps(export, ensure_ascii=False), encoding="utf-8")
     expect("reconcile ingest sorts every reply", "choice_reconcile.py", 0, "ingest", "--db", ledger, "--export", folder / "export.json",
            says=["RECORDED art/choiceReplies/R1 CH-05 r2 ok", "R2 CH-05 r2 duplicate", "R3 CH-05 r2 conflict", "R4 CH-05 r2 bad-hash",
-                 "R5 CH-05 r2 bad-choice", "CH-01 r0 legacy", "notes/N1", "shadow"])
-    expect("reconcile ingest twice adds nothing", "choice_reconcile.py", 0, "ingest", "--db", ledger, "--export", folder / "export.json", says="already=7")
+                 "R5 CH-05 r2 bad-choice", "CH-01 r0 legacy", "CLOSED art/decisions/CH-02/L2 CH-02 r0 legacy-closed", "notes/N1", "shadow"])
+    expect("reconcile ingest twice adds nothing", "choice_reconcile.py", 0, "ingest", "--db", ledger, "--export", folder / "export.json", says="already=8")
     plan = ("plan", "--db", ledger, "--question", "CH-05", "--revision", "2")
     expect("reconcile plan gives a WO-ID", "choice_reconcile.py", 0, *plan, "--wo", "WO-041", says="PLANNED CH-05:r2 WO-041 from art/choiceReplies/R1")
     expect("reconcile plan again keeps the same WO-ID", "choice_reconcile.py", 0, *plan, "--wo", "WO-042", says=["WO-041", "already", "kept the first one"])
@@ -4862,12 +4877,37 @@ def test_choice_reconcile(tmp):
     outcomes = sorted((p.wait(timeout=60), p.stdout.read().strip()) for p in racers)
     check("reconcile: of two Directors only one claims", [code for code, _ in outcomes] == [0, 1] and "LOST" in outcomes[1][1], repr(outcomes))
     expect("reconcile status is shadow and names the stuck one", "choice_reconcile.py", 0, "status", "--db", ledger, "--now", "2030-01-01T00:00:00Z",
-           says=["CH-05:r2 CLAIMED WO-041", "收到但卡住", "沒交出去", "stuck=1", "receipts_pending=4", "shadow"])
+           says=["CH-05:r2 CLAIMED WO-041", "收到但卡住", "沒交出去", "not_handed=1 stuck=1 receipts_pending=4 notes=1", "shadow"],
+           lacks=["CH-02", "notes/N1 RECORDED"])
     expect("reconcile status fresh shows no stuck", "choice_reconcile.py", 0, "status", "--db", ledger, says="stuck=0")
     expect("reconcile status without ledger", "choice_reconcile.py", 0, "status", "--db", folder / "none.sqlite3", says="no ledger")
     for step in (("CLAIMED", "RECEIPT_PENDING"), ("RECEIPT_PENDING", "CLOSED")):
         expect(f"reconcile {step[0]} -> {step[1]}", "choice_reconcile.py", 0, *move, "--from", step[0], "--to", step[1], "--result", "done")
     expect("reconcile closed is not open", "choice_reconcile.py", 0, "status", "--db", ledger, "--json", lacks="CH-05:r2")
+    settle = ("settle", "--db", ledger, "--key")
+    expect("reconcile settle refuses an adopted reply", "choice_reconcile.py", 1, *settle, "art/choiceReplies/R1", "--to", "CLOSED", says="adopted")
+    expect("reconcile settle a read note", "choice_reconcile.py", 0, *settle, "art/notes/N1", "--to", "NOTED", says="SETTLED")
+    expect("reconcile settle a note only once", "choice_reconcile.py", 1, *settle, "art/notes/N1", "--to", "NOTED", says="not allowed")
+    for rid in ("R2", "R3", "R4", "R5"):
+        expect(f"reconcile settle {rid}", "choice_reconcile.py", 0, *settle, f"art/choiceReplies/{rid}", "--to", "CLOSED", "--result", "told the user")
+    legacy = ("--db", ledger, "--question", "CH-01", "--revision", "0")
+    expect("reconcile plan a 2.0 answer", "choice_reconcile.py", 0, "plan", *legacy, says="PLANNED CH-01:r0 WO-042")
+    for old, new in (("PLANNED", "QUEUED"), ("QUEUED", "CLAIMED"), ("CLAIMED", "RECEIPT_PENDING"), ("RECEIPT_PENDING", "CLOSED")):
+        expect(f"reconcile CH-01 {old} -> {new}", "choice_reconcile.py", 0, "advance", *legacy, "--from", old, "--to", new)
+    expect("reconcile status reaches all zero", "choice_reconcile.py", 0, "status", "--db", ledger, "--now", "2030-01-01T00:00:00Z",
+           says="open=0 not_handed=0 stuck=0 receipts_pending=0 notes=0")
+    (folder / "list.json").write_text("[1, 2]", encoding="utf-8")
+    (folder / "rows.json").write_text(json.dumps({"choiceReplies": ["not a row"]}), encoding="utf-8")
+    (folder / "broken.sqlite3").write_bytes(b"not a database at all, just text" * 40)
+    for name, args in (("unreadable export", ("ingest", "--db", ledger, "--export", folder / "none.json")),
+                       ("export not an object", ("ingest", "--db", ledger, "--export", folder / "list.json")),
+                       ("bad reply rows", ("ingest", "--db", ledger, "--export", folder / "rows.json")),
+                       ("bad --now", ("status", "--db", ledger, "--now", "yesterday")),
+                       ("broken ledger", ("status", "--db", folder / "broken.sqlite3")),
+                       ("missing folder", ("plan", "--db", folder / "no" / "such" / "x.sqlite3", "--question", "CH-01", "--revision", "1")),
+                       ("advance on a broken ledger", ("advance", "--db", folder / "broken.sqlite3", "--question", "CH-01", "--revision", "1",
+                                                       "--from", "QUEUED", "--to", "CLAIMED"))):
+        expect(f"reconcile shadow error: {name}", "choice_reconcile.py", 0, *args, says="CHOICE_RECONCILE: SHADOW_ERROR", lacks="Traceback")
 
 
 def main():
