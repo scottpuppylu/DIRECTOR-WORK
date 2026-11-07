@@ -5708,6 +5708,44 @@ INSERT INTO inbox VALUES ('art/choiceReplies/R9', 'choice', 'CH-01', 1, 's9', '{
     expect("v22 source: the export's source wins over --source, with a warning", "choice_reconcile.py", 0,
            *export(db, "ns4.json", notes=[dict(note, id="N4")]), "--source", "other", says=["WARNING the export says source=art", "art/notes/N4"])
 
+    # F05: the option the user saw (selectedOptionSnapshot) must be the one the choice names in the registered snapshot
+    labelled = {"questionId": "CH-01", "revision": 1, "title": "t", "options": [{"key": "A", "label": "Alpha"}, {"key": "B", "label": "Beta"}]}
+    (folder / "labelled.json").write_text(json.dumps(labelled, ensure_ascii=False), encoding="utf-8")
+    db = folder / "f05.sqlite3"
+    h = cr("register", "--db", db, "--snapshot", folder / "labelled.json")[1].strip().rsplit("=", 1)[-1]
+
+    def seen(rid, sub, sent, digest=h):
+        return dict(reply(digest, rid, sub), selectedOptionSnapshot=sent)
+
+    expect("v22 f05 a choice whose option snapshot names another key is quarantined", "choice_reconcile.py", 0,
+           *export(db, "f05a.json", [seen("R1", "s1", {"key": "B", "label": "Beta"})]),
+           says=["QUARANTINED art/choiceReplies/R1 reason=snapshot_mismatch", "not recorded, not planned"], lacks="RECORDED")
+    expect("v22 f05 and nothing is planned from it", "choice_reconcile.py", 1, "plan", "--db", db, "--question", "CH-01", "--revision", "1",
+           says="NOTHING")
+    expect("v22 f05 the same key with another label is quarantined too", "choice_reconcile.py", 0,
+           *export(db, "f05b.json", [seen("R2", "s2", {"key": "A", "label": "Beta"})]), says="R2 reason=snapshot_mismatch", lacks="RECORDED")
+    expect("v22 f05 another key without a label is quarantined too", "choice_reconcile.py", 0,
+           *export(db, "f05b2.json", [seen("R3", "s3", {"key": "B", "label": ""})]), says="R3 reason=snapshot_mismatch", lacks="RECORDED")
+    expect("v22 f05 the fixed reply is recorded and leaves the quarantine", "choice_reconcile.py", 0,
+           *export(db, "f05c.json", [seen("R1", "s1", {"key": "A", "label": "Alpha", "desc": ""})]), says="RECORDED art/choiceReplies/R1 CH-01 r1 ok",
+           lacks="WARNING")
+    expect("v22 f05 only the matching reply is planned", "choice_reconcile.py", 0, "plan", "--db", db, "--question", "CH-01", "--revision", "1",
+           says="from art/choiceReplies/R1")
+    code, doc = status_json(db)
+    check("v22 f05 the mismatched reply stays quarantined until settled", doc.get("quarantined") == 2, repr(doc.get("quarantined")))
+    db = folder / "f05-old.sqlite3"
+    h = cr("register", "--db", db, "--snapshot", folder / "labelled.json")[1].strip().rsplit("=", 1)[-1]
+    expect("v22 f05 a reply without selectedOptionSnapshot is still recorded, with a WARNING", "choice_reconcile.py", 0,
+           *export(db, "f05d.json", [reply(h, "R1", "s1")]), says=["WARNING art/choiceReplies/R1: no selectedOptionSnapshot", "r1 ok"])
+    db = folder / "f05-late.sqlite3"
+    expect("v22 f05 with no registered snapshot it warns and does not block", "choice_reconcile.py", 0,
+           *export(db, "f05e.json", [seen("R1", "s1", {"key": "B", "label": "Beta"}, h)]),
+           says=["WARNING art/choiceReplies/R1: no registered options for CH-01 r1", "unknown-revision"], lacks="QUARANTINED")
+    expect("v22 f05 once registered, the mismatch is caught and never planned", "choice_reconcile.py", 0,
+           "register", "--db", db, "--snapshot", folder / "labelled.json", says="unknown-revision -> snapshot_mismatch RECEIPT_PENDING")
+    expect("v22 f05 a late-caught mismatch is not planned", "choice_reconcile.py", 1, "plan", "--db", db, "--question", "CH-01",
+           "--revision", "1", says="NOTHING")
+
 
 def nogit_env():
     """os.environ with every PATH folder that holds a git program taken out: a ZIP install on a machine without git."""
