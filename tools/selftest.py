@@ -1058,7 +1058,7 @@ def test_vocabulary():
             failures.append(f"vocabulary: {path} no longer contains {text!r}; change tools/vocabulary.json and the docs together")
 
 
-MUST_READ_LIMIT = 9540  # bytes of the 每輪必讀 docs on 2026-11-06 (v0.13 moved pure reasons to docs/10; +33 for the IN_FLIGHT fields kept in docs/06, review D01); 2.0.1 +48: PO 2026-11-08 the choice page counts as 待決頁 for no-miss reading (docs/03, docs/06 one clause each); every round re-reads them, so growth costs quota; 2.1.0 (reports 2 and 5) 12433 -> 9532: pure reasons to docs/10, details to docs/05 and docs/06b, one dispatch-plan line added to docs/01; the limit follows the new size so growth needs a reason again
+MUST_READ_LIMIT = 9550  # bytes of the 每輪必讀 docs on 2026-11-06 (v0.13 moved pure reasons to docs/10; +33 for the IN_FLIGHT fields kept in docs/06, review D01); 2.0.1 +48: PO 2026-11-08 the choice page counts as 待決頁 for no-miss reading (docs/03, docs/06 one clause each); every round re-reads them, so growth costs quota; 2.1.0 (reports 2 and 5) 12433 -> 9532: pure reasons to docs/10, details to docs/05 and docs/06b, one dispatch-plan line added to docs/01; the limit follows the new size so growth needs a reason again; +18 for the reading-side clause naming the choice page in docs/03 (Director W4 N1: the PO said the choice page must not be missed, so the reader must not rely on docs/06 alone)
 
 
 def test_must_read_size():
@@ -4819,8 +4819,8 @@ def test_dispatch_plan_rule():
     check("docs/01 does not narrow the Director to dispatch only", "只派工" not in one)
     check("docs/05 has the dispatch-plan section", "### 派工規劃" in five and "Single Writer" in five.split("### 派工規劃")[-1])
     check("docs/10 has lesson L-046", "L-046" in ten)
-    check("docs/03 first step of each round, word for word",
-          "1. **每輪第一步讀待決頁**（任何喚醒）：照待決頁程序讀回覆和新留言，同輪執行或派工並關閉；未能完成則寫續辦紀錄。" in three)
+    check("docs/03 first step of each round, word for word (the reading side names the choice page, 總監 W4 N1)",
+          "1. **每輪第一步讀待決頁**（任何喚醒）：照待決頁程序（含選擇頁）讀回覆和新留言，同輪執行或派工並關閉；未能完成則寫續辦紀錄。" in three)
     check("docs/03 end-of-round check, word for word",
           "- 每輪結束前自查：待決頁已讀、本輪 PO 訊息已處理並登記、已回覆項目已關閉或留有續辦紀錄。" in three)
     check("docs/06b has the hand-over rehearsal", "### 接手演練" in six_b and "metrics_report.py --run" in six_b)

@@ -596,7 +596,7 @@ python -I -X utf8 report_vs_audit.py --report <報告.md> --log <動作紀錄.js
 python -I -X utf8 selftest.py
 ```
 
-改過任何工具、`vocabulary.json`、`docs/02`、範本或每輪必讀的文件就跑一次。也會檢查：文件和範本裡的固定用詞和 `vocabulary.json` 一致；README 標「每輪必讀」的文件合計不超過上限（`MUST_READ_LIMIT`，2.1.0 起為 9,540 bytes：四份必讀從 12,433 減到 9,532）。要提高上限，commit 訊息寫明原因。GitHub Actions 在每次 push 和 PR 跑同一支（`.github/workflows/selftest.yml`），另外在 PATH 上沒有 git 時再跑一次。
+改過任何工具、`vocabulary.json`、`docs/02`、範本或每輪必讀的文件就跑一次。也會檢查：文件和範本裡的固定用詞和 `vocabulary.json` 一致；README 標「每輪必讀」的文件合計不超過上限（`MUST_READ_LIMIT`，2.1.0 起為 9,550 bytes：四份必讀從 12,433 減到 9,550）。要提高上限，commit 訊息寫明原因。GitHub Actions 在每次 push 和 PR 跑同一支（`.github/workflows/selftest.yml`），另外在 PATH 上沒有 git 時再跑一次。
 
 - 沒有 git（2.1.0）：要建 git 測試資料的測試組整組略過，每組印一行 `SKIP <測試組>: needs git, none on PATH`，最後一行寫 `skipped N git group(s)`；其餘照跑，有失敗照樣 exit 1。有 git 時這些測試組照常跑，建資料失敗仍是失敗。`test_no_git` 自己把 git 從 PATH 拿掉，確認 `evidence_record run` 仍寫紀錄、`--rerun` 是 NOT_RUN、doctor 說沒有 git。
 
