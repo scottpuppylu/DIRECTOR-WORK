@@ -3713,6 +3713,151 @@ def test_dns_allow(tmp):
           docker_file)
 
 
+def check(name, ok, detail=""):
+    global total
+    total += 1
+    if not ok:
+        failures.append(f"{name}: {detail}"[:400])
+
+
+def um_call(mid, ts, tools=(), **usage):
+    """One assistant transcript line: tools are (name, input) pairs; usage keys are the token counts."""
+    content = [{"type": "tool_use", "name": n, "input": i} for n, i in tools]
+    return json.dumps({"type": "assistant", "timestamp": ts, "message": {"id": mid, "content": content, "usage": usage}})
+
+
+def test_usage_mix(tmp):
+    """usage_mix.py: fragments of one message.id are merged (L-035), a repeated id counts once, the five shares and the
+    DD-049 targets, --since / --until / --session / --patterns / --json / --check, NO_DATA, and the RESTART numbers."""
+    root = tmp / "usage_mix"
+    p = root / "proj"
+    p.mkdir(parents=True)
+    (root / "empty").mkdir()
+    md, py = ("Read", {"file_path": "D:/x/notes.md"}), ("Edit", {"file_path": "D:/x/app.py"})
+    (p / "aaaa1111.jsonl").write_text("\n".join([
+        json.dumps({"type": "custom-title", "customTitle": "line-alpha"}),
+        um_call("m1", "2026-01-02T10:00:00Z", (), input_tokens=1000),          # the usage fragment of m1
+        um_call("m1", "2026-01-02T10:00:00Z", [md], input_tokens=1000),        # the tool fragment of m1: merged, not summed
+        um_call("m2", "2026-01-02T10:01:00Z", [py], input_tokens=1000),
+        um_call("m3", "2026-01-02T10:02:00Z", [("Bash", {"command": "git status"})], input_tokens=2000)]) + "\n",
+        encoding="utf-8")
+    (p / "bbbb2222.jsonl").write_text("\n".join([
+        um_call("m2", "2026-01-02T10:01:00Z", [py], input_tokens=1000),        # a resumed copy: counted once
+        um_call("m4", "2026-01-05T10:00:00Z", [("Bash", {"command": "sleep 5"})], input_tokens=4000),
+        um_call("m5", "2026-01-05T10:01:00Z", [("Bash", {"command": "run mygame.exe --level 1"})], input_tokens=2000),
+        "not json"]) + "\n", encoding="utf-8")
+    pats = root / "patterns.json"
+    pats.write_text(json.dumps({"schema_version": 1, "patterns": {"engine_run": r"mygame\.exe"}}), encoding="utf-8")
+    bad = root / "bad.json"
+    bad.write_text(json.dumps({"schema_version": 2}), encoding="utf-8")
+    bad_key = root / "bad_key.json"
+    bad_key.write_text(json.dumps({"schema_version": 1, "patterns": {"nope": "x"}}), encoding="utf-8")
+    base = ("--root", root, "--project-dir", "proj")
+    expect("usage_mix shares, merge and dedupe", "usage_mix.py", 0, *base,
+           says=["calls=5 eq=0.0M", "讀和查\t 50.0%", "實際動手\t 10.0%", "等待\t 40.0%", "協調\t  0.0%",
+                 "target <=30% MISSED", "RESULT OFF_TARGET: 讀和查 50.0% (target <=30%); 實際動手 10.0% (target >=30%)"],
+           lacks="text_reply")
+    expect("usage_mix --check misses", "usage_mix.py", 1, *base, "--check", says="RESULT OFF_TARGET")
+    expect("usage_mix --patterns moves a project exe to 實際動手", "usage_mix.py", 0, *base, "--patterns", pats, "--check",
+           says=["讀和查\t 30.0%", "實際動手\t 30.0%  tool_calls 2  target >=30% OK", "RESULT ON_TARGET"])
+    expect("usage_mix --until a date keeps that whole day", "usage_mix.py", 0, *base, "--until", "2026-01-02",
+           says=["calls=3", "讀和查\t 75.0%", "實際動手\t 25.0%"])
+    expect("usage_mix --since", "usage_mix.py", 0, *base, "--since", "2026-01-03",
+           says=["calls=2", "等待\t 66.7%", "讀和查\t 33.3%"])
+    expect("usage_mix --session by title", "usage_mix.py", 0, *base, "--session", "ALPHA", says=["calls=3", "session=ALPHA"])
+    expect("usage_mix --session by id prefix", "usage_mix.py", 0, *base, "--session", "bbbb", says="calls=2")
+    expect("usage_mix --top names the session", "usage_mix.py", 0, *base, "--top", "2", says="session aaaa1111 line-alpha")
+    expect("usage_mix --json", "usage_mix.py", 0, *base, "--json",
+           says=['"eq_total": 10000', '"result": "OFF_TARGET"', '"cache_read_input_tokens": 0.1'])
+    expect("usage_mix no transcripts is NO_DATA", "usage_mix.py", 1, "--root", root, "--project-dir", "empty", says="NO_DATA")
+    expect("usage_mix a range with no calls is NO_DATA", "usage_mix.py", 1, *base, "--since", "2027-01-01", says="NO_DATA")
+    expect("usage_mix patterns schema", "usage_mix.py", 2, *base, "--patterns", bad, says="FAIL patterns")
+    expect("usage_mix patterns key", "usage_mix.py", 2, *base, "--patterns", bad_key, says="FAIL patterns")
+    expect("usage_mix patterns missing file", "usage_mix.py", 2, *base, "--patterns", root / "none.json", says="FAIL patterns")
+    # RESTART: cost per call by context, orientation after a new session and after a compaction, break-even
+    r = root / "restart"
+    r.mkdir()
+    (r / "cccc3333.jsonl").write_text("\n".join([
+        um_call("r1", "2026-01-02T10:00:00Z", [md], cache_read_input_tokens=100000),
+        um_call("r2", "2026-01-02T10:01:00Z", [py], cache_read_input_tokens=110000),
+        um_call("r3", "2026-01-02T10:02:00Z", [md], cache_read_input_tokens=180000),
+        um_call("r4", "2026-01-02T10:03:00Z", [md], cache_read_input_tokens=190000),
+        um_call("r5", "2026-01-02T10:04:00Z", [md], cache_read_input_tokens=50000),   # < 0.6 x 190K: a compaction
+        um_call("r6", "2026-01-02T10:05:00Z", [py], cache_read_input_tokens=60000)]) + "\n", encoding="utf-8")
+    expect("usage_mix restart numbers", "usage_mix.py", 0, "--root", root, "--project-dir", "restart",
+           says=["RESTART new main sessions 1, first-call context median 100.0K; compactions 1, after it 50.0K",
+                 "RESTART after a new session: 1 reached 實際動手, median 1 calls and 10.0K eq before the first one",
+                 "RESTART after a compaction: 1 reached 實際動手, median 1 calls and 5.0K eq",
+                 "60-120K 9.0K (3 calls)", ">=170K 18.5K (2 calls)",
+                 "RESTART break-even after 1 more calls: rebuilding costs 10.0K, each call saves 9.5K"])
+    n = root / "never"
+    n.mkdir()
+    (n / "dddd4444.jsonl").write_text("\n".join([
+        um_call("n1", "2026-01-02T10:00:00Z", [md], cache_creation_input_tokens=100000),  # a new session writes its cache
+        um_call("n2", "2026-01-02T10:01:00Z", [py], cache_read_input_tokens=110000),
+        um_call("n3", "2026-01-02T10:02:00Z", [md], cache_read_input_tokens=180000)]) + "\n", encoding="utf-8")
+    expect("usage_mix break-even NEVER", "usage_mix.py", 0, "--root", root, "--project-dir", "never",
+           says="RESTART break-even NEVER: a call at >=170K costs 18.0K, no more than 68.0K at 60-120K")
+    expect("usage_mix break-even UNKNOWN", "usage_mix.py", 0, *base, says="RESTART break-even UNKNOWN")
+
+
+def test_status_gen(tmp):
+    """status_gen.py writes a status.py that only reads, prints at most max_lines lines of at most width characters,
+    and exits 1 on a missing path or a disk below the threshold (L-042)."""
+    d = tmp / "status_gen"
+    (d / "out" / "sub").mkdir(parents=True)
+    (d / "run.log").write_text("".join(f"line {i} of the run log\n" for i in range(1, 101)) + "x" * 500 + "\n", encoding="utf-8")
+    (d / "hashes.txt").write_text("abc123  build.zip\n", encoding="utf-8")
+    (d / "out" / "a.png").write_bytes(b"x")
+    (d / "out" / "sub" / "b.png").write_bytes(b"yy")
+
+    def status(name, script, code, says=(), lacks=(), max_lines=60, width=160):
+        done = subprocess.run([sys.executable, "-I", str(script)], capture_output=True, encoding="utf-8")
+        lines = done.stdout.splitlines()
+        bad = [s for s in says if s not in done.stdout] + [f"has {s}" for s in lacks if s in done.stdout]
+        check(name, done.returncode == code and not bad and len(lines) <= max_lines and all(len(x) <= width for x in lines),
+              f"exit {done.returncode} (want {code}), {len(lines)} lines, missing {bad}: {done.stdout.strip()[-300:]}")
+
+    full = d / "status_full.py"
+    expect("status_gen writes", "status_gen.py", 0, "--out", full, "--name", "line-a", "--log", d / "run.log",
+           "--hash-file", d / "hashes.txt", "--checksum", d / "hashes.txt", "--outputs", d / "out", "--disk", tmp,
+           "--disk-min-gib", "0.001", "--git", TOOLS.parent, says="WROTE")
+    status("status.py full", full, 0, says=["STATUS line-a", "  line 99 of the run log", "HASH sha256 ", "  abc123  build.zip",
+                                            " OK", "GIT ", "OUT ", "2 files, newest 2", "b.png"])
+    small = d / "status_small.py"
+    expect("status_gen small cap", "status_gen.py", 0, "--out", small, "--log", d / "run.log", "--log-lines", "100",
+           "--max-lines", "10", "--width", "40")
+    status("status.py line cap and width", small, 0, says=["TRUNCATED 93 more lines (max_lines 10)"], max_lines=10, width=40)
+    bad = d / "status_bad.py"
+    expect("status_gen missing paths are written", "status_gen.py", 0, "--out", bad, "--log", d / "none.log",
+           "--outputs", d / "none", "--disk", tmp, "--disk-min-gib", "999999")
+    status("status.py missing and low", bad, 1, says=["LOG MISSING", "OUT MISSING", " LOW"])
+    nogit = d / "status_nogit.py"
+    expect("status_gen git outside a worktree", "status_gen.py", 0, "--out", nogit, "--git", d)
+    status("status.py not a git worktree", nogit, 1, says=["GIT MISSING"])
+    expect("status_gen keeps an existing file", "status_gen.py", 2, "--out", full, "--log", d / "run.log", says="--force")
+    expect("status_gen --force replaces it", "status_gen.py", 0, "--out", full, "--log", d / "run.log", "--force")
+    expect("status_gen nothing to report", "status_gen.py", 2, "--out", d / "s_none.py", says="nothing to report")
+    expect("status_gen threshold needs a disk", "status_gen.py", 2, "--out", d / "s_none.py", "--log", d / "run.log",
+           "--disk-min-gib", "5", says="disk_min_gib needs disk")
+    conf = d / "conf" / "status.json"
+    conf.parent.mkdir()
+    conf.write_text(json.dumps({"schema_version": 1, "name": "from-config", "logs": ["../run.log"], "log_lines": 2}),
+                    encoding="utf-8")
+    cfg = d / "status_cfg.py"
+    expect("status_gen config", "status_gen.py", 0, "--out", cfg, "--config", conf)
+    status("status.py config paths are the config folder's", cfg, 0, says=["STATUS from-config", "  line 100 of the run log"],
+           lacks=["line 98 of"])
+    conf.write_text(json.dumps({"schema_version": 1, "logs": ["a"], "extra": 1}), encoding="utf-8")
+    expect("status_gen unknown config key", "status_gen.py", 2, "--out", d / "s_none.py", "--config", conf, says="unknown key")
+    conf.write_text(json.dumps({"schema_version": 1, "logs": "a"}), encoding="utf-8")
+    expect("status_gen wrong config type", "status_gen.py", 2, "--out", d / "s_none.py", "--config", conf, says="wrong type")
+    source = full.read_text(encoding="utf-8")
+    check("status.py uses only the standard library and does not write", "open(path, \"rb\")" in source
+          and not re.search(r"^import (?!datetime|hashlib|json|os|shutil|subprocess|sys)", source, re.M)
+          and not re.search(r"open\([^)]*[\"'][wa]", source), "status.py imports or writes something")
+
+
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="director_work_selftest_")).resolve()
@@ -3756,6 +3901,8 @@ def main():
         test_trusted_rerun(tmp)
         test_rerun_binding(tmp)
         test_trusted_isolation(tmp)
+        test_usage_mix(tmp)
+        test_status_gen(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     for failure in failures:
