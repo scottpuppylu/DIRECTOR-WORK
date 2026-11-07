@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "about": "hook_guard --sessions: the profile per session_id for sessions that start in one folder. Session IDs are in the hook input (session_id) and in the transcript file names under ~/.claude/projects/. Sessions not listed get default. protected: paths no profile may delete or move, nor any folder above them.",
+  "default": "worker",
+  "sessions": {
+    "00000000-0000-0000-0000-000000000001": {"profile": "director", "name": "director"},
+    "00000000-0000-0000-0000-000000000002": {"profile": "cleaner", "name": "cleaner"}
+  },
+  "protected": [
+    "D:/PROJECT/DIRECTOR/**",
+    "**/RESUME_STATE*.md",
+    "**/.git/**"
+  ]
+}

@@ -1710,6 +1710,126 @@ def test_hook_rules(tmp):
     expect("an unknown profile is refused", "setup_project_settings.py", 2, *setup, "--guard-profile", "admin")
 
 
+def test_session_profiles(tmp):
+    """1.3.0 item 8: hook_guard --sessions picks director / worker / cleaner per session_id from one sessions file;
+    cleaner may delete, nobody may delete or move the protected list; setup_project_settings --session-map."""
+    global total
+    rules_path = TOOLS / "guard_rules.json"
+    keep = (tmp / "sess_keep").resolve()
+    (keep / "sub").mkdir(parents=True)
+    pause = tmp / "sess_PAUSE"
+    smap = tmp / "sessions.json"
+    smap.write_text(json.dumps({"schema_version": 1, "default": "worker",
+                                "sessions": {"S-DIR": "director", "S-CLEAN": {"profile": "cleaner", "name": "cleaner"},
+                                             "S-WORK": "worker"},
+                                "protected": [keep.as_posix() + "/**", "**/RESUME_STATE*.md"]}), encoding="utf-8")
+
+    def hook(sid, tool, command, sessions=smap, extra=()):
+        call = {"tool_name": tool, "tool_input": {"command": command}, "cwd": str(tmp)}
+        if sid:
+            call["session_id"] = sid
+        argv = [sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), "--rules", str(rules_path), "--profile",
+                "worker", *extra] + (["--sessions", str(sessions)] if sessions else [])
+        return subprocess.run(argv, capture_output=True, encoding="utf-8", input=json.dumps(call))
+
+    def case(name, sid, command, code, says="", tool="Bash", **kw):
+        global total
+        total += 1
+        done = hook(sid, tool, command, **kw)
+        out = done.stdout + done.stderr
+        if done.returncode != code or (says and says not in out):
+            failures.append(f"sessions {name}: expected exit {code} with {says!r}, got {done.returncode}: {out.strip()[:200]!r}")
+
+    k = keep.as_posix()
+    up = keep.parent.as_posix()
+    case("cleaner deletes a build folder", "S-CLEAN", "rm -rf build", 0)
+    case("a listed worker may not", "S-WORK", "rm -rf build", 2, "[G10]")
+    case("an unlisted session gets the default", "S-OTHER", "rm -rf build", 2, "[G10]")
+    case("no session_id gets the default", "", "rm -rf build", 2, "[G10]")
+    case("the director is asked", "S-DIR", "rm -rf build", 0, '"ask"')
+    case("cleaner: a protected file", "S-CLEAN", f"rm -f {k}/sub/a.txt", 2, "protected list")
+    case("cleaner: the protected folder", "S-CLEAN", f"rm -rf {k}", 2, "holds protected paths")
+    case("cleaner: a folder above it", "S-CLEAN", f"rm -rf {up}", 2, "holds protected paths")
+    case("cleaner: a wildcard over it", "S-CLEAN", f"rm -rf {up}/*", 2, "holds protected paths")
+    case("cleaner: the drive root", "S-CLEAN", "rm -rf " + keep.anchor.replace("\\", "/"), 2, "holds protected paths")
+    case("cleaner: a **/ file", "S-CLEAN", "rm RESUME_STATE.md", 2, "protected list")
+    case("cleaner: moving it away", "S-CLEAN", f"mv {k}/sub ../elsewhere", 2, "protected")
+    case("cleaner: PowerShell Remove-Item", "S-CLEAN", f"Remove-Item -Recurse -Force {k}", 2, "holds protected paths",
+         tool="PowerShell")
+    case("cleaner: a file next to it", "S-CLEAN", f"rm -f {up}/other.txt", 0)
+    case("the director: protected too", "S-DIR", f"rm -f {k}/sub/a.txt", 2, "protected list")
+    case("cleaner: push is still blocked", "S-CLEAN", "git push origin main", 2)
+    case("cleaner: worktree remove is still blocked", "S-CLEAN", "git worktree remove ../wt", 2)
+    case("cleaner: a read is silent", "S-CLEAN", "ls -la", 0)
+    case("without --sessions the cleaner rule is not there", "S-CLEAN", "rm -rf build", 2, "[G10]", sessions=None)
+    pause.write_text("PAUSED by director at 2026-11-07 10:00 +08:00: test\n", encoding="utf-8")
+    case("pause holds a worker", "S-WORK", "touch a.txt", 2, "PAUSED", extra=("--pause-flag", str(pause)))
+    case("pause holds the cleaner", "S-CLEAN", "touch a.txt", 2, "PAUSED", extra=("--pause-flag", str(pause)))
+    case("pause never holds the director", "S-DIR", "touch a.txt", 0, extra=("--pause-flag", str(pause)))
+    pause.unlink()
+    log = tmp / "sess_audit.jsonl"
+    case("audit says protected", "S-CLEAN", f"rm -rf {k}", 2, extra=("--audit", str(log)))
+    total += 1
+    logged = log.read_text(encoding="utf-8") if log.exists() else ""
+    if "protected" not in logged:
+        failures.append(f"sessions audit: no protected label in {logged!r}")
+    bad = tmp / "sessions_bad.json"
+    for name, text in [("not json", "{"), ("wrong version", '{"schema_version": 2}'),
+                       ("unknown key", '{"schema_version": 1, "extra": 1}'),
+                       ("unknown profile", '{"schema_version": 1, "sessions": {"S": "admin"}}'),
+                       ("bad default", '{"schema_version": 1, "default": "root"}'),
+                       ("relative protected", '{"schema_version": 1, "protected": ["DIRECTOR/**"]}')]:
+        bad.write_text(text, encoding="utf-8")
+        case(f"bad sessions file: {name}", "S-CLEAN", "ls", 1, "bad sessions file", sessions=bad)
+    total += 1
+    done = subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), "--sessions", str(smap)],
+                          capture_output=True, encoding="utf-8",
+                          input=json.dumps({"tool_name": "Bash", "tool_input": {"command": "ls"}}))
+    if done.returncode != 1 or "--sessions needs --rules" not in done.stderr:
+        failures.append(f"sessions without --rules: {done.returncode} {done.stderr!r}")
+    total += 1
+    done = subprocess.run([sys.executable, "-I", "-X", "utf8", "-c", "import importlib.util, sys; "
+                           "s = importlib.util.spec_from_file_location('g', sys.argv[1]); g = importlib.util.module_from_spec(s); "
+                           "s.loader.exec_module(g); g.load_sessions(sys.argv[2])",
+                           str(TOOLS / "hook_guard.py"), str(TOOLS.parent / "templates" / "guard_sessions.json")],
+                          capture_output=True, encoding="utf-8")
+    if done.returncode != 0:
+        failures.append(f"templates/guard_sessions.json does not load: {done.stderr.strip()[-200:]!r}")
+
+    # setup --session-map: one settings file for every session of a folder
+    repo = tmp / "sess_repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    (repo / ".git" / "info" / "exclude").write_text(".claude/settings.local.json\n", encoding="utf-8")
+    settings = repo / ".claude" / "settings.local.json"
+    setup = ("--repo", repo, "--only-this")
+    expect("session map missing", "setup_project_settings.py", 1, *setup, "--session-map", smap,
+           says=["MISSING", "hooks.PreToolUse", "session_map="])
+    expect("session map written and tested", "setup_project_settings.py", 0, *setup, "--session-map", smap, "--apply",
+           says=["SET", "(cleaner,director,worker)", "block-rule=2"])
+    expect("session map kept on rerun", "setup_project_settings.py", 0, *setup, "--session-map", smap, says="OK")
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    command = data["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    total += 1
+    if f'--sessions "{smap.resolve().as_posix()}"' not in command or "--profile worker" not in command:
+        failures.append(f"setup --session-map: command is {command!r}")
+    total += 1
+    perms = data.get("permissions", {})
+    if ("Bash(rm *)" in perms.get("deny", []) + perms.get("ask", []) or "Bash(git push *)" not in perms.get("deny", [])
+            or "Bash(gh pr create *)" not in perms.get("ask", []) or "Bash(gh pr create *)" in perms.get("deny", [])):
+        failures.append(f"setup --session-map: permissions are not the mildest of the mapped profiles: {perms}")
+    expect("without the map the entry is not OK", "setup_project_settings.py", 1, *setup, "--guard-profile", "worker",
+           says="hooks.PreToolUse matcher")
+    other = tmp / "sessions_other.json"
+    other.write_text(smap.read_text(encoding="utf-8"), encoding="utf-8")
+    expect("another map file is not OK", "setup_project_settings.py", 1, *setup, "--session-map", other,
+           says="hooks.PreToolUse matcher")
+    bad.write_text('{"schema_version": 1, "sessions": {"S": "admin"}}', encoding="utf-8")
+    expect("a bad map is refused", "setup_project_settings.py", 1, *setup, "--session-map", bad, lacks="MISSING")
+    expect("cleaner is a guard profile", "setup_project_settings.py", 1, *setup, "--guard-profile", "cleaner",
+           says="MISSING")
+
+
 def test_evidence(tmp):
     out = tmp / "evidence"
     work = tmp / "work"
@@ -4004,6 +4124,7 @@ def main():
         test_hook(tmp)
         test_hook_protect(tmp)
         test_hook_rules(tmp)
+        test_session_profiles(tmp)
         test_pause(tmp)
         test_auto_pause(tmp)
         test_audit(tmp)
