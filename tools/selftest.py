@@ -3858,6 +3858,125 @@ def test_status_gen(tmp):
           and not re.search(r"open\([^)]*[\"'][wa]", source), "status.py imports or writes something")
 
 
+def test_round_check(tmp):
+    """round_check.py: fix rounds go in sets of 3; from round 4 the study must hold WHERE / ALTERNATIVES / DECISION
+    for every finished set (L-032)."""
+    d = tmp / "round_check"
+    d.mkdir()
+
+    def resume(name, rows):
+        f = d / f"RESUME_STATE_{name}.md"
+        f.write_text("PROGRESS: x\n\nFIX_ROUNDS:\n" + "".join(f"- {r}\n" for r in rows) + "OPEN_DECISIONS: NONE\n",
+                     encoding="utf-8")
+        return f
+
+    study = ("# ROOT CAUSE STUDY\n\n## SET 1\nWHERE: the shader, not the mesh\nALTERNATIVES: a ready asset; bake it\n"
+             "DECISION: bake it\n\n## material SET 2\nWHERE: import settings\nALTERNATIVES: preset\nDECISION: preset\n")
+    (d / "ROOT_CAUSE_STUDY.md").write_text(study, encoding="utf-8")
+    (d / "STUDY_EMPTY.md").write_text("## SET 1\nWHERE: <where>\nALTERNATIVES:\nDECISION: ...\n", encoding="utf-8")
+    ok = resume("ok", ["hair: round=4 set=2 study=ROOT_CAUSE_STUDY.md", "eyes: round=3 set=1 study=NONE"])
+    expect("round_check set 1 and a studied set 2 pass", "round_check.py", 0, "--resume", ok,
+           says="ROUNDS: PASS files=1 defects=2 failed=0")
+    expect("round_check round 4 without a study", "round_check.py", 1, "--resume",
+           resume("nostudy", ["hair: round=4 set=2 study=NONE"]), says=["needs a root-cause study after set 1", "ROUNDS: FAIL"])
+    expect("round_check study file missing", "round_check.py", 1, "--resume",
+           resume("gone", ["hair: round=5 set=2 study=NOPE.md"]), says="study file not found: NOPE.md")
+    expect("round_check study lines empty", "round_check.py", 1, "--resume",
+           resume("empty", ["hair: round=4 set=2 study=STUDY_EMPTY.md"]),
+           says="STUDY_EMPTY.md SET 1: WHERE, ALTERNATIVES, DECISION empty or missing")
+    expect("round_check set 3 needs a SET 2 section for this defect", "round_check.py", 1, "--resume",
+           resume("set3", ["hair: round=7 set=3 study=ROOT_CAUSE_STUDY.md"]), says="no `## SET 2` section")
+    expect("round_check a section named for the defect counts", "round_check.py", 0, "--resume",
+           resume("named", ["material: round=7 set=3 study=ROOT_CAUSE_STUDY.md"]), says="ROUNDS: PASS")
+    expect("round_check set must match the round", "round_check.py", 1, "--resume",
+           resume("wrongset", ["hair: round=4 set=1 study=ROOT_CAUSE_STUDY.md"]), says="round 4 belongs to set 2")
+    expect("round_check numbers", "round_check.py", 1, "--resume", resume("nan", ["hair: round=x set=1 study=NONE"]),
+           says="must be numbers")
+    none = d / "none"
+    none.mkdir()
+    (none / "RESUME_STATE.md").write_text("PROGRESS: x\nFIX_ROUNDS: NONE\n", encoding="utf-8")
+    expect("round_check FIX_ROUNDS NONE", "round_check.py", 0, "--dir", none, says="ROUNDS: PASS files=1 defects=0")
+    (none / "RESUME_STATE.md").write_text("PROGRESS: x\n", encoding="utf-8")
+    expect("round_check without the field", "round_check.py", 0, "--dir", none, says="no FIX_ROUNDS field")
+    expect("round_check --dir default glob", "round_check.py", 1, "--dir", d, says="ROUNDS: FAIL files=")
+    expect("round_check no RESUME_STATE", "round_check.py", 1, "--dir", d / "round_none_here",
+           says="no RESUME_STATE*.md")
+
+
+TR_GOOD = """TEST REQUEST: BENCH hair pass 40
+FROM: line-a worker
+PURPOSE: AC-3 hair look
+MIN_SCOPE: one scene, 3 sets
+TIER: 1
+CHANGES: hair shader (switch HAIR_V2)
+SWITCHES: HAIR_V2 on / off
+EXCLUSIVE_MIN: 10
+NORMAL_MIN: 20
+BUILD_GB: 6.5
+CAPTURE: 3 x 200 x 4 MiB = 2.34
+CACHE_GB: 3
+WRITE_GB: 12
+DURATION: 3 x 12 min = 36
+TIER0_DONE: unit tests, offline render check
+"""
+
+
+def test_test_request(tmp):
+    """gate_check --test-request: every field filled; space in GiB covering build + capture + cache (L-030, L-031);
+    duration = sets x measured minutes with timeouts, within the limit (L-033)."""
+    expect("blank template TEST_REQUEST is refused", "gate_check.py", 1, "--test-request", TEMPLATES / "TEST_REQUEST.md")
+    gate(tmp, "tr_ok", "test-request", TR_GOOD, 0)
+    gate(tmp, "tr_capture_none", "test-request", TR_GOOD.replace("3 x 200 x 4 MiB = 2.34", "NONE"), 0)
+    gate(tmp, "tr_missing", "test-request", TR_GOOD.replace("DURATION: 3 x 12 min = 36\n", ""), 1, "DURATION: missing")
+    gate(tmp, "tr_empty", "test-request", TR_GOOD.replace("CACHE_GB: 3", "CACHE_GB:"), 1, "CACHE_GB")
+    gate(tmp, "tr_decimal_gb", "test-request", TR_GOOD.replace("BUILD_GB: 6.5", "BUILD_GB: 6.5 GB"), 1, "not decimal GB")
+    gate(tmp, "tr_capture_math", "test-request", TR_GOOD.replace("= 2.34", "= 0.5"), 1, "CAPTURE: 3 x 200 x 4 MiB is 2.34")
+    gate(tmp, "tr_capture_form", "test-request", TR_GOOD.replace("3 x 200 x 4 MiB = 2.34", "about 2 GiB"), 1,
+         "CAPTURE: `<sets>")
+    gate(tmp, "tr_write_short", "test-request", TR_GOOD.replace("WRITE_GB: 12", "WRITE_GB: 8"), 1,
+         "less than BUILD_GB + CAPTURE + CACHE_GB")
+    gate(tmp, "tr_duration_math", "test-request", TR_GOOD.replace("= 36", "= 20"), 1, "DURATION: 3 x 12 is 36")
+    gate(tmp, "tr_duration_form", "test-request", TR_GOOD.replace("3 x 12 min = 36", "about half an hour"), 1,
+         "DURATION: `<sets>")
+    gate(tmp, "tr_over_limit", "test-request", TR_GOOD.replace("hair pass 40", "hair pass 30"), 1,
+         "the limit 30 minutes is below DURATION 36")
+
+
+def test_poll_hint(tmp):
+    """poll_hint.py (PostToolUse): the third read of one log by one session within the window adds 等完成通知;
+    it never blocks (L-041)."""
+    state = tmp / "poll_state"
+
+    def hook(name, command, session="s1", tool="Bash", hint=False, extra=()):
+        global total
+        total += 1
+        event = json.dumps({"session_id": session, "tool_name": tool, "tool_input": {"command": command}})
+        done = subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "poll_hint.py"), "--state-dir", str(state),
+                               *extra], input=event, capture_output=True, encoding="utf-8")
+        got = "等完成通知" in done.stdout
+        if done.returncode != 0 or got != hint or (hint and '"hookEventName": "PostToolUse"' not in done.stdout):
+            failures.append(f"{name}: expected exit 0 hint={hint}, got {done.returncode} hint={got}: {done.stdout[-200:]}")
+
+    hook("poll_hint first read", "tail -n 20 D:/w/run.log")
+    hook("poll_hint other session", "tail -n 20 D:/w/run.log", session="s2")
+    hook("poll_hint second read, other verb", "Get-Content D:\\w\\run.log -Tail 20", tool="PowerShell")
+    hook("poll_hint third read hints", "cat d:/w/RUN.log | grep ERROR", hint=True)
+    hook("poll_hint count starts again", "tail D:/w/run.log")
+    hook("poll_hint cat of source is not a log read", "cat tools/a.py && cat tools/a.py && cat tools/a.py")
+    hook("poll_hint other tools are ignored", "tail D:/w/run.log", tool="Read")
+    hook("poll_hint other session still at 1", "tail -f D:/w/run.log", session="s2")
+    hook("poll_hint one command reading twice counts once", "tail x.log; tail x.log", session="s3")
+    hook("poll_hint window", "tail y.log", session="s4", extra=("--window", "0"))
+    hook("poll_hint window 0 never adds up", "tail y.log", session="s4", extra=("--window", "0"))
+    hook("poll_hint --times", "tail z.log", session="s5", extra=("--times", "1"), hint=True)
+    global total
+    total += 1
+    done = subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "poll_hint.py"), "--state-dir", str(state)],
+                          input="not json", capture_output=True, encoding="utf-8")
+    if done.returncode != 0 or done.stdout.strip():
+        failures.append(f"poll_hint bad input: expected exit 0 and no output, got {done.returncode}: {done.stdout[-200:]}")
+
+
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="director_work_selftest_")).resolve()
@@ -3903,6 +4022,9 @@ def main():
         test_trusted_isolation(tmp)
         test_usage_mix(tmp)
         test_status_gen(tmp)
+        test_round_check(tmp)
+        test_test_request(tmp)
+        test_poll_hint(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     for failure in failures:

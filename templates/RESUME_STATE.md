@@ -15,5 +15,6 @@ IN_FLIGHT: <背景程序 PID、啟動時間、輸出路徑、完成判定方式�
 COORDINATOR: <已送 / 已取得的 TEST REQUEST、GO> 或 NONE
 PARTIAL_OUTPUTS_TO_DISCARD: <被中斷時要重做的輸出路徑> 或 NONE
 KEEP_AS_EVIDENCE: <要保留的證據路徑>（同一路徑不得同時出現在可回收清單）
+FIX_ROUNDS: <每個修過的缺陷一行：`- <缺陷>: round=<累計輪次> set=<組> study=<ROOT_CAUSE_STUDY.md 或 NONE>`> 或 NONE
 OPEN_DECISIONS: <等總監 / PO 的決定> 或 NONE
 DO_NOT_REPEAT: <已失敗的方法，不要重試> 或 NONE

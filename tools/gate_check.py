@@ -12,6 +12,11 @@ evidence and the product is still the Director's job (docs/02, docs/07).
              criterion and no check is noted. An optional `REQUIRED_CHANGES:` list (globs the work must change, read
              by scope_check.py) must lie inside SCOPE and outside FORBIDDEN, or the order cannot be done
   --report   required fields filled in; RESULT in the vocabulary; PASS is refused with NOT_RUN tests or a scope violation
+  --test-request
+             every field of templates/TEST_REQUEST.md filled; BUILD_GB, CACHE_GB and WRITE_GB in GiB, not GB;
+             CAPTURE `<sets> x <images> x <MiB> = <GiB>` (or NONE) adds up; WRITE_GB covers BUILD_GB + CAPTURE +
+             CACHE_GB (L-030, L-031); DURATION `<sets> x <measured minutes per set, timeouts included> = <minutes>`
+             adds up and fits the limit on the TEST REQUEST line (L-033)
   --verdict  verdict and next step in the vocabulary; status split by aspect; stop state written. With --match, the
              verdict's `ORDER: <file> REVISION n` line must name a matched order at its REVISION; with --candidate, its
              `CANDIDATE_HEAD:` must be that commit (exactly for Strict). A missing line fails Strict and is noted otherwise
@@ -939,7 +944,71 @@ def verdict_binding(text, orders, candidate, notes):
     return problems
 
 
-CHECKS = {"resume": check_resume, "order": check_order, "report": check_report, "verdict": check_verdict}
+TR_FIELDS = ("TEST REQUEST", "FROM", "PURPOSE", "MIN_SCOPE", "TIER", "CHANGES", "SWITCHES", "EXCLUSIVE_MIN", "NORMAL_MIN",
+             "BUILD_GB", "CAPTURE", "CACHE_GB", "WRITE_GB", "DURATION", "TIER0_DONE")
+NUMBER = r"(\d+(?:\.\d+)?)"
+TIMES = r"\s*[x×*]\s*"
+
+
+def tr_fields(text):
+    fields = {}
+    for line in text.splitlines():
+        m = re.match(r"\s*([A-Z][A-Z0-9_ ]*[A-Z0-9_])\s*:\s*(.*)$", line)
+        if m:
+            fields[m.group(1)] = m.group(2).strip()
+    return fields
+
+
+def check_test_request(text, notes):
+    """The TEST REQUEST fields (templates/TEST_REQUEST.md): all filled, the disk estimate in GiB covering build,
+    capture and cache (L-030, L-031), the duration counted as sets x measured minutes with timeouts (L-033)."""
+    problems, fields = [], tr_fields(text)
+    for key in TR_FIELDS:
+        if key not in fields:
+            problems.append(f"{key}: missing")
+        else:
+            filled(key, fields[key], problems)
+    gib = {}
+    for key in ("BUILD_GB", "CACHE_GB", "WRITE_GB"):
+        value = fields.get(key, "")
+        if re.search(r"\bGB\b", value):
+            problems.append(f"{key}: write GiB (2^30 bytes), not decimal GB (L-031)")
+        m = re.match(NUMBER, value)
+        if m:
+            gib[key] = float(m.group(1))
+        elif value and not PLACEHOLDER.search(value):
+            problems.append(f"{key}: a number of GiB, got: {value}")
+    capture = fields.get("CAPTURE", "")
+    m = re.match(NUMBER + TIMES + NUMBER + TIMES + NUMBER + r"\s*(?:MiB|MB)?\s*=\s*" + NUMBER, capture)
+    if capture.upper().startswith("NONE"):
+        gib["CAPTURE"] = 0.0
+    elif m:
+        sets, images, mib, total = (float(x) for x in m.groups())
+        if abs(sets * images * mib / 1024 - total) > max(0.05, 0.05 * total):
+            problems.append(f"CAPTURE: {sets:g} x {images:g} x {mib:g} MiB is {sets * images * mib / 1024:.2f} GiB, "
+                            f"not {total:g}")
+        gib["CAPTURE"] = total
+    elif capture and not PLACEHOLDER.search(capture):
+        problems.append("CAPTURE: `<sets> x <images per set> x <MiB per image> = <GiB>`, or NONE")
+    if len(gib) == 4 and gib["WRITE_GB"] + 0.05 < gib["BUILD_GB"] + gib["CAPTURE"] + gib["CACHE_GB"]:
+        problems.append(f"WRITE_GB: {gib['WRITE_GB']:g} GiB is less than BUILD_GB + CAPTURE + CACHE_GB = "
+                        f"{gib['BUILD_GB'] + gib['CAPTURE'] + gib['CACHE_GB']:g} GiB (L-030)")
+    duration = fields.get("DURATION", "")
+    m = re.match(NUMBER + TIMES + NUMBER + r"\s*(?:min|分鐘)?\s*=\s*" + NUMBER, duration)
+    if m:
+        sets, each, total = (float(x) for x in m.groups())
+        if abs(sets * each - total) > 1:
+            problems.append(f"DURATION: {sets:g} x {each:g} is {sets * each:g} minutes, not {total:g}")
+        cap = re.findall(r"\d+", fields.get("TEST REQUEST", ""))
+        if cap and float(cap[-1]) < total:
+            problems.append(f"TEST REQUEST: the limit {cap[-1]} minutes is below DURATION {total:g}")
+    elif duration and not PLACEHOLDER.search(duration):
+        problems.append("DURATION: `<sets> x <measured minutes per set, timeouts included> = <minutes>` (L-033)")
+    return problems
+
+
+CHECKS = {"resume": check_resume, "order": check_order, "report": check_report, "verdict": check_verdict,
+          "test-request": check_test_request}
 
 
 def dated(kind, text):
@@ -964,7 +1033,7 @@ def main():
     ap.add_argument("--since", metavar="YYYY-MM-DD", help="skip files dated before this day")
     a = ap.parse_args()
     sys.stdout.reconfigure(encoding="utf-8")
-    jobs = [(kind, path) for kind in CHECKS for path in getattr(a, kind)] + [("match", pair) for pair in a.match]
+    jobs = [(kind, path) for kind in CHECKS for path in getattr(a, kind.replace("-", "_"))] + [("match", pair) for pair in a.match]
     missing = [path for path in a.hash if not pathlib.Path(path).is_file()]
     for path in a.hash:
         if path in missing:
@@ -979,7 +1048,7 @@ def main():
     if not jobs and a.hash and not a.preflight:
         return 1 if missing else 0
     if not jobs and not a.preflight:
-        ap.error("give at least one of --resume / --order / --report / --verdict / --match / --preflight / --hash")
+        ap.error("give at least one of --resume / --order / --report / --verdict / --test-request / --match / --preflight / --hash")
     if a.repo and not a.preflight:
         ap.error("--repo works with --preflight")
     if a.since and not DATE.fullmatch(a.since):
