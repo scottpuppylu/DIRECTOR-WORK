@@ -410,8 +410,8 @@ def main():
             item("MISSING", "permissions", ", ".join(f"{len(v)} rule permission(s) in permissions.{k}" for k, v in stray.items() if v)
                  + f" that {mode} mode does not want (they would still stop the call; setup_project_settings.py --apply)")
         elif mode == "remind" and not any(missing.values()):
-            item("CONFIGURED_NOT_VERIFIED", "permissions", "remind mode: no deny / ask rule is written; flagged calls run "
-                 "with a reminder")
+            item("CONFIGURED_NOT_VERIFIED", "permissions", "remind mode: only the secret rules' deny is written; other "
+                 "flagged calls run with a reminder")
         elif any(missing.values()):
             item("MISSING", "permissions", ", ".join(f"{len(v)} of permissions.{k}" for k, v in missing.items() if v)
                  + f" for the {profile} profile" + (" with the sessions file" if smap else ""))

@@ -14,10 +14,10 @@
   - `remind`（預設）：標出的指令照跑（exit 0），stdout 一行 JSON：`systemMessage` 給使用者、`additionalContext` 給模型，註明「只是提醒；使用者已在對話裡核准就直接做、不要再問」。
   - `ask`：回 `permissionDecision: "ask"`，交給使用者當場決定。
   - `block`：明確 opt-in 的嚴格模式，exit 2，就是 1.3.0 以前的行為。
-  - 暫停旗標是人明確設下的停止，每個模式都擋。自動暫停和 `--review` 只在 block 模式作用。動作紀錄的 `result.status` 多了 `remind`。
+  - 暫停旗標是人明確設下的停止，每個模式都擋。機密規則（G50–G52：讀 `.env`、`~/.ssh`、`gh auth token` 等，類別 `secret`）的 deny 也是每個模式都擋（exit 2）：讀機密不在「PO 核准就執行」的範圍，1.3.0 也擋，不能退化（總監裁定）。自動暫停和 `--review` 只在 block 模式作用。動作紀錄的 `result.status` 多了 `remind`。
   - docstring 刪掉「PO 核准的 push 由 PO 自己執行，或先移除 hook」那句；正式路徑是使用者核准後 AI 直接執行，不必拆設定。
 - 引號和 here-document 裡的字不算指令（L-044）。`cat <<'EOF' ... EOF`、`<<-`、不加引號的 `EOF` 的內容是資料；不加引號時內容裡的 `$(...)` 和反引號照樣會執行，照樣檢查；找不到結尾行的照原文檢查；`<<<` 和 `$((1<<2))` 不是 here-document。
-- `setup_project_settings.py --guard-mode remind|ask|block`（設定檔 `guard_mode`）：預設 remind，指令不加 `--mode`；ask / block 在指令加 `--mode X`；沒給時沿用已裝項目的模式。規則權限跟著模式：block 照舊寫 `permissions.deny` / `ask`，ask 全部寫進 `permissions.ask`，remind 一條都不寫，舊安裝留下的規則權限從清單拿掉（不然 Claude Code 照樣擋），使用者自己加的不動。hook 測試依模式要得到 `2` / `ask` / `remind`。`templates/settings.runtime-guard.json` 改成 remind 的樣子（沒有 `permissions`）。
+- `setup_project_settings.py --guard-mode remind|ask|block`（設定檔 `guard_mode`）：預設 remind，指令不加 `--mode`；ask / block 在指令加 `--mode X`；沒給時沿用已裝項目的模式。規則權限跟著模式：block 照舊寫 `permissions.deny` / `ask`，ask 全部寫進 `permissions.ask`，remind 只寫機密規則（G50）的 `permissions.deny`（ask 模式的 G50 也留在 deny），其他規則權限從清單拿掉（不然 Claude Code 照樣擋），使用者自己加的不動。hook 測試依模式要得到 `2` / `ask` / `remind`。`templates/settings.runtime-guard.json` 改成 remind 的樣子（`permissions` 只有 G50 的 deny）。
 - `doctor.py`：hook_guard 那行寫出模式；清單裡還留著這個模式不要的規則權限 → MISSING（那條照樣會擋）。
 - `guard_rules.json` G02（push）、G10 / G11（刪除）、G20 / G21（對外發布、送出，含 `gh pr merge`）的理由改成「PO 在對話裡核准了就執行，沒核准才回報」；不再寫「由 PO 自己執行」或「改成回報」。
 - `usage_mix.py`：
@@ -30,11 +30,11 @@
   - README、`docs/04`、`docs/05` 加一節「防護是安全帶，不是剎車」：使用者核准就執行，已核准的事不重問，阻擋只留給明確 opt-in。
   - README 的防護表、`docs/08` 的 hook 那句、`tools/README.md` 改成依模式說明。
   - `docs/10` 加第 45–47 條（L-043 設定只從啟動資料夾讀、L-044 here-document 誤判、L-045 阻擋型防護卡住已核准的動作）。
-- `selftest.py` 加上面各項的正反案例（1,648 → 1,705 項）。
+- `selftest.py` 加上面各項的正反案例（1,648 → 1,714 項）。
 
 對齊初衷：
 1. 幫到誰：PO 和每條工作線。PO 核准的事 AI 直接做，PO 不用自己跑、不用拆設定、不用被重問；工作線不會因為裝了防護就不敢動手。總監看 `usage_mix --by-session`，就知道每條線的額度花在哪一種 shell 指令上。
-2. Desktop：在 Desktop Code 分頁的 worker session 做，只用 DW 自己的 selftest 和合成的 hook 輸入實測；`usage_mix` 拆分前後對這台電腦 11 月的紀錄各跑一次。selftest 1,705/1,705，在 Python 3.9、3.11、3.12 各跑一次。沒有在真的 Claude Code session 裡觀察提醒的顯示方式（NOT_VERIFIED：remind 的 JSON 欄位照官方 hook 文件寫）。
+2. Desktop：在 Desktop Code 分頁的 worker session 做，只用 DW 自己的 selftest 和合成的 hook 輸入實測；`usage_mix` 拆分前後對這台電腦 11 月的紀錄各跑一次。selftest 1,714/1,714，在 Python 3.9、3.11、3.12 各跑一次。沒有在真的 Claude Code session 裡觀察提醒的顯示方式（NOT_VERIFIED：remind 的 JSON 欄位照官方 hook 文件寫）。
 3. 服務：PO 不用盯細節（3）：核准一次就做完，不再為同一件事被問兩次。省額度（2）：少掉重問、拆設定、重推的往返；`usage_mix` 看得到 shell 指令花在哪。零成本（7）：只用標準庫，沒有下載。
 4. 核心：每輪必讀 `docs/08` 只改一句（仍在 `MUST_READ_LIMIT` 以內），規則本身不變：push、刪除、付費仍要 PO 核准，核准仍是一次一件。改的是防護不再把已核准的事擋下來。Direct 不多步驟。
 5. 舊檔案和舊指令：都照樣通過。舊的 hook 項目沒有 `--mode`，複製新 `tools/` 之後就是提醒模式；要維持擋下見遷移第 2 步。
@@ -45,7 +45,6 @@
 3. 在每個 session 的**啟動資料夾**重跑（L-043）；改完新開 session，跑 `doctor.py` 看 hook_guard 那行的 `mode`。
 
 沒做：
-- remind 模式也不再擋讀機密（G50–G52：`.env`、`~/.ssh`、`gh auth token` 等），只提醒；`permissions.deny` 裡對應的規則也一起拿掉。要擋就用 `--guard-mode block`。是否讓這幾條在 remind 模式仍然 deny，留給總監決定。
 - 沒有「這一次 PO 已核准」的單次放行旗標：remind 模式本來就照跑，ask 模式由使用者當場點頭，block 模式要換模式。
 
 ## 1.3.0 — 2026-11-07

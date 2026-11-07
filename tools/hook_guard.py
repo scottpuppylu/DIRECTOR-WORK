@@ -11,7 +11,8 @@ flags exits 0 silently, so it costs no context. What a flagged call gets depends
                     shows to the model instead of running the command (the behaviour of 1.3.0 and before).
 Do not install block on worker lines by default: a guard that stops approved work teaches the agent to do nothing.
 A seat belt, not a brake. The pause flag (--pause-flag) is an explicit stop set by a person and denies in every mode;
-auto-pause and --review act in block mode only.
+so does a deny of a "secret" rule (G50-G52: reading .env, ~/.ssh, a token; with --rules), since an approval in the
+conversation does not cover reading a secret, as in 1.3.0. Auto-pause and --review act in block mode only.
 
 Flagged: git push (any form, also `git -C <dir> push` and C:\\...\\git.exe push), git reset --hard,
 git clean (except -n / --dry-run), bare git stash / stash pop / drop / clear (`git stash push -m <mark>`, list, show,
@@ -434,6 +435,8 @@ REMIND_NOTE = (" (reminder only, not blocked: the call runs. Approved by the use
 # cleaner: a worker whose "delete" rules do not apply; the sessions file's protected list still holds (--sessions)
 SESSION_PROFILES = PROFILES + ("cleaner",)
 CLEANER_OPEN = ("delete",)
+# rule categories whose deny holds in every mode (remind and ask too): an approval does not cover reading a secret
+HARD_DENY = ("secret",)
 DECISIONS = ("deny", "ask", "none")
 KINDS = {"shell": ("cmd",), "path": ("tools", "globs"), "mcp": ("words",)}
 WRITE_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
@@ -1216,6 +1219,13 @@ def main():
         label = "protected" if why else label
     hits = decide(data, a.profile, call, a.rules) if data is not None else []
     deny, ask = first(hits, "deny"), first(hits, "ask")
+    if a.mode != "block" and data is not None:
+        kinds = {r.get("id"): r.get("category") for r in data["rules"]}
+        hard = first([h for h in hits if h[0] == "deny" and kinds.get(h[1]) in HARD_DENY], "deny")
+        if hard:
+            print(f"BLOCKED by hook_guard [{hard[1]}]: {hard[2]} (a secret rule: denied in every mode)", file=sys.stderr)
+            audit(a.audit, original, "deny", hard[1])
+            return 2
     reviewed = None
     if a.mode != "block" and (deny or why or ask):
         rule, text = (deny[1], deny[2]) if deny else (label, why) if why else (ask[1], ask[2])

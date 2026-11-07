@@ -36,7 +36,8 @@ instead of letting the call through. The --director-worktree always gets the dir
 rule's "permissions" go into permissions.deny or permissions.ask, by the profile's decision for that rule (second
 layer: deny and ask rules hold in every permission mode); a rule permission sitting in the other list is moved. In
 ask mode they all go into permissions.ask. In remind mode none is written, and the ones an earlier install wrote are
-taken out of both lists (a permission rule would stop the call the hook only reminds of). Missing or stray ones show
+taken out of both lists (a permission rule would stop the call the hook only reminds of). The exception: a "secret"
+rule (G50) the profile denies keeps its permissions.deny in every mode, as hook_guard denies it in every mode. Missing or stray ones show
 MISSING (permissions.deny / permissions.ask). Without --guard-profile an installed entry keeps its
 --profile, like --protect. The hook test then also asks for an empty stdout on the allowed call and runs one MCP
 call every profile denies (G30), which shows the rules file loaded.
@@ -181,15 +182,19 @@ def wanted_permissions(rules, profile, mode="block"):
     """{"deny": [...], "ask": [...]}: each rule's permissions under the list its decision for this profile names.
     For a list of profiles (one settings file for several sessions, --session-map) the mildest decision of them
     counts: a permission rule holds for every session of the folder, so it may not be stricter than the hook is for
-    any of them. Ask mode puts every deny under ask; remind mode wants none (the hook only reminds)."""
+    any of them. Ask mode puts every deny under ask; remind mode wants none (the hook only reminds). A denied rule of
+    a hook_guard.HARD_DENY category (secret) stays under deny in every mode."""
     lists = {"deny": [], "ask": []}
-    if mode == "remind":
-        return lists
     guard = load_guard()
     profiles = [profile] if isinstance(profile, str) else list(profile)
     for rule in rules["rules"]:
         decision = min((guard.rule_decision(rule, p) for p in profiles), key=STRICTNESS.get)
-        decision = "ask" if mode == "ask" and decision == "deny" else decision
+        if decision == "deny" and rule.get("category") in guard.HARD_DENY:
+            pass
+        elif mode == "remind":
+            continue
+        elif mode == "ask" and decision == "deny":
+            decision = "ask"
         for item in rule.get("permissions", []):
             if decision in lists and item not in lists[decision]:
                 lists[decision].append(item)

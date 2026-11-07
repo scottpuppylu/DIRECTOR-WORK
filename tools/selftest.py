@@ -3140,8 +3140,9 @@ def test_guard_modes(tmp):
     folder = tmp / "modes"
     folder.mkdir()
 
-    def hook(cmd, *args, tool="Bash"):
-        call = {"tool_name": tool, "tool_input": {"command": cmd} if tool in ("Bash", "Monitor", "PowerShell") else {}}
+    def hook(cmd, *args, tool="Bash", inp=None):
+        call = {"tool_name": tool, "tool_input": inp if inp is not None else
+                {"command": cmd} if tool in ("Bash", "Monitor", "PowerShell") else {}}
         return subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), *map(str, args)],
                               input=json.dumps(call), capture_output=True, encoding="utf-8")
 
@@ -3195,6 +3196,26 @@ def test_guard_modes(tmp):
     done = hook("git push", *rules, "--pause-flag", pause)
     check("the pause flag denies in remind mode", done.returncode == 2 and "PAUSED" in done.stderr, done.stdout + done.stderr)
     pause.unlink()
+
+    # 1.3.1 (Director): reading a secret is denied in every mode, an approval does not cover it; git push still runs
+    for mode in ("remind", "ask"):
+        done = hook("", *rules, "--mode", mode, tool="Read", inp={"file_path": ".env"})
+        check(f"{mode}: Read .env is denied [G50]", done.returncode == 2 and done.stdout == ""
+              and done.stderr.startswith("BLOCKED by hook_guard [G50]"), done.stdout + done.stderr)
+    for cmd, rid in (("cat .env", "G50"), ("cat ~/.ssh/id_ed25519", "G50"), ("printenv GITHUB_TOKEN", "G51"),
+                     ("gh auth token", "G52")):
+        done = hook(cmd, *rules)
+        check(f"remind: {cmd!r} is denied [{rid}]", done.returncode == 2 and done.stdout == ""
+              and done.stderr.startswith(f"BLOCKED by hook_guard [{rid}]"), done.stdout + done.stderr)
+    done = hook("git push origin main", *rules)
+    check("remind with rules: git push still runs with a reminder", done.returncode == 0
+          and "hook_guard reminder" in done.stdout and done.stderr == "", done.stdout + done.stderr)
+    done = hook("cat README.md", *rules)
+    check("remind with rules: an ordinary read is silent", done.returncode == 0 and done.stdout == "" and done.stderr == "",
+          done.stdout + done.stderr)
+    hook("cat .env", *rules, "--audit", log)
+    check("a secret deny in remind mode is on the action log as a deny", '"deny"' in log.read_text(encoding="utf-8"),
+          log.read_text(encoding="utf-8"))
 
     # here-documents and quoted text are not commands (block mode, so a miss is an exit 2)
     cases = [
@@ -3258,12 +3279,15 @@ def test_guard_modes(tmp):
            "--guard-mode", "remind", says="permissions.deny")
     expect("remind mode with a profile written and tested", "setup_project_settings.py", 0, *base, "--guard-profile", "worker",
            "--guard-mode", "remind", "--apply", says=["SET", "block-rule=remind"])
-    check("remind takes the rule permissions out, keeps the user's own", perms().get("deny") == ["Bash(my-own-rule *)"]
-          and not perms().get("ask"), perms())
+    g50 = next(r for r in json.loads((TOOLS / "guard_rules.json").read_text(encoding="utf-8"))["rules"]
+               if r["id"] == "G50")["permissions"]
+    check("remind takes the rule permissions out, keeps the secret deny and the user's own",
+          sorted(perms().get("deny", [])) == sorted(g50 + ["Bash(my-own-rule *)"]) and not perms().get("ask"), perms())
     expect("ask mode with a profile written", "setup_project_settings.py", 0, *base, "--guard-profile", "worker",
            "--guard-mode", "ask", "--apply", says=["SET", "block-rule=ask"])
-    check("ask mode puts every rule permission under ask", "Bash(git push *)" in perms().get("ask", [])
-          and perms().get("deny") == ["Bash(my-own-rule *)"], perms())
+    check("ask mode puts every rule permission under ask but the secret deny", "Bash(git push *)" in perms().get("ask", [])
+          and sorted(perms().get("deny", [])) == sorted(g50 + ["Bash(my-own-rule *)"])
+          and not set(g50) & set(perms().get("ask", [])), perms())
 
     # the template is what the default --runtime-guard writes
     wt = folder / "wt"
@@ -3278,8 +3302,10 @@ def test_guard_modes(tmp):
     template = (TEMPLATES / "settings.runtime-guard.json").read_text(encoding="utf-8")
     template = template.replace("<PYTHON>", pathlib.Path(sys.executable).as_posix()).replace("<DW>/tools", TOOLS.as_posix())
     template = json.loads(template.replace("<PAUSE_FLAG>", pause.resolve().as_posix()).replace("<AUDIT_LOG>", log.resolve().as_posix()))
-    check("the template is what setup --runtime-guard writes (remind: no permission rules)", "permissions" not in written
-          and template == {"hooks": written["hooks"], "env": {"CLAUDE_CODE_SUBPROCESS_ENV_SCRUB":
+    check("the template is what setup --runtime-guard writes (remind: only the secret deny)",
+          written.get("permissions", {}).get("deny") == g50 and not written["permissions"].get("ask")
+          and template == {"hooks": written["hooks"], "permissions": {"deny": written["permissions"]["deny"]},
+                           "env": {"CLAUDE_CODE_SUBPROCESS_ENV_SCRUB":
                                                                written["env"].get("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB")}},
           json.dumps(template)[:300] + " | " + json.dumps(written)[:300])
 

@@ -232,7 +232,7 @@ ANSWER:
 
 - **使用者在對話裡核准了，就執行。** 推送、合併、打 tag、刪除這類事先問 PO（`docs/08`）；PO 說可以，AI 直接做，不拆設定、不請 PO 自己跑。
 - **已核准的事不重問。** 同一件事 PO 已經說可以，就不再開確認卡、不換個說法再問一次。核准仍是一次一件，不推廣到別的動作。
-- **阻擋只留給明確 opt-in。** `tools/hook_guard.py` 預設 `--mode remind`：標出的指令照跑，附一行提醒；`--mode ask` 交給使用者當場決定；只有 `--mode block` 才 exit 2 擋下。不要預設把 block 裝到工作線，工作線的 AI 會因此不敢動手（`docs/10` L-045）。
+- **阻擋只留給明確 opt-in。** `tools/hook_guard.py` 預設 `--mode remind`：標出的指令照跑，附一行提醒；`--mode ask` 交給使用者當場決定；只有 `--mode block` 才 exit 2 擋下。不要預設把 block 裝到工作線，工作線的 AI 會因此不敢動手（`docs/10` L-045）。例外：讀機密（G50–G52：`.env`、`~/.ssh`、token）和暫停旗標在每個模式都擋，核准也不放行。
 - 引號裡的字和 here-document 的內容是資料，不是指令，不會被標出（L-044）。
 - 1.3.0 以前裝的 hook 是擋下模式；改成提醒：`setup_project_settings.py --hooks --guard-mode remind --apply`（`CHANGELOG.md` 1.3.1 的遷移）。
 

@@ -57,7 +57,7 @@ python -I -X utf8 setup_project_settings.py --runtime-guard --protect-director <
   - 指令不是逐字相同（換了 Python、hook_guard.py 搬走或不存在）：`MISSING (hooks.PreToolUse command)`。
   - 沒給 `--protect-director` 時，沿用已裝項目的 `--protect`（或沒有）。
 - `--guard-profile worker|director`（設定檔 `guard_profile`，隱含 `--hooks`）：hook 的 matcher 改成 `*`（每個工具呼叫都檢查），指令加 `--rules "<tools>/guard_rules.json" --profile <身分>`，並設 `"onFailure": "block"`：hook 自己壞掉（例如規則檔寫壞，exit 1）時擋下，不放行。`--director-worktree` 指定的 worktree 一律用 director。
-  - block 模式：每條規則的 `permissions` 依這個身分的結論寫進 `permissions.deny` 或 `permissions.ask`（第二層：這兩種規則在每個權限模式都有效，包括 bypass）。ask 模式全部寫進 `permissions.ask`。remind 模式一條都不寫，舊安裝留下的規則權限從兩個清單拿掉（否則 Claude Code 照樣擋），使用者自己加的權限規則不動。缺的報 `MISSING (permissions.deny)` / `MISSING (permissions.ask)`；`--apply` 只補上缺的，放錯清單的（換身分後）搬過去，其他權限規則不動。
+  - block 模式：每條規則的 `permissions` 依這個身分的結論寫進 `permissions.deny` 或 `permissions.ask`（第二層：這兩種規則在每個權限模式都有效，包括 bypass）。ask 模式全部寫進 `permissions.ask`。remind 模式只寫機密規則（G50）的 `permissions.deny`，其他一條都不寫，舊安裝留下的規則權限從兩個清單拿掉（否則 Claude Code 照樣擋）；ask 模式的 G50 也留在 deny，使用者自己加的權限規則不動。缺的報 `MISSING (permissions.deny)` / `MISSING (permissions.ask)`；`--apply` 只補上缺的，放錯清單的（換身分後）搬過去，其他權限規則不動。
   - profile 不同也算 `MISSING (hooks.PreToolUse matcher)`。沒給 `--guard-profile` 時沿用已裝項目的 `--profile`，和 `--protect` 一樣。
   - worker 的指令再加 `--pause-flag "<旗標檔>"`：`--pause-flag`（設定檔 `pause_flag`），沒給就用 `--protect-director` 的 `<DIRECTOR>/PAUSE`。總監的 worktree 不加：worker 暫停時，總監還要停程序樹。旗標檔不同也算 `MISSING (hooks.PreToolUse matcher)`；沒給 `--guard-profile` 時沿用已裝項目的 `--pause-flag`。
 - `--audit-log <檔案>`（設定檔 `audit_log`，隱含 `--hooks`）：加 PostToolUse 和 PostToolUseFailure 兩個 hook（matcher `*`），執行 `audit_log.py append --log "<檔案>"`；hook_guard 的指令也加 `--audit "<檔案>"`，擋下和詢問也記進同一條鏈。路徑裡的 `{worktree}` 在 setup 時換成 worktree 資料夾名稱；`{container}` 留到 hook 執行時由 audit_log.py 換成容器 ID 前 12 碼（容器外是 `host`）。所以一個 worker、一個容器各一份紀錄，各自一條鏈；其他 `{名稱}` 一律報錯。缺的報 `MISSING (hooks.PostToolUse)` / `MISSING (hooks.PostToolUseFailure)`，`--apply` 就地換掉舊的 audit_log 項目。沒給 `--audit-log` 時沿用已裝項目的 `--audit`。下面的 hook 測試不帶 `--audit`，測試呼叫不會寫進紀錄。
@@ -75,7 +75,7 @@ python -I -X utf8 setup_project_settings.py --runtime-guard --protect-director <
   - `remind`（預設）：exit 0，指令照跑；stdout 一行 JSON，`systemMessage` 給使用者看、`hookSpecificOutput.additionalContext` 給模型看，都是 `hook_guard reminder [ID]: 原因`，給模型的那份另註明「只是提醒；使用者已在對話裡核准就直接做、不要再問」。使用者核准後 AI 直接執行，不必拆設定。
   - `ask`：exit 0，stdout 是 `permissionDecision: "ask"` 的 JSON，使用者當場決定。
   - `block`：明確 opt-in 的嚴格模式，exit 2，理由印到 stderr，指令不執行（1.3.0 以前的行為）。
-  - 暫停旗標（`--pause-flag`）是人明確設下的停止，每個模式都擋；自動暫停和 `--review` 只在 block 模式作用。
+  - 暫停旗標（`--pause-flag`）是人明確設下的停止，每個模式都擋；機密規則（G50–G52，類別 `secret`）的 deny 也是每個模式都擋，讀機密不在「核准就執行」的範圍。自動暫停和 `--review` 只在 block 模式作用。
   - 以下寫「擋」「deny」「exit 2」的地方都是 block 模式；remind / ask 模式同一批呼叫得到提醒或 ask。
 - Bash 的 here-document（`cat <<'EOF' ... EOF`、`<<-`、不加引號的 `EOF`）內容是資料，不是指令，不檢查；不加引號時內容裡的 `$(...)` 和反引號照樣會執行，照樣檢查。找不到結尾那一行的 here-document 照原文檢查，藏不了指令。`<<<` 不是 here-document。
 - 只在引號外拆 `&&`、`;`、`|`、`$(...)`。引號裡的字串只有被執行時才檢查：`bash` / `sh -c`、`cmd /c`、`powershell -Command`、`eval`、`Invoke-Expression`，以及雙引號裡的 `$(...)`。所以 `grep "git stash"`、`git commit -m "...git push..."`、`echo "git push origin"` 不會被擋。
@@ -253,7 +253,7 @@ python -I -X utf8 doctor.py --probe --director <DIRECTOR>        # 容器裡：�
 - 設定層：使用者（`~/.claude/settings.json`）、專案（`.claude/settings.json`）、本機（`.claude/settings.local.json`）、managed（Windows `C:/Program Files/ClaudeCode/managed-settings.json`，其他 `/etc/claude-code/managed-settings.json`）。hook 和權限清單各層相加；`env` 的鍵和 `defaultMode` 取最高一層的值；任一層 `disableAllHooks: true` → 所有 hook 項目 NOT_ENFORCED。
 - `hook_guard`：要有 matcher `*`、`onFailure: block`、`--profile` 的項目，再實際跑一次（和 setup 的 hook 測試相同，依 `--mode` 判斷，不帶 `--audit`、`--pause-flag`、`--review`）。ENFORCED 那行寫出模式（`mode remind` 等）。
 - `audit_log`：PostToolUse 和 PostToolUseFailure 都要指到同一份紀錄；紀錄存在就跑 `verify`。
-- `permissions`：依 hook 的 `--mode` 算要的清單。規則檔對這個 profile 產生的每一條都在 → CONFIGURED_NOT_VERIFIED（由 Claude Code 執行，doctor 無法實測）。remind 模式不要任何規則權限，沒有就寫 `remind mode: no deny / ask rule is written`；清單裡還留著這個模式不要的規則權限（例如從 block 換成 remind 卻沒重跑 setup）→ MISSING，因為那條照樣會擋。`defaultMode` 是 `bypassPermissions` → WARN。
+- `permissions`：依 hook 的 `--mode` 算要的清單。規則檔對這個 profile 產生的每一條都在 → CONFIGURED_NOT_VERIFIED（由 Claude Code 執行，doctor 無法實測）。remind 模式只要機密規則（G50）的 deny，就寫 `remind mode: only the secret rules' deny is written`；清單裡還留著這個模式不要的規則權限（例如從 block 換成 remind 卻沒重跑 setup）→ MISSING，因為那條照樣會擋。`defaultMode` 是 `bypassPermissions` → WARN。
 - `env_scrub`：設定在但沒加 `--probe` → CONFIGURED_NOT_VERIFIED。`--probe` 只看**變數名稱**：名稱像憑證（token、secret、password、api key 等），或 proxy 變數的值帶 `帳號:密碼@`，就 NOT_ENFORCED 並列出名稱。**值一律不印**；selftest 用一個假的 token 值確認輸出裡沒有它。SCRUB 開著時 `GITHUB_TOKEN`、`GH_TOKEN`、proxy 帳密照樣會被列出，因為官方設計就保留它們。
 - `isolation`：不在容器裡 → NOT_ENFORCED。在容器裡（`/.dockerenv`、`/run/.containerenv` 或 cgroup 顯示 docker / containerd / kubepods / libpod）→ CONFIGURED_NOT_VERIFIED；加 `--probe` 再查六項，六項都過才 ENFORCED：根目錄寫不進去、`--director` 的資料夾寫不進去、連不上 `example.com:443`、`example.com` 解析不到（DNS 白名單）、`.git` 是 worker 自己的（K1）、沒有像憑證的變數名稱。`--probe` 在容器裡會試連一次外部網路、查一次 DNS。
   - K1：`run_worker.sh` 會設 `DW_GIT_MODE`。`--git-common` 開的容器（`DW_GIT_MODE=shared`，或 linked worktree，它的 `.git` 就是 repo 的）不加 `--probe` 也直接報 NOT_ENFORCED（K1 shared .git）。`worker_clone.sh` 做的 clone（`DW_GIT_MODE=clone`、不是 linked worktree）在 `worktree` 那一項算 ENFORCED（the worker's own clone）。容器外不看 `DW_GIT_MODE`。
