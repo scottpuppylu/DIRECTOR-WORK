@@ -94,13 +94,13 @@ MINOR：GPT 對 v2.1.0 的獨立審查（`DIRECTOR-WORK-v2.1.0-review.md`，21 �
 - `choice_reconcile`：在不支援 `os.link` 的檔案系統（FAT／exFAT、部分網路磁碟）上，舊帳本升級會中止，只印一行 OSError（`SHADOW_ERROR`、exit 0）。不會掉資料，但要手動備份後再升級。
 - `choice_reconcile`：同一筆回覆，一次匯出有 `source`、一次沒有，又沒給 `--source`，會用兩個不同的冪等鍵，重複記帳；系統只印 WARNING。舊匯出請一律帶 `--source`。
 - 選擇頁頁面端只比對指紋字串，內容防竄改靠帳本端；兩個分頁同時送出由帳本標 conflict，頁面不仲裁。
-- 容器：真實 Docker 行為（`--sysctl` 實際關掉 IPv6、重疊掛載在 Docker Desktop 上的別名）只在本機模擬測過，沒有在真的容器裡跑；Linux 與 browser 兩個 CI job 要等第一次 GitHub 執行才算驗證。
+- 容器：真實 Docker 行為（`--sysctl` 實際關掉 IPv6、重疊掛載在 Docker Desktop 上的別名）只在本機模擬測過，沒有在真的容器裡跑；Linux 與 browser 兩個 CI job 已在 GitHub 上跑過且通過（見「數字」），但 CI 裡也沒有實際起 Docker。
 - 外部 GPT 審查的重現腳本只認 v2.1.0 的版本字串；`repro_dw210.py` 對 2.2.0 的結果見 PR 說明，仍顯示「重現」的項目逐項列在那裡。
 
 ### 數字
 
 - 每輪必讀（`docs/01`、`03`、`06`、`08`）：2.1.0 的 9,532 → 本版 9,549 bytes（上限 9,550，`MUST_READ_LIMIT` 不變；增加的是 W1 的待決頁與三層指示句）。量法是先把 CRLF 換成 LF 再數（selftest 的 `test_must_read_size` 就這樣量）；Windows checkout 的檔案是 CRLF，用 `wc -c` 直接量會顯示約 9,698。
-- `selftest.py`：2.1.0 的 1,946 項 → 本版 2,302 項（W1–W5 新增 356 項）。整合樹 cae6162（之後只改 CHANGELOG 與報告）本機 Python 3.11、3.9 各 2,302/2,302 全過；PATH 上沒有 git 時 1,140/1,140 全過，22 組依賴 git 的照名稱 skip；3.11 也在放在有空格與中文路徑的匯出樹裡跑過一次（CI 的 Linux job 用這種路徑）。（GitHub CI 的結果以 PR 的檢查為準。）
+- `selftest.py`：2.1.0 的 1,946 項 → 本版 2,302 項（W1–W5 新增 356 項）。整合樹 cae6162（之後只改 CHANGELOG 與報告）本機 Python 3.11、3.9 各 2,302/2,302 全過；PATH 上沒有 git 時 1,140/1,140 全過，22 組依賴 git 的照名稱 skip；3.11 也在放在有空格與中文路徑的匯出樹裡跑過一次（CI 的 Linux job 用這種路徑）。之後只改了 CHANGELOG、報告和 CI 設定檔（無 git 那一步在 Linux 要保留 `ps`，見上面的 W5 整合修正）。GitHub CI（PR #20，push 與 pull_request 各一輪，全綠）：Windows 3.9／3.12 各 2,303/2,303（無 git 1,140/1,140，skip 22 組）；Linux 3.9／3.11／3.12（`ubuntu-24.04`，checkout 路徑 `dw 專案 路徑`）各 2,281/2,281（Windows 專屬的項目在 Linux 照名稱 skip），無 git 1,140/1,140（skip 22 組）；browser job（runner 的 Chrome）通過。
 - 外部審查重現器（`repro_dw210.py`，改版本字串後對整合樹跑）：19 個案例，14 個「不再重現」、1 個仍顯示重現、4 個本機跳過（`rerun_symlink`、`container_mount`、`container_legacy` 要 Linux／WSL／Docker；`browser` 要 `--chrome`，由 CI browser job 跑）。仍顯示重現的一個：`audit_cut_line`（斷行後 `audit_log` 仍拒寫並印 BROKEN，這是設計；2.2.0 多了 `recover` 出口，重現器的判斷不認得它；F13 已修的證明——`recover` 後 `verify` 印 `GAP`、副本 sha256 吻合——在 PR 說明和 W5 報告）。逐項狀態在 PR 說明。
 
 對齊初衷：
