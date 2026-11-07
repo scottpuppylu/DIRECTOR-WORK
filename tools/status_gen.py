@@ -10,7 +10,8 @@ each thing by hand (lesson L-042). The generated script only reads, uses only th
 
 Director sections (any of them, all optional; "Director" status in docs/06b):
   PO       counts on the PO page: per "counts" item a regex (lines that match) or, for a JSON page, a "list" (dotted
-           key; "extract" = a regex whose group 1 is the JSON inside an HTML page) counted where "field" == "value"
+           key; "extract" = a regex whose group 1 is the JSON inside an HTML page) counted where "field" == "value";
+           a text page also gets a "PO hint" line for items still STATUS open with an ANSWER filled in (2.1.0 shadow)
   ORDERS   order files (glob, default WO-*.md) in "dir" without a "closed" match: the open ones, newest first
   SENDS    lines of the pending-sends file that match "unsent" (default an unticked "- [ ]"); a folder: its files
   AUDIT    per action log (audit_log.py) of "globs": lines, blocked (hook_guard deny / pause) and log reads (the
@@ -296,6 +297,13 @@ def director():
                     problems += 1
                     parts.append(f"{count['label']}=? ({e})")
             say(f"PO {page['path']}: " + ", ".join(parts))
+            if not page.get("extract"):  # 2.1.0 shadow (report 5 F-4): the PO may fill ANSWER and leave STATUS open
+                filled = [m.group(1) for m in re.finditer(r"(?ms)^[ \t]*ID[ \t]*:[ \t]*([A-Za-z0-9_-]+)(.*?)(?=^[ \t]*ID[ \t]*:|\Z)", text)
+                          if re.search(r"(?im)^[ \t]*STATUS[ \t]*:[ \t]*open\b", m.group(2))
+                          and re.search(r"(?im)^[ \t]*ANSWER[ \t]*:[ \t]*[^\s<]", m.group(2))]
+                if filled:
+                    say(f"PO hint: {len(filled)} item(s) still STATUS open with an ANSWER filled in "
+                        f"({', '.join(filled[:5])}); read them on the page, the counts above may miss them")
     orders = CONFIG["orders"]
     if orders:
         if not os.path.isdir(orders["dir"]):

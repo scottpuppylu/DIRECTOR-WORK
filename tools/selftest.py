@@ -110,6 +110,34 @@ def expect(name, tool, code, *args, cwd=None, says=None, lacks=None):
         failures.append(f"{name}: expected exit {code} with {says!r} and without {lacks!r}, got {got}: {out.strip()[-300:]}")
 
 
+# 2.1 (report 5 F-1): the rules pack must verify without git (ZIP download, minimal machine). A test group that builds
+# git fixtures is skipped, by name, only when no git program is on PATH; with git, a fixture error still fails.
+GIT = shutil.which("git")
+skipped = []
+# Groups that build git fixtures (found by a run with git off PATH, 2026-11-08); guarded() skips them by name
+# without git, and also skips any other group that dies on a missing program, so a new git test cannot crash the run.
+GIT_GROUPS = {
+    "test_scope", "test_submodule_ignore", "test_hook", "test_hook_protect", "test_hook_rules", "test_session_profiles",
+    "test_pause", "test_audit", "test_audit_names", "test_review", "test_guard_modes", "test_doctor",
+    "test_doctor_launch", "test_worker_clone", "test_preflight", "test_trusted_rerun", "test_rerun_binding",
+    "test_trusted_isolation",
+}
+
+
+def skip(group, why="needs git, none on PATH"):
+    skipped.append(f"{group} ({why})")
+    print(f"SKIP {group}: {why}")
+
+
+def git_fixture(folder):
+    """A fresh repo with one commit, for tests that need a real worktree (never the DW checkout itself, F-1)."""
+    folder.mkdir(parents=True, exist_ok=True)
+    for argv in (["init", "-q"], ["add", "-A"], ["-c", "user.name=selftest", "-c", "user.email=selftest@example.invalid",
+                                                 "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "fixture"]):
+        subprocess.run(["git", *argv], cwd=folder, check=True, capture_output=True)
+    return folder
+
+
 def gate(tmp, name, kind, text, code, says=None):
     file = tmp / f"{name}.md"
     file.write_text(text, encoding="utf-8")
@@ -1030,7 +1058,7 @@ def test_vocabulary():
             failures.append(f"vocabulary: {path} no longer contains {text!r}; change tools/vocabulary.json and the docs together")
 
 
-MUST_READ_LIMIT = 12440  # bytes of the 每輪必讀 docs on 2026-11-06 (v0.13 moved pure reasons to docs/10; +33 for the IN_FLIGHT fields kept in docs/06, review D01); 2.0.1 +48: PO 2026-11-08 the choice page counts as 待決頁 for no-miss reading (docs/03, docs/06 one clause each); every round re-reads them, so growth costs quota
+MUST_READ_LIMIT = 9540  # bytes of the 每輪必讀 docs on 2026-11-06 (v0.13 moved pure reasons to docs/10; +33 for the IN_FLIGHT fields kept in docs/06, review D01); 2.0.1 +48: PO 2026-11-08 the choice page counts as 待決頁 for no-miss reading (docs/03, docs/06 one clause each); every round re-reads them, so growth costs quota; 2.1.0 (reports 2 and 5) 12433 -> 9532: pure reasons to docs/10, details to docs/05 and docs/06b, one dispatch-plan line added to docs/01; the limit follows the new size so growth needs a reason again
 
 
 def test_must_read_size():
@@ -4420,11 +4448,15 @@ def test_status_gen(tmp):
               f"exit {done.returncode} (want {code}), {len(lines)} lines, missing {bad}: {done.stdout.strip()[-300:]}")
 
     full = d / "status_full.py"
+    # the git line is checked on a fixture repo, not on the DW folder, which may be an unpacked ZIP (report 5 F-1)
+    git_args = ("--git", git_fixture(tmp / "status_git")) if GIT else ()
+    if not GIT:
+        skip("test_status_gen git line")
     expect("status_gen writes", "status_gen.py", 0, "--out", full, "--name", "line-a", "--log", d / "run.log",
            "--hash-file", d / "hashes.txt", "--checksum", d / "hashes.txt", "--outputs", d / "out", "--disk", tmp,
-           "--disk-min-gib", "0.001", "--git", TOOLS.parent, says="WROTE")
+           "--disk-min-gib", "0.001", *git_args, says="WROTE")
     status("status.py full", full, 0, says=["STATUS line-a", "  line 99 of the run log", "HASH sha256 ", "  abc123  build.zip",
-                                            " OK", "GIT ", "OUT ", "2 files, newest 2", "b.png"])
+                                            " OK", "OUT ", "2 files, newest 2", "b.png"] + (["GIT "] if GIT else []))
     small = d / "status_small.py"
     expect("status_gen small cap", "status_gen.py", 0, "--out", small, "--log", d / "run.log", "--log-lines", "100",
            "--max-lines", "10", "--width", "40")
@@ -4726,66 +4758,223 @@ def test_poll_report(tmp):
     rep("a bad --since", 2, "--log", d / "a.jsonl", "--since", "last week", says=["not an ISO"])
 
 
+def nogit_env():
+    """os.environ with every PATH folder that holds a git program taken out: a ZIP install on a machine without git."""
+    names = ("git", "git.exe", "git.cmd", "git.bat")
+    keep = [folder for folder in os.environ.get("PATH", "").split(os.pathsep)
+            if folder and not any((pathlib.Path(folder) / name).is_file() for name in names)]
+    return {**os.environ, "PATH": os.pathsep.join(keep)}
+
+
+def test_no_git(tmp):
+    """2.1.0 (report 5): with no git on PATH, `evidence_record run` still writes its record (git fields null, a note on
+    stderr), the trusted rerun is refused NOT_RUN (exit 2, never a pass), and doctor says git is missing (exit 2)."""
+    env = nogit_env()
+    if shutil.which("git", path=env["PATH"]):
+        return skip("test_no_git", "git is still found after taking its folders off PATH")
+    root = tmp / "nogit"
+    work, out = root / "work", root / "records"
+    work.mkdir(parents=True)
+    py = sys.executable
+    (work / "check.py").write_text("print('checked')\n", encoding="utf-8")
+
+    def tool(name, *args):
+        done = subprocess.run([py, "-I", "-X", "utf8", str(TOOLS / name), *map(str, args)], capture_output=True,
+                              encoding="utf-8", env=env)
+        return done.returncode, done.stdout, done.stderr
+
+    code, stdout, stderr = tool("evidence_record.py", "run", "--out-dir", out, "--label", "AC-1", "--cwd", work, "--", py, "check.py")
+    records = sorted(out.glob("*-AC-1.json"))
+    data = json.loads(records[0].read_text(encoding="utf-8")) if records else {}
+    check("no git: evidence run exits 0 and says exit=0", code == 0 and "exit=0" in stdout, stdout + stderr)
+    check("no git: evidence run writes the record", len(records) == 1, f"{records} {stderr}")
+    check("no git: the record's git fields are null", data.get("git") == {"head": None, "dirty": None}, str(data.get("git")))
+    check("no git: evidence run says why the git fields are empty", "git metadata not available (git not found" in stderr, stderr)
+    if not records:
+        return
+    code, stdout, _ = tool("evidence_record.py", "verify", records[0])
+    check("no git: verify without --rerun still works", code == 0 and "EVIDENCE_VERIFY: OK" in stdout, stdout)
+    order = root / "WO-001-parser.md"
+    body = with_checks(TYPED_ORDER.format(base="0" * 40), f"AC-1: {json.dumps([py, 'check.py'])}")
+    order.write_text(body, encoding="utf-8")
+    log = root / "log.md"
+    log.write_text(f"DISPATCH WO-001 rev=1 sha={hashlib.sha256(body.encode('utf-8')).hexdigest()}\n", encoding="utf-8")
+    code, stdout, stderr = tool("evidence_record.py", "verify", records[0], "--rerun", "--order", order, "--dispatch-log", log,
+                                "--repo", work, "--candidate", "a" * 40)
+    check("no git: the trusted rerun is NOT_RUN exit 2, not a pass", code == 2 and "EVIDENCE_VERIFY: NOT_RUN git not found" in stdout
+          and "OK" not in stdout, stdout + stderr)
+    code, stdout, stderr = tool("doctor.py", "--repo", work)
+    check("no git: doctor exits 2 and says git is missing", code == 2 and "doctor: git not found" in stderr, stdout + stderr)
+
+
+def test_dispatch_plan_rule():
+    """2.1.0 (PO, L-046): docs/01 keeps the one dispatch-plan line and the Director's scope; docs/05 holds the details;
+    docs/03 holds the PO-reading lines word for word; docs/06b holds the rehearsal and the merged tool call."""
+    root = TOOLS.parent
+    read = lambda name: (root / name).read_text(encoding="utf-8")
+    one, three, five, ten, six_b = (read(f"docs/{name}.md") for name in
+                                    ("01_roles_authority", "03_communication", "05_models_effort", "10_lessons_learned",
+                                     "06b_on_demand_procedures"))
+    check("docs/01 has the dispatch-plan line", "- 每次派工前先做派工規劃，不把事情都攬在自己身上（`docs/05`「派工規劃」）。" in one)
+    check("docs/01 does not narrow the Director to dispatch only", "只派工" not in one)
+    check("docs/05 has the dispatch-plan section", "### 派工規劃" in five and "Single Writer" in five.split("### 派工規劃")[-1])
+    check("docs/10 has lesson L-046", "L-046" in ten)
+    check("docs/03 first step of each round, word for word",
+          "1. **每輪第一步讀待決頁**（任何喚醒）：照待決頁程序讀回覆和新留言，同輪執行或派工並關閉；未能完成則寫續辦紀錄。" in three)
+    check("docs/03 end-of-round check, word for word",
+          "- 每輪結束前自查：待決頁已讀、本輪 PO 訊息已處理並登記、已回覆項目已關閉或留有續辦紀錄。" in three)
+    check("docs/06b has the hand-over rehearsal", "### 接手演練" in six_b and "metrics_report.py --run" in six_b)
+    check("docs/06b has the merged per-round tool call", "合併工具呼叫" in six_b)
+
+
+def test_status_po_hint(tmp):
+    """2.1.0 shadow (report 5 F-4): the PO filled ANSWER but left STATUS open; the Director status.py says so in one
+    line (the exit code does not change), and says nothing for an empty ANSWER or the template's <PO 填>."""
+    d = tmp / "status_po_hint"
+    d.mkdir(parents=True)
+    page = d / "PO_PENDING.md"
+    page.write_text("ID: OD-1\nSTATUS: open\nANSWER: A\n\nID: OD-2\nSTATUS: open\nANSWER: <PO 填>\n\nID: OD-3\nSTATUS: open\n"
+                    "ANSWER:\n\nID: OD-4\nSTATUS: answered\nANSWER: B\n", encoding="utf-8")
+    conf = d / "status.json"
+    conf.write_text(json.dumps({"schema_version": 1, "name": "director", "po_page": {"path": "PO_PENDING.md", "counts": [
+        {"label": "answered", "regex": r"^STATUS:\s*answered\b"}]}}), encoding="utf-8")
+    script = d / "status.py"
+    expect("status_gen writes the PO hint script", "status_gen.py", 0, "--out", script, "--config", conf, says="WROTE")
+    done = subprocess.run([sys.executable, "-I", str(script)], capture_output=True, encoding="utf-8")
+    check("status.py: open with an ANSWER gives one hint, exit unchanged", done.returncode == 0
+          and "answered=1" in done.stdout and "PO hint: 1 item(s) still STATUS open with an ANSWER filled in (OD-1)" in done.stdout,
+          done.stdout + done.stderr)
+    page.write_text("ID: OD-2\nSTATUS: open\nANSWER: <PO 填>\n", encoding="utf-8")
+    done = subprocess.run([sys.executable, "-I", str(script)], capture_output=True, encoding="utf-8")
+    check("status.py: no hint without a filled ANSWER", done.returncode == 0 and "PO hint" not in done.stdout, done.stdout)
+
+
+def test_metrics_run(tmp):
+    """2.1.0 (report 4 P-3/P-4): metrics_report --run counts one rehearsal run's events, --compare subtracts it from a
+    baseline; a repeated event_id counts once, a time without its zone is left out, a missing number is UNKNOWN."""
+    base, run_dir = tmp / "mrun" / "base", tmp / "mrun" / "t"
+    for folder in (base, run_dir):
+        (folder / "events").mkdir(parents=True)
+    event = lambda eid, type_, at, **extra: {"v": 1, "event_id": eid, "type": type_, "at": at, **extra}
+    ask = lambda eid, at, decision, topic, ask_id: event(eid, "asked", at, decision_id=decision, topic_id=topic, scope_id="S", ask_id=ask_id)
+    (run_dir / "run.json").write_text(json.dumps({"v": 1, "started_at": "2026-11-08T10:00:00+08:00"}), encoding="utf-8")
+    first = ask("e1", "2026-11-08T10:01:00+08:00", "D1", "T1", "A1")
+    (run_dir / "events" / "a.json").write_text(json.dumps([
+        first, first,  # the same event written twice counts once
+        ask("e2", "2026-11-08T10:05:00+08:00", "D1", "T1", "A2"),  # asked again: one re-ask
+        event("e3", "answer_received", "2026-11-08T10:06:00+08:00", decision_id="D1", ask_id="A2"),
+        ask("e4", "2026-11-08T10:07:00+08:00", "D2", "T2", "A3"),
+        event("e5", "po_action", "2026-11-08T10:08:00+08:00", kind="click", count=3),
+        event("e6", "po_action", "2026-11-08T02:09:00Z", kind="type"),
+        event("e7", "preview_ready", "2026-11-08T10:12:30+08:00"),
+        event("e8", "preview_ready", "2026-11-08T10:11:00")]), encoding="utf-8")  # no zone: left out
+    (base / "events" / "x.json").write_text(json.dumps([
+        event("b1", "run_started", "2026-11-07T09:00:00+08:00"),
+        event("b2", "po_action", "2026-11-07T09:10:00+08:00", kind="click", count=10),
+        event("b3", "preview_ready", "2026-11-07T09:30:00+08:00"),
+        ask("b4", "2026-11-07T09:01:00+08:00", "D1", "T1", "A1")]), encoding="utf-8")
+    expect("metrics --run counts the run", "metrics_report.py", 0, "--run", run_dir,
+           says=["事件 7 筆；重複 event_id 略過 1 筆；格式不對沒算 1 筆：a.json#9", "| 第一個可用預覽 | 12.5 分鐘 |",
+                 "| 決策 | 提出 2、已回覆 1、還在等 1、撤回 0 |", "| 重問 | 1 |", "| PO 操作 | 4（click 3、type 1） |"],
+           lacks="# 成效數字")
+    expect("metrics --compare subtracts from the baseline", "metrics_report.py", 0, "--run", run_dir, "--compare", base,
+           says=["| PO 操作 | 10 | 4 | 6（60%） |", "| 第一個可用預覽 | 30.0 分鐘 | 12.5 分鐘 | 17.5 分鐘 |", "| 重問 | 0 | 1 | -1 |"])
+    expect("metrics --compare: more operations than the baseline is a negative saving", "metrics_report.py", 0,
+           "--run", base, "--compare", run_dir, says="| PO 操作 | 4 | 10 | -6（-150%） |")
+    empty = tmp / "mrun" / "empty"
+    (empty / "events").mkdir(parents=True)
+    (empty / "events" / "x.json").write_text(json.dumps([ask("z1", "2026-11-08T10:01:00+08:00", "D1", "T1", "A1")]), encoding="utf-8")
+    expect("metrics --run: no start, no preview, no PO action", "metrics_report.py", 0, "--run", empty, "--compare", empty,
+           says=["UNKNOWN：沒有開始時間", "| PO 操作 | 0 |", "| PO 操作 | 0 | 0 | 0（百分比 UNKNOWN：基準是 0） |"])
+    director = tmp / "mrun" / "DIRECTOR"
+    director.mkdir()
+    expect("metrics --run with --director prints both", "metrics_report.py", 0, "--director", director,
+           "--run", run_dir, says=["# 成效數字", "# 接手演練數字"])
+    expect("metrics --run missing folder", "metrics_report.py", 1, "--run", tmp / "mrun" / "nope", says="FAIL run folder not found")
+    expect("metrics --compare needs --run", "metrics_report.py", 2, "--director", tmp / "mrun", "--compare", base)
+    expect("metrics needs --director or --run", "metrics_report.py", 2)
+
+
+def guarded(test, *args):
+    """Run one test group. Without git on PATH, a group that dies on a missing git program is a named skip, not a crash."""
+    global total
+    if GIT is None and test.__name__ in GIT_GROUPS:
+        return skip(test.__name__)
+    mark = (total, len(failures))
+    try:
+        test(*args)
+    except OSError as error:
+        if GIT is not None:
+            raise
+        total, failures[mark[1]:] = mark[0], []  # the group is git work: none of its partial results count
+        skip(test.__name__, f"needs git, none on PATH ({type(error).__name__} after it started)")
+
+
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="director_work_selftest_")).resolve()
     try:
-        test_gate(tmp)
-        test_acceptance(tmp)
-        test_table(tmp)
-        test_dispatch(tmp)
-        test_revision(tmp)
-        test_dispatch_events(tmp)
-        test_verdict_binding(tmp)
-        test_evidence_match(tmp)
-        test_candidate(tmp)
-        test_one_fault(tmp)
-        test_trace(tmp)
-        test_metrics(tmp)
-        test_purpose()
-        test_chat_to_product(tmp)
-        test_scope(tmp)
-        test_submodule_ignore(tmp)
-        test_shared_code()
-        test_py39_newline()
-        test_vocabulary()
-        test_must_read_size()
-        test_must_read_reasons()
-        test_hook(tmp)
-        test_hook_protect(tmp)
-        test_hook_rules(tmp)
-        test_session_profiles(tmp)
-        test_pause(tmp)
-        test_auto_pause(tmp)
-        test_audit(tmp)
-        test_audit_names(tmp)
-        test_report_vs_audit(tmp)
-        test_review(tmp)
-        test_guard_modes(tmp)
-        test_doctor(tmp)
-        test_doctor_launch(tmp)
-        test_container(tmp)
-        test_worker_clone(tmp)
-        test_dns_allow(tmp)
-        test_evidence(tmp)
-        test_order_checks(tmp)
-        test_preflight(tmp)
-        test_order_binding(tmp)
-        test_trusted_rerun(tmp)
-        test_rerun_binding(tmp)
-        test_trusted_isolation(tmp)
-        test_usage_mix(tmp)
-        test_status_gen(tmp)
-        test_status_director(tmp)
-        test_round_check(tmp)
-        test_test_request(tmp)
-        test_poll_hint(tmp)
-        test_poll_report(tmp)
+        guarded(test_gate, tmp)
+        guarded(test_acceptance, tmp)
+        guarded(test_table, tmp)
+        guarded(test_dispatch, tmp)
+        guarded(test_revision, tmp)
+        guarded(test_dispatch_events, tmp)
+        guarded(test_verdict_binding, tmp)
+        guarded(test_evidence_match, tmp)
+        guarded(test_candidate, tmp)
+        guarded(test_one_fault, tmp)
+        guarded(test_trace, tmp)
+        guarded(test_metrics, tmp)
+        guarded(test_purpose)
+        guarded(test_chat_to_product, tmp)
+        guarded(test_scope, tmp)
+        guarded(test_submodule_ignore, tmp)
+        guarded(test_shared_code)
+        guarded(test_py39_newline)
+        guarded(test_vocabulary)
+        guarded(test_must_read_size)
+        guarded(test_must_read_reasons)
+        guarded(test_hook, tmp)
+        guarded(test_hook_protect, tmp)
+        guarded(test_hook_rules, tmp)
+        guarded(test_session_profiles, tmp)
+        guarded(test_pause, tmp)
+        guarded(test_auto_pause, tmp)
+        guarded(test_audit, tmp)
+        guarded(test_audit_names, tmp)
+        guarded(test_report_vs_audit, tmp)
+        guarded(test_review, tmp)
+        guarded(test_guard_modes, tmp)
+        guarded(test_doctor, tmp)
+        guarded(test_doctor_launch, tmp)
+        guarded(test_container, tmp)
+        guarded(test_worker_clone, tmp)
+        guarded(test_dns_allow, tmp)
+        guarded(test_evidence, tmp)
+        guarded(test_order_checks, tmp)
+        guarded(test_preflight, tmp)
+        guarded(test_order_binding, tmp)
+        guarded(test_trusted_rerun, tmp)
+        guarded(test_rerun_binding, tmp)
+        guarded(test_trusted_isolation, tmp)
+        guarded(test_usage_mix, tmp)
+        guarded(test_status_gen, tmp)
+        guarded(test_status_director, tmp)
+        guarded(test_round_check, tmp)
+        guarded(test_test_request, tmp)
+        guarded(test_poll_hint, tmp)
+        guarded(test_poll_report, tmp)
+        guarded(test_no_git, tmp)
+        guarded(test_dispatch_plan_rule)
+        guarded(test_metrics_run, tmp)
+        guarded(test_status_po_hint, tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     for failure in failures:
         print(f"FAIL {failure}")
-    print(f"selftest: {total - len(failures)}/{total} passed")
+    note = f"; skipped {len(skipped)} git group(s), see SKIP lines" if skipped else ""
+    print(f"selftest: {total - len(failures)}/{total} passed{note}")
     return 1 if failures else 0
 
 

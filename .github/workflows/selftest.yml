@@ -24,3 +24,11 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: python -I -X utf8 tools/selftest.py
+      # 2.1.0 (report 5): the rules pack must also verify where git is missing (a ZIP on a bare machine).
+      # Take every PATH folder holding git off PATH; the git test groups are then skipped by name, the rest must pass.
+      - name: selftest without git on PATH
+        shell: pwsh
+        run: |
+          $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -and -not (Test-Path (Join-Path $_ 'git.exe')) -and -not (Test-Path (Join-Path $_ 'git.cmd')) }) -join ';'
+          if (Get-Command git -ErrorAction SilentlyContinue) { throw 'git is still on PATH' }
+          python -I -X utf8 tools/selftest.py
