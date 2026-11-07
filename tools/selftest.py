@@ -3399,6 +3399,10 @@ def test_report_vs_audit(tmp):
     total += 1
     if "SESSION_ID:" not in template or "RAN:" not in template or "report_vs_audit.py" not in template:
         failures.append("report_vs_audit: templates/TASK_REPORT.md has no SESSION_ID: / RAN: lines")
+    total += 1
+    # 2.2.0: the report template carries the CANDIDATE_ID: line that trace_report reads (same pattern as report_info)
+    if not re.search(r"^\s*CANDIDATE_ID\s*[:=]\s*(\S+)", template, re.M):
+        failures.append("report template: templates/TASK_REPORT.md has no CANDIDATE_ID: line")
 
 
 def test_audit_names(tmp):
