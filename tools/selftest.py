@@ -830,10 +830,13 @@ def test_trace(tmp):
     (many / "reports" / "report-9.md").write_text(passed, encoding="utf-8")
     (many / "reports" / "report-10.md").write_text(failed.replace("REVISION 1", "REVISION 2"), encoding="utf-8")
     trace_many = ("--orders", many / "orders", "--reports", many / "reports")
+    many_order = many / "orders" / "WO-001-parser.md"
+    many_order.write_text(typed.replace("REVISION       = 1", "REVISION       = 2"), encoding="utf-8")
     expect("trace picks the higher order revision, not the last file name", "trace_report.py", 0, *trace_many,
            says=["| DD-1 | WO-001 | AC-1 | AUTO | FAIL | e.json |", "報告 2 份對到工單",
                  f"- WO-001：選 {many / 'reports' / 'report-10.md'}", "REVISION 2、ATTEMPT —、日期 —、HEAD d0d0d0d ← 選這份",
-                 "report-9.md：REVISION 1"])
+                 "report-9.md：REVISION 1"], lacks="過期：")
+    many_order.write_text(typed, encoding="utf-8")
     (many / "reports" / "report-10.md").write_text(failed.replace("RESULT:", "ATTEMPT: 1\nRESULT:", 1), encoding="utf-8")
     (many / "reports" / "report-9.md").write_text(passed.replace("RESULT:", "ATTEMPT: 2\nRESULT:", 1), encoding="utf-8")
     expect("trace picks the higher ATTEMPT at the same revision", "trace_report.py", 0, *trace_many,
@@ -869,6 +872,8 @@ def test_trace(tmp):
     for folder in ("reports", "reviews"):
         (paired / folder).mkdir(parents=True)
     shutil.copytree(root / "orders", paired / "orders")
+    (paired / "orders" / "WO-001-parser.md").write_text(typed.replace("REVISION       = 1", "REVISION       = 2"),
+                                                        encoding="utf-8")
     (paired / "reports" / "r2.md").write_text(failed.replace("REVISION 1", "REVISION 2"), encoding="utf-8")
 
     def verdict(name, verdict_word, rev, extra=""):
@@ -897,6 +902,49 @@ def test_trace(tmp):
     verdict("v2b.md", "REWORK", 2, "2026-01-06 10:00\nCANDIDATE_HEAD: d0d0d0d\n")
     expect("trace accepts a CANDIDATE_HEAD equal to the report's HEAD", "trace_report.py", 0, *trace_paired,
            says="| REWORK |", lacks="不是報告的 HEAD")
+
+    # 1.3.3: a report written for an older order no longer shows its PASS as current; no TRACES_TO x AC cross-product
+    stale = tmp / "trace_stale"
+    (stale / "orders").mkdir(parents=True)
+    (stale / "reports").mkdir()
+    order_path = stale / "orders" / "WO-001-parser.md"
+    order_path.write_text(typed.replace("REVISION       = 1", "REVISION       = 2"), encoding="utf-8")
+    trace_stale = ("--orders", stale / "orders", "--reports", stale / "reports")
+    (stale / "reports" / "r.md").write_text(passed, encoding="utf-8")
+    expect("trace marks a revision 1 report against a revision 2 order as stale", "trace_report.py", 0, *trace_stale,
+           says=["| DD-1 | WO-001 | AC-1 | AUTO | 過期：報告是 REVISION 1，工單現在是 REVISION 2（報告寫 PASS） | e.json |",
+                 "## 報告過期或版次不符（表內狀態是舊報告寫的，不是現在的工單）\n- WO-001：過期"], lacks="| AUTO | PASS |")
+    (stale / "reports" / "r.md").write_text(passed.replace("REVISION 1", "REVISION 3"), encoding="utf-8")
+    expect("trace marks a report naming a revision the order never had", "trace_report.py", 0, *trace_stale,
+           says="版次不符：報告寫 REVISION 3，工單只到 REVISION 2（報告寫 PASS）", lacks="| AUTO | PASS |")
+    order_path.write_text(typed, encoding="utf-8")
+    (stale / "reports" / "r.md").write_text(match_report(list(ACCEPTANCE.values()), "PARTIAL", sha="0" * 64),
+                                            encoding="utf-8")
+    expect("trace marks a report whose ORDER_SHA256 is not the order's", "trace_report.py", 0, *trace_stale,
+           says="過期：工單在報告之後改過（ORDER_SHA256 不符）（報告寫 PASS）", lacks="| AUTO | PASS |")
+    good_sha = hashlib.sha256(order_path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+    (stale / "reports" / "r.md").write_text(match_report(list(ACCEPTANCE.values()), "PARTIAL", sha=good_sha),
+                                            encoding="utf-8")
+    expect("trace shows a report whose ORDER_SHA256 matches as current", "trace_report.py", 0, *trace_stale,
+           says=["| DD-1 | WO-001 | AC-1 | AUTO | PASS | e.json |", "## 報告過期或版次不符（表內狀態是舊報告寫的，不是現在的工單）\n- 無"],
+           lacks="過期：")
+    order_path.write_text(typed.replace("TRACES_TO      = DD-1", "TRACES_TO      = DD-1, DD-2"), encoding="utf-8")
+    expect("trace without a 追溯 column gives one row per AC, not one per TRACES_TO ID x AC", "trace_report.py", 0,
+           *trace_stale, says=["| DD-1、DD-2（工單層） | WO-001 | AC-1 | AUTO |", "| DD-1、DD-2（工單層） | WO-001 | AC-3 | PO |"],
+           lacks=["| DD-2 | WO-001 | AC-1 |", "| DD-1 | WO-001 |", "AC 的追溯不在工單 TRACES_TO 裡"])
+    mapped = typed.replace("TRACES_TO      = DD-1", "TRACES_TO      = DD-1, DD-2").replace(
+        "| ID | 類型 | 要求 | 驗證方法 | 預期 |\n|---|---|---|---|---|", "| ID | 類型 | 要求 | 驗證方法 | 預期 | 追溯 |\n|---|---|---|---|---|---|").replace(
+        "| exit 0 |\n", "| exit 0 | DD-1 |\n").replace("| no WRONG answer |\n", "| no WRONG answer | DD-1、DD-9 |\n").replace(
+        "| PO says yes |\n", "| PO says yes | — |\n")
+    order_path.write_text(mapped, encoding="utf-8")
+    expect("an order with a 追溯 column still passes gate_check", "gate_check.py", 0, "--order", order_path, lacks="FAIL")
+    expect("trace with a 追溯 column gives one row per ID the AC names", "trace_report.py", 0, *trace_stale,
+           says=["| DD-1 | WO-001 | AC-1 | AUTO |", "| DD-1 | WO-001 | AC-2 | REVIEW |", "| DD-9 | WO-001 | AC-2 | REVIEW |",
+                 "| （未指定） | WO-001 | AC-3 | PO |", "## AC 的追溯不在工單 TRACES_TO 裡\n- WO-001 AC-2: DD-9",
+                 "## TRACES_TO 裡沒有 AC 驗證的編號\n- WO-001: DD-2"],
+           lacks=["| DD-2 | WO-001 |", "| DD-1 | WO-001 | AC-3 |", "（工單層）"])
+    expect("trace --decisions also checks the IDs an AC traces", "trace_report.py", 0, *trace_stale,
+           "--decisions", decisions, says="## TRACES_TO 找不到的編號\n- WO-001: DD-9", lacks="- WO-001: DD-1\n")
 
 
 def test_purpose():

@@ -96,7 +96,8 @@ AC_STATUSES = VOCAB["ac_worker_statuses"]  # type -> the statuses a worker may w
 UNFINISHED = ("FAIL", "BLOCKED", "UNVERIFIED")
 COLUMNS = {"類型": "type", "type": "type", "要求": "requirement", "req": "requirement", "驗證方法": "how verified",
            "how": "how verified", "預期": "expected", "expected": "expected", "實際": "actual", "actual": "actual",
-           "證據": "evidence", "evidence": "evidence", "狀態": "status", "status": "status"}
+           "證據": "evidence", "evidence": "evidence", "狀態": "status", "status": "status",
+           "追溯": "traces", "traces": "traces"}
 LEGACY_COLUMNS = ["requirement", "how verified", "expected", "actual", "evidence", "status"]
 DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 DATED_BY = {"order": r"^\s*ISSUED_BY\s*=.*?(\d{4}-\d{2}-\d{2})", "resume": r"^UPDATED\s*:.*?(\d{4}-\d{2}-\d{2})"}
