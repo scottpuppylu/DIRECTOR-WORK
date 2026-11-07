@@ -4230,6 +4230,31 @@ def test_usage_mix(tmp):
     expect("usage_mix --top names the session", "usage_mix.py", 0, *base, "--top", "2", says="session aaaa1111 line-alpha")
     expect("usage_mix --json", "usage_mix.py", 0, *base, "--json",
            says=['"eq_total": 10000', '"result": "OFF_TARGET"', '"cache_read_input_tokens": 0.1'])
+    # 1.3.1: shell_other split into git, file_ops, shell_search, build, python runs, sys_query; --by-session
+    sh = root / "shell"
+    sh.mkdir()
+    cmds = ["git log -1", "cat a.txt", "grep -n x f.txt", "npm run build", "py -3 tools/x.py", "Get-Process",
+            "foo --bar", "cat x.py"]
+    (sh / "eeee5555.jsonl").write_text("\n".join(
+        um_call(f"s{i}", f"2026-01-02T10:0{i}:00Z", [("Bash", {"command": c})], input_tokens=1000)
+        for i, c in enumerate(cmds)) + "\n", encoding="utf-8")
+    expect("usage_mix splits the shell commands", "usage_mix.py", 0, "--root", root, "--project-dir", "shell", "--json",
+           says=['"file_ops": 0.25', '"git": 0.125', '"shell_search": 0.125', '"build": 0.125', '"python_other": 0.125',
+                 '"sys_query": 0.125', '"shell_other": 0.125'])
+    expect("usage_mix build and python runs are 實際動手", "usage_mix.py", 0, "--root", root, "--project-dir", "shell",
+           says=["讀和查\t 75.0%", "實際動手\t 25.0%"])
+    build_pats = root / "build_patterns.json"
+    build_pats.write_text(json.dumps({"schema_version": 1, "patterns": {"build": r"\bfoo\b"}}), encoding="utf-8")
+    expect("usage_mix --patterns adds a build word", "usage_mix.py", 0, "--root", root, "--project-dir", "shell",
+           "--patterns", build_pats, "--json", says='"build": 0.25', lacks='"shell_other"')
+    expect("usage_mix --by-session: one line per session", "usage_mix.py", 0, *base, "--by-session",
+           says=["by-session bbbb2222 -: 60.0% of total, calls 2, eq 6.0K | 讀和查 33%, 等待 67% | top: wait_board 67%, "
+                 "shell_other 33%",
+                 "by-session aaaa1111 line-alpha: 40.0% of total, calls 3, eq 4.0K | 讀和查 75%, 實際動手 25% | top: git 50%, "
+                 "read_md 25%, edit_py 25%"])
+    expect("usage_mix --by-session --json", "usage_mix.py", 0, *base, "--by-session", "--json",
+           says=['"by_session"', '"session": "bbbb2222"', '"eq": 6000'])
+    expect("usage_mix without --by-session prints no session lines", "usage_mix.py", 0, *base, lacks="by-session")
     expect("usage_mix no transcripts is NO_DATA", "usage_mix.py", 1, "--root", root, "--project-dir", "empty", says="NO_DATA")
     expect("usage_mix a range with no calls is NO_DATA", "usage_mix.py", 1, *base, "--since", "2027-01-01", says="NO_DATA")
     expect("usage_mix patterns schema", "usage_mix.py", 2, *base, "--patterns", bad, says="FAIL patterns")

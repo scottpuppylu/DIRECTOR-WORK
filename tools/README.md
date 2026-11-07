@@ -504,13 +504,15 @@ C5 探測，全部在容器裡以 `dw` 身分跑：
 ## usage_mix.py（1.3.0）
 
 ```text
-python -I -X utf8 usage_mix.py --since 2026-11-01 [--until ...] [--session <id 前綴>] [--project-dir <資料夾名>] [--all] [--json] [--check]
+python -I -X utf8 usage_mix.py --since 2026-11-01 [--until ...] [--session <id 前綴>] [--project-dir <資料夾名>] [--all] [--by-session] [--json] [--check]
 ```
 
 - 讀 `~/.claude/projects` 的對話紀錄（含 subagent），每次呼叫算額度等價量：輸入 × 1 + 快取寫入 × 1.25 + 快取讀取 × 0.1 + 輸出 × 5（每 token），平分給它選的工具呼叫。同一個 `message.id` 拆成幾行的先合併（L-035），分叉或續接的 session 重複的只算一次。
 - 印五大類的比例和門檻（讀和查 ≤ 30%、實際動手 ≥ 30%）、細類、各 session 的比例，最後一行 `RESULT ON_TARGET|OFF_TARGET`；`--check` 沒達到就 exit 1。
+- shell 指令依序歸類（1.3.1 把原本的 `shell_other` 拆開）：`wait_board`、`render`、`engine_run`、`log_check`、`git`、`disk`；python 執行（`python`、`py -3`、`pytest`、`uv run`、直接跑 `.py`）是 `python_other`，帶審查工具名的是 `review_tools`；`build`（make、cmake、msbuild、dotnet、cargo、npm、node、gcc、pip 等編譯建置）；`list_files`；`shell_search`（grep、rg、findstr、Select-String）；`file_ops`（cat、sed、cp、mv、mkdir、rm、echo、Copy-Item、Set-Content 等）；`sys_query`（程序、版本、環境變數、網路）；剩下的才是 `shell_other`。`build` 和 `python_other` 算實際動手，其他算讀和查。
+- `--by-session`（1.3.1）：每個 session 一行（它的 subagent 算在它身上），依花費排序：佔總量比例、呼叫數、等價量、五大類比例、花最多的五個細類。`--top N` 只列前 N 個、不含細類。
 - RESTART 行：新 session 第一次呼叫的上下文、新 session 或壓縮後到第一個實際動手的呼叫數和等價量、依上下文大小的單價，和由這些算出的損益兩平點（`docs/04`「開新 session 划不划算」）。
-- `--patterns <檔>` 加專案自己的字（執行檔、審查工具名），讓 shell 指令歸到對的類別；專案字只放在那個檔，不進工具。
+- `--patterns <檔>` 加專案自己的字（執行檔、審查工具名、建置指令），讓 shell 指令歸到對的類別；鍵可以是 `wait_board`、`render`、`engine_run`、`log_check`、`git`、`disk`、`review_tools`、`list_files`、`review_read`、`engine_mcp`、`python`、`build`、`shell_search`、`file_ops`、`sys_query`。專案字只放在那個檔，不進工具。
 - 只印比例和數字，不印訊息內容。紀錄格式不是官方介面，改版後可能讀不到；讀不到就印 UNKNOWN，不印 0。
 
 ## status_gen.py（1.3.0）

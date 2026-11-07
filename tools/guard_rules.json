@@ -64,7 +64,7 @@
       "id": "G10",
       "category": "delete",
       "decision": {"worker": "deny", "director": "ask"},
-      "reason": "deleting files is the cleaner's job (docs/08); send a deletable list (path, size, why) to the Director or the cleaner",
+      "reason": "deleting files is the cleaner's job (docs/08); if the PO approved this deletion in the conversation, run it; otherwise send a deletable list (path, size, why) to the Director or the cleaner",
       "match": [
         {"kind": "shell", "cmd": ["rm", "rmdir", "rd", "del", "erase", "unlink", "shred", "remove-item", "ri", "clear-recyclebin"]},
         {"kind": "shell", "cmd": ["find"], "flags": ["-delete"]}
@@ -79,7 +79,7 @@
       "id": "G11",
       "category": "delete",
       "decision": {"worker": "deny", "director": "ask"},
-      "reason": "deleting through an MCP tool is the cleaner's job (docs/08); send a deletable list (what, where, why) to the Director or the cleaner",
+      "reason": "deleting through an MCP tool is the cleaner's job (docs/08); if the PO approved this deletion in the conversation, run it; otherwise send a deletable list (what, where, why) to the Director or the cleaner",
       "match": {"kind": "mcp", "words": ["delete", "trash", "destroy", "purge", "wipe", "erase", "uninstall"]},
       "example_block": {"tool_name": "mcp__files__trash_file", "tool_input": {"id": "x"}},
       "example_allow": {"tool_name": "mcp__files__get_file_metadata", "tool_input": {"id": "x"}},
@@ -89,7 +89,7 @@
       "id": "G20",
       "category": "send",
       "decision": {"worker": "deny", "director": "ask"},
-      "reason": "publishing or sending outside this machine needs the PO's approval (docs/08); report what you would send instead",
+      "reason": "publishing or sending outside this machine needs the PO's approval (docs/08); once the PO approved it in the conversation, run it; otherwise report what you would send",
       "match": [
         {"kind": "shell", "cmd": ["gh"], "args": [["pr"], ["create", "merge", "comment", "review", "close", "reopen", "edit", "ready"]]},
         {"kind": "shell", "cmd": ["gh"], "args": [["issue"], ["create", "comment", "close", "reopen", "edit", "delete", "transfer"]]},
@@ -114,7 +114,7 @@
       "id": "G21",
       "category": "send",
       "decision": {"worker": "deny", "director": "ask"},
-      "reason": "sending or publishing through an MCP tool needs the PO's approval (docs/08); report to the Director with SendMessage instead",
+      "reason": "sending or publishing through an MCP tool needs the PO's approval (docs/08); once the PO approved it in the conversation, run it; otherwise report to the Director with SendMessage",
       "match": {"kind": "mcp", "words": ["send", "post", "publish", "share", "reply", "comment", "merge", "create_pr",
                                           "create_pull_request", "deploy", "deployment", "promote", "upload", "tweet"]},
       "example_block": [{"tool_name": "mcp__chat__send_message", "tool_input": {"text": "x"}},
