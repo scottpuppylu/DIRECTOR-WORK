@@ -28,6 +28,7 @@ MINOR：GPT 對 v2.1.0 的獨立審查（`DIRECTOR-WORK-v2.1.0-review.md`，21 �
 - `plan` 和領取會重查版本：新版已登記、未 `publish` 時 `HOLD`；舊版、hash 不符、題目已關時 `REFUSED`（exit 1）。匯出裡壞掉的單筆進隔離區（`QUARANTINED`），其他筆照記。題目已採用別的答案後才到的不同答案標 `conflict-late`；重送的同一則留言記 `duplicate` 並直接 `CLOSED`。
 - `status`：`receipts_pending` 含已採用、等回條的；摘要行多 `reconcile= quarantined= clear=yes|no states=`；`--json` 只印一份 JSON（`schema: dw-choice-status/2`，摘要行移到 `summary`）。
 - 舊帳本自動升級：2.1 的 `choice_inbox.sqlite3` 第一次被 2.2 打開時升級（`PRAGMA user_version` 2），先在升級的鎖內備份成驗過的 `<db>.v210.bak`（名字被占用就加時間戳，不覆寫；備份失敗就不升級）。升級是單向的：升級後 2.1 工具不保證能讀，要退回就換回 `.v210.bak`（升級後新記的資料會丟）。
+- F05 帳本端：`ingest` 把回覆附帶的 `selectedOptionSnapshot` 和該版已登記的選項比對（`key`；有 `label` 也比），不一致就隔離為 `snapshot_mismatch`（印出登記的選項和頁面送的選項），不記帳、不排工；同一筆修好後再匯出會自動離開隔離區。沒附快照，或那一版沒登記，只印 WARNING，照 2.1 記帳；`register` 之後重判，對不上的改標 `snapshot_mismatch`、留在 `RECEIPT_PENDING`，`plan` 不會排。
 
 ### 選擇頁頁面端（W3：F04 F05 F07，`templates/choice_page.html`）
 
@@ -62,6 +63,7 @@ MINOR：GPT 對 v2.1.0 的獨立審查（`DIRECTOR-WORK-v2.1.0-review.md`，21 �
 | 選擇頁：decisions 沒有 `snapshotHash` 的 2.1 新題、或版本文件指紋和登記不同 | 可以送出 | 頁面禁止送出，顯示原因 | 總監用 `choice_reconcile.py register` 重新登記，讓 `decisions` 與 `choiceRevisions` 指紋一致；舊格式回覆需總監在帳本確認 |
 | `choice_reconcile`：`advance` 到 `CLAIMED`／`RECONCILE` | `--session` 可省 | 沒給 exit 2；接手（`CLAIMED → RECONCILE`）一定要 `--generation` | 補參數 |
 | `choice_reconcile`：帳本被鎖超過 `--busy-timeout` | `SHADOW_ERROR`、exit 0 | `CHOICE_RECONCILE: BUSY`、exit 1 | 當成「沒跑」，稍後重試 |
+| `choice_reconcile`：回覆的 `selectedOptionSnapshot` 和登記的選項對不上（例如 `choice: A` 附 B 的快照） | 記帳、排工 | 隔離 `snapshot_mismatch`，不記帳不排工 | 查頁面送錯的原因；請 PO 重送，或修正快照後重新匯出（同一筆自動離開隔離區） |
 | `choice_reconcile`：2.1 留下沒有持有者的 `CLAIMED`、非持有者交件 | 照走 | `REFUSED` | 先 `advance --from CLAIMED --to RECONCILE --session <你> --generation 1`，查證後再往下走 |
 | `trace_report`：只有 worker 自述的 B | 「這版有驗證紀錄：有」 | 「部分（缺：…）」 | 給 `--evidence-dir`、`--director-log`（含 `BRIEF_LOCKED`），總監跑 `verify --rerun`，把 `EVIDENCE_RERUN` 行貼進 LOG |
 | PO 驗收紀錄沒有成品檔可核對 | 已驗收 | 成品待核對或 `UNBOUND_PO_REPLY` | 補 `entry_sha256`、`manifest`，成品檔放在紀錄旁邊或用 `--artifact-root` |
@@ -91,7 +93,6 @@ MINOR：GPT 對 v2.1.0 的獨立審查（`DIRECTOR-WORK-v2.1.0-review.md`，21 �
 - `choice_reconcile`：隔離區自動解除只對有 `id` 的列有效（`missing-id`、`bad-answer` 要手動 `settle --key <隔離鍵> --to CLOSED`）；`status` 打開 2.1 帳本時會升級它，不是唯讀；沒有 `publish` 的新版會讓舊版一直 `HOLD`（`status` 會提示）。
 - `choice_reconcile`：在不支援 `os.link` 的檔案系統（FAT／exFAT、部分網路磁碟）上，舊帳本升級會中止，只印一行 OSError（`SHADOW_ERROR`、exit 0）。不會掉資料，但要手動備份後再升級。
 - `choice_reconcile`：同一筆回覆，一次匯出有 `source`、一次沒有，又沒給 `--source`，會用兩個不同的冪等鍵，重複記帳；系統只印 WARNING。舊匯出請一律帶 `--source`。
-- F05 的帳本端一半沒修：回覆的 `choice` 和附帶的 `selectedOptionSnapshot.key` 對不上時，帳本照樣入帳、排工（`repro_dw210.py` 的 `selected_snapshot` 仍顯示重現）。頁面端已禁止送出（指紋不符就沒有選項）；帳本端要用已註冊的不可變快照重建所選選項並核對，留給下一版。
 - 選擇頁頁面端只比對指紋字串，內容防竄改靠帳本端；兩個分頁同時送出由帳本標 conflict，頁面不仲裁。
 - 容器：真實 Docker 行為（`--sysctl` 實際關掉 IPv6、重疊掛載在 Docker Desktop 上的別名）只在本機模擬測過，沒有在真的容器裡跑；Linux 與 browser 兩個 CI job 要等第一次 GitHub 執行才算驗證。
 - 外部 GPT 審查的重現腳本只認 v2.1.0 的版本字串；`repro_dw210.py` 對 2.2.0 的結果見 PR 說明，仍顯示「重現」的項目逐項列在那裡。
@@ -99,8 +100,8 @@ MINOR：GPT 對 v2.1.0 的獨立審查（`DIRECTOR-WORK-v2.1.0-review.md`，21 �
 ### 數字
 
 - 每輪必讀（`docs/01`、`03`、`06`、`08`）：2.1.0 的 9,532 → 本版 9,549 bytes（上限 9,550，`MUST_READ_LIMIT` 不變；增加的是 W1 的待決頁與三層指示句）。量法是先把 CRLF 換成 LF 再數（selftest 的 `test_must_read_size` 就這樣量）；Windows checkout 的檔案是 CRLF，用 `wc -c` 直接量會顯示約 9,698。
-- `selftest.py`：2.1.0 的 1,946 項 → 本版 2,287 項（W1–W5 新增 341 項）。整合樹（commit 21cfa93 加上本段）本機 Python 3.11、3.9 各 2,287/2,287 全過；PATH 上沒有 git 時 1,129/1,129 全過，22 組依賴 git 的照名稱 skip。Python 3.12 與 Linux 兩個新 CI job 本機沒跑，要等第一次 GitHub 執行（見已知問題）。
-- 外部審查重現器（`repro_dw210.py`，改版本字串後對整合樹跑）：19 個案例，13 個「不再重現」、2 個仍顯示重現、4 個本機跳過（`rerun_symlink`、`container_mount`、`container_legacy` 要 Linux／WSL／Docker；`browser` 要 `--chrome`，由 CI browser job 跑）。仍顯示重現的兩個：`audit_cut_line`（斷行後 `audit_log` 仍拒寫並印 BROKEN，這是設計；2.2.0 多了 `recover` 出口，重現器的判斷不認得它）、`selected_snapshot`（帳本端還沒有用已註冊的選項內容去核對回覆附帶的 `selectedOptionSnapshot`；頁面端那一半 W3 已修）。逐項狀態在 PR 說明。
+- `selftest.py`：2.1.0 的 1,946 項 → 本版 2,302 項（W1–W5 新增 356 項）。整合樹 cae6162（之後只改 CHANGELOG 與報告）本機 Python 3.11、3.9 各 2,302/2,302 全過；PATH 上沒有 git 時 1,140/1,140 全過，22 組依賴 git 的照名稱 skip；3.11 也在放在有空格與中文路徑的匯出樹裡跑過一次（CI 的 Linux job 用這種路徑）。（GitHub CI 的結果以 PR 的檢查為準。）
+- 外部審查重現器（`repro_dw210.py`，改版本字串後對整合樹跑）：19 個案例，14 個「不再重現」、1 個仍顯示重現、4 個本機跳過（`rerun_symlink`、`container_mount`、`container_legacy` 要 Linux／WSL／Docker；`browser` 要 `--chrome`，由 CI browser job 跑）。仍顯示重現的一個：`audit_cut_line`（斷行後 `audit_log` 仍拒寫並印 BROKEN，這是設計；2.2.0 多了 `recover` 出口，重現器的判斷不認得它；F13 已修的證明——`recover` 後 `verify` 印 `GAP`、副本 sha256 吻合——在 PR 說明和 W5 報告）。逐項狀態在 PR 說明。
 
 對齊初衷：
 1. 幫到誰：PO 和之後所有用 DW 的人。依據是外部獨立審查（GPT）對 v2.1.0 的 21 項發現，和 PO 2026-11-08 對「建置時就要有待決頁」的要求。
