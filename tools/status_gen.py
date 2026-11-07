@@ -39,6 +39,7 @@ as absolute paths. An existing --out file is not replaced without --force.
 """
 import argparse
 import json
+import os
 import pathlib
 import re
 import sys
@@ -387,7 +388,9 @@ def director_settings(conf, base):
             raise ValueError(f"{where}: unknown key(s) {', '.join(unknown)}")
 
     def absolute(value):
-        return str((base / value).resolve())
+        # os.path.abspath, not Path.resolve(): audit.globs hold '*', and Python 3.9 on Windows raises
+        # WinError 123 when resolve() meets a wildcard (seen on the GitHub runner, not on a newer 3.9 build).
+        return os.path.abspath(os.path.join(str(base), value))
 
     page = conf["po_page"]
     if page is not None:
