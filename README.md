@@ -245,7 +245,9 @@ ANSWER:
 | Monitor 的指令 | 要 claude ≥ 2.1.314 才經過 hook；NOT_VERIFIED | 欄位格式照官方文件假設，沒有在真的 Monitor 上取樣。doctor 依版本報 |
 | worktree 隔離 | **檢查** | doctor 報告，不強制 |
 | OS 層隔離 | 原生 Windows：**沒有**（NOT_ENFORCED） | 指令和 Claude Code 同權限跑，能動到整台機器的檔案；也沒有網路出口管制。doctor 在原生 Windows 上永遠報這一項，所以一定 exit 1 |
-| 容器裡的 worker（`tools/container/`） | **擋**：根目錄和 DIRECTOR 唯讀、沒有 capability、只能連 `api.anthropic.com:443` | 實測 35 案繞路探測都擋下；`.git` 仍可寫（K1）、DNS 外洩擋不到。doctor `--probe --director` 在容器裡查四項 |
+| 容器裡的 worker（`tools/container/`） | **擋**：根目錄和 DIRECTOR 唯讀、沒有 capability、只能連白名單名稱的 443、只解析白名單名稱（DNS）；`--clone` 時 worker 只有自己的 clone（K1） | 實測 35 案繞路探測都擋下；1.2.0 DNS 容器實測 20 案、K1 容器實測 9 案、doctor 容器實測 8 案。doctor `--probe --director` 在容器裡查六項 |
+| 容器 worker 的 `.git`（K1） | `--clone`：**擋**。原 repo 不掛進容器，它的 ref、tag、objects 容器裡碰不到；worker 不能 push | 總監用 `worker_clone.sh collect` 只收那一條分支，放到 `refs/dw-workers/<名稱>/<分支>`；bundle 先在隔離 repo 過 `index-pack --strict` 和 `fsck --strict`。舊的 `--git-common` 保留一版：印 WARN、doctor 報 NOT_ENFORCED（K1 shared .git），2.0 拿掉 |
+| 容器的 DNS | **擋**：容器裡的 `dns_allow.py` 只回答白名單名稱的 A / AAAA，其他回 NXDOMAIN 或 REFUSED；直接問別的 DNS 伺服器被拒；沒有關閉開關 | 剩下的路見下表「容器的 DNS」 |
 
 刻意沒做、或依使用者決定不做的：
 
@@ -257,8 +259,9 @@ ANSWER:
 | 子程序憑證清洗 | `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1` 依官方設計**保留** `GITHUB_TOKEN`、`GH_TOKEN`、proxy 帳密和 `GIT_CONFIG_*`；原生 Windows 上的行為未證實，`doctor.py --probe` 只列名稱 |
 | OTEL 的 `safety_event` | 2.1.312 起官方不再送，DW 不依賴 |
 | 容器隔離 | 只有用 `tools/container/run_worker.sh` 開的 worker 有；Desktop 開的 session 不在容器裡 |
-| 容器裡的 `.git` | 整個可寫（`hooks/`、`config`、`worktrees/` 除外）：worker 能動別的 branch 的 ref 和 tag。總監用 `git rev-parse` 取候選 commit |
-| 容器的 DNS | 對 resolver 的 DNS 放行，所以資料可以藏在 DNS 查詢裡送出去；這版沒有白名單 resolver |
+| 容器裡的 `.git`（舊的 `--git-common`） | 整個可寫（`hooks/`、`config`、`worktrees/` 除外）：worker 能動別的 branch 的 ref 和 tag。1.2.0 保留一版，doctor 報 NOT_ENFORCED，2.0 拿掉；改用 `--clone` |
+| 容器的 DNS | 白名單名稱的查詢仍會送到上游：上游看得到查了哪個名稱、A 還是 AAAA、什麼時候查。查詢的時間點可以當成很慢的隱密通道。`*.` 開頭的名稱只解析、不開 443 |
+| 容器的 IP | 443 的 IP 只在開容器時解析一次；`api.anthropic.com` 中途換 IP，連線就會失敗，要重開容器 |
 | hook 可以被關掉 | 任一設定層 `disableAllHooks: true` 就全部失效；DW 不能、也不該鎖使用者的設定，doctor 會報 NOT_ENFORCED |
 | 憑證代理 | 沒有。憑證仍在環境變數和檔案裡，DW 只擋「讀」的常見寫法 |
 | 紀錄的外部見證 | 沒有。只有雜湊鏈加上從 commit 取的錨點 |
