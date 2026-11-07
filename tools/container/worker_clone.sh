@@ -25,7 +25,7 @@
 # Exit 0 with "COLLECTED <ref> <sha>", 2 with a reason on stderr.
 set -euo pipefail
 
-IMAGE="dw-worker:1.1.0"
+IMAGE="dw-worker:1.2.0"
 die() { echo "worker_clone: $*" >&2; exit 2; }
 
 [ $# -gt 0 ] || die "usage: worker_clone.sh create|collect|import ..."
