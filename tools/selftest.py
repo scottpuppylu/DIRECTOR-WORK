@@ -1008,6 +1008,92 @@ def test_chat_to_product(tmp):
            says="## 沒有工單的需求\n- B-1\n", lacks="- B-2\n")
 
 
+def test_onboarding_v210(tmp):
+    """2.1.0 W3 (題3 P-1~P-4, 題2 P-5, 題1 P-3): beginner talks requirements in the mode-choice round, one reply confirms the
+    BRIEF and authorizes the start, the choice page is always asked first, and trace uses two --decisions files."""
+    global total
+    root = TOOLS.parent
+    two = "--decisions <WS>/DIRECTOR/BRIEF.md --decisions <WS>/DIRECTOR/DECISION_REGISTER.md"
+    ask = "需要我把選擇題和圖片放在你自己的 Claude 頁面，讓你點選嗎？直接在這裡回答也可以。"
+    consent = "卡片對，請開一位 AI 助手做這一批"
+    first_q = "這是給誰用的？第一版讓他做成哪一件事就有用？"
+    docs = {name: (root / name).read_text(encoding="utf-8") for name in (
+        "BOOTSTRAP.md", "README.md", "docs/11_claude_desktop.md", "docs/12_chat_to_product.md", "templates/BRIEF.md",
+        "templates/PO_PENDING.md", "tools/README.md")}
+    wanted = [("BOOTSTRAP.md", "### 小白快速路徑"), ("BOOTSTRAP.md", first_q), ("BOOTSTRAP.md", ask), ("BOOTSTRAP.md", two),
+              ("BOOTSTRAP.md", "--only-this"), ("BOOTSTRAP.md", "get_usage"), ("BOOTSTRAP.md", "`GUARDS.md`"),
+              ("BOOTSTRAP.md", consent), ("BOOTSTRAP.md", "不是 git repo、認不出是哪個專案"),
+              ("docs/11_claude_desktop.md", "## 選擇頁的授權與備援"), ("docs/11_claude_desktop.md", ask),
+              ("docs/11_claude_desktop.md", "備援 4 步"), ("docs/11_claude_desktop.md", "--only-this"),
+              ("docs/11_claude_desktop.md", consent), ("docs/11_claude_desktop.md", "選了小白模式不等於同意"),
+              ("docs/12_chat_to_product.md", consent), ("docs/12_chat_to_product.md", first_q), ("docs/12_chat_to_product.md", two),
+              ("docs/12_chat_to_product.md", "店員"), ("docs/12_chat_to_product.md", "不編 B 號"),
+              ("docs/12_chat_to_product.md", "只有 B 開頭的列算待排項目"), ("docs/12_chat_to_product.md", ask),
+              ("README.md", "選小白模式的話，它在同一則回覆就開始問你想做什麼"), ("README.md", consent), ("README.md", "同一輪就開始問我想做什麼"),
+              ("templates/BRIEF.md", "第一階段（選填）"), ("templates/BRIEF.md", "## 待預覽"), ("templates/BRIEF.md", two),
+              ("templates/PO_PENDING.md", "## 待預覽"), ("templates/PO_PENDING.md", "SOURCE:"), ("templates/PO_PENDING.md", "LOCK_AND_USER_ASKED"),
+              ("tools/README.md", two)]
+    for state in ("LOCK_ONLY", "NO_START", "LOCK_AND_USER_ASKED"):
+        wanted.append(("docs/12_chat_to_product.md", f"`{state}`"))
+    # tools/ does not exist on the quick path before the card is locked: the order check runs after locking
+    wanted += [("docs/12_chat_to_product.md", "貼卡前只備好首批工單草稿；鎖卡後、開第一位 worker 前，才跑 `gate_check --order` 和追溯核對"),
+               ("docs/12_chat_to_product.md", "建 `tools/`，跑 `gate_check --order` 和追溯核對"),
+               ("BOOTSTRAP.md", "貼卡前只備好首批工單草稿，`gate_check --order` 和追溯核對留到鎖卡後、開第一位 worker 前"),
+               ("BOOTSTRAP.md", "表中標「延後」的步驟到那時才做"),
+               ("README.md", "小白模式先讀 01、03、06、08、12，其餘最晚在派第一張工單前讀完；一般模式不變")]
+    for path, needle in wanted:
+        total += 1
+        if needle not in docs[path]:
+            failures.append(f"onboarding 2.1.0: {path} lacks {needle!r}")
+    # BOOTSTRAP step 6, docs/11 and docs/12 section 2 used to disagree (F-7): none may keep the old wording
+    stale = [("BOOTSTRAP.md", "小白模式直接用它當待決頁"), ("BOOTSTRAP.md", "一般模式要用，照第 1 點先問"),
+             ("BOOTSTRAP.md", "開線前用一句白話問使用者可不可以開始做"), ("docs/12_chat_to_product.md", "用選擇頁（下面第四節）"),
+             ("docs/11_claude_desktop.md", "會把專案內容放上 claude.ai，要先問 PO。 |")]
+    for path, needle in stale:
+        total += 1
+        if needle in docs[path]:
+            failures.append(f"onboarding 2.1.0: {path} still says {needle!r}, which contradicts the ask-first rule")
+    # all three places that decide whether the choice page may be used must say: asked first, agreed, and the chat fallback
+    for path in ("BOOTSTRAP.md", "docs/11_claude_desktop.md", "docs/12_chat_to_product.md"):
+        total += 1
+        text = docs[path]
+        if not ("PO_PENDING.md" in text and "聊天" in text and ("先問" in text or "一定先問" in text) and "同意" in text):
+            failures.append(f"onboarding 2.1.0: {path} must say the choice page is asked first, needs consent, and falls back to PO_PENDING.md and chat")
+    # the quick path sits between 先問模式 and step 0, so a beginner reads it before any build step
+    boot = docs["BOOTSTRAP.md"]
+    total += 1
+    order = [boot.find(h) for h in ("## 先問模式", "### 小白快速路徑", "## 0. 先確認環境", "## 7. 壓縮門檻", "## 14. 談需求")]
+    if -1 in order or order != sorted(order):
+        failures.append("onboarding 2.1.0: BOOTSTRAP.md headings 先問模式 / 小白快速路徑 / 0 / 7 / 14 are missing or out of order")
+    # the compaction threshold is set only before the first worker, and only for that worker's folder
+    total += 1
+    step7 = boot.split("## 7. 壓縮門檻")[1].split("## 8.")[0]
+    if "只在開第一位 worker 前設定" not in step7 or "--only-this" not in step7 or "--apply" not in step7:
+        failures.append("onboarding 2.1.0: BOOTSTRAP step 7 must set the threshold only before the first worker, with --only-this then --apply")
+    # trace with two --decisions files: B in the brief and DD in the register are both found; only B rows are work to schedule
+    folder = tmp / "onboarding"
+    for name in ("orders", "reports"):
+        (folder / name).mkdir(parents=True)
+    brief = (root / "templates/BRIEF.md").read_text(encoding="utf-8")
+    (folder / "BRIEF.md").write_text(brief, encoding="utf-8")
+    (folder / "REGISTER.md").write_text("| ID | 決定 |\n|---|---|\n| DD-1 | x |\n| DD-2 | y |\n| PO-01 | z |\n\n文字裡提到 DD-7，但不在表格。\n", encoding="utf-8")
+    order_file = folder / "orders" / "WO-001-parser.md"
+    order_file.write_text(TYPED_ORDER.format(base="abc123").replace("DD-1", "B-2, DD-1"), encoding="utf-8")
+    base = ("--orders", folder / "orders", "--reports", folder / "reports", "--config", root / "director_work.example.json")
+    both = base + ("--decisions", folder / "BRIEF.md", "--decisions", folder / "REGISTER.md")
+    expect("two --decisions files find B-2 in the brief and DD-1 in the register", "trace_report.py", 0, *both,
+           says="## TRACES_TO 找不到的編號\n- 無", lacks="- WO-001: B-2")
+    expect("only B rows are schedulable: unserved DD-2 and PO-01 are just listed, the 待預覽 text is never a requirement", "trace_report.py", 0, *both,
+           says=["## 沒有工單的需求\n- B-1\n", "- DD-2\n", "- PO-01\n"], lacks=["配色", "- B-2\n", "- DD-1\n"])
+    expect("the old single-file command still reads the same: DD-1 is not in the brief", "trace_report.py", 0, *base, "--decisions", folder / "BRIEF.md",
+           says=["## TRACES_TO 找不到的編號\n- WO-001: DD-1", "- B-1\n"], lacks="- WO-001: B-2")
+    order_file.write_text(TYPED_ORDER.format(base="abc123").replace("DD-1", "B-2, DD-7, B-9"), encoding="utf-8")
+    expect("an ID that is only in the register's prose, or in no file, is still reported missing", "trace_report.py", 0, *both,
+           says="## TRACES_TO 找不到的編號\n- WO-001: DD-7\n- WO-001: B-9\n")
+    expect("a --decisions path that does not exist stays exit 1", "trace_report.py", 1, *base, "--decisions", folder / "BRIEF.md",
+           "--decisions", folder / "none.md")
+
+
 def test_vocabulary():
     """vocabulary.json is the one source; the docs and templates that spell the lists out must still match it."""
     global total
@@ -5252,6 +5338,7 @@ def main():
         test_shared_code()
         test_py39_newline()
         test_vocabulary()
+        test_onboarding_v210(tmp)
         test_must_read_size()
         test_must_read_reasons()
         test_hook(tmp)

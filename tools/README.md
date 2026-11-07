@@ -341,7 +341,7 @@ python -I -X utf8 trace_report.py --orders <DIRECTOR>/orders --reports <報告�
 - 表後列出：沒有 TRACES_TO 的工單、不符 `trace_id_pattern` 的編號、對不到工單的報告、裁決對不到報告版次（含 `CANDIDATE_HEAD:` 不是報告 HEAD 的）、報告過期或版次不符。沒設 `trace_id_pattern` 就不檢查格式。
 - 過期報告（1.3.3）：選中的報告 `ORDER:` 行的 REVISION 不是工單現在的 REVISION，或 `ORDER_SHA256` 不是工單現在的雜湊，狀態欄不再照抄它的 PASS，改寫「過期：…（報告寫 PASS）」或「版次不符：…」。只是提示，不擋；正式判定仍是 `gate_check --match`。沒寫 `ORDER:` 或 `ORDER_SHA256` 的舊報告不判斷。
 - 一列一條 AC（1.3.3），不再把 TRACES_TO 的每個編號和每條 AC 交叉配對。工單的 AC 表可加選用的 `追溯`（或 `traces`）欄，寫這條 AC 驗證哪些編號：每個編號一列，空的（或 `—`）寫「（未指定）」；表後另列「AC 的追溯不在工單 TRACES_TO 裡」和「TRACES_TO 裡沒有 AC 驗證的編號」。沒有這欄、TRACES_TO 有兩個以上編號時，每條 AC 一列，需求欄寫「DD-1、DD-2（工單層）」。`--decisions` 也查 AC 追溯的編號。
-- `--decisions 檔案`（可重複）：讀專案需求或決定檔裡表格列第一欄的 `XX-數字` 編號。TRACES_TO 寫了、卻不在這些檔裡的，列在「TRACES_TO 找不到的編號」；檔裡有、卻沒有任何工單追溯的，列在「沒有工單的需求」。不給這個旗標，輸出和以前相同。
+- `--decisions 檔案`（可重複）：讀專案需求或決定檔裡表格列第一欄的 `XX-數字` 編號。TRACES_TO 寫了、卻不在這些檔裡的，列在「TRACES_TO 找不到的編號」；檔裡有、卻沒有任何工單追溯的，列在「沒有工單的需求」。不給這個旗標，輸出和以前相同。專案用初衷卡時，卡和決策登記表一起查（旗標給兩次）：`--decisions <WS>/DIRECTOR/BRIEF.md --decisions <WS>/DIRECTOR/DECISION_REGISTER.md`；舊專案沒有登記表才只給卡。只有 B 開頭的列算待做項目，「沒有工單的需求」裡的 DD、PO、OD 只是決策紀錄，不代表缺工單。配色這類待預覽的事不要編成 B 號，放在卡的「待預覽」段（`docs/12` 第三節）。
 - 初衷卡只用清單列出 DD 編號（`- DD-1 …`，2.1）：只給 `--decisions BRIEF.md` 時，這些編號也算找得到，但不列進「沒有工單的需求」；圍欄裡的清單是例子，不算。表格裡沒有某個開頭的編號時（例如 PO），會提示再加 `--decisions DECISION_REGISTER.md`。
 - `--brief BRIEF.md`（2.1，只讀、不擋）：多印「初衷卡三欄」一節，每條 B 一列：有人負責／這版有驗證紀錄／你看過這個成品嗎。
   - 驗證紀錄看選中的報告：AC 狀態，加 `--evidence-dir` 時 PASS 還要找得到證據檔。工單記的指紋和現在的列不同，寫「工單是照舊條件寫的，新條件待重驗」。
