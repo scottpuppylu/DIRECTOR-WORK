@@ -4507,11 +4507,48 @@ def test_worker_clone(tmp):
     done = run("--worktree", repo_p, "--git-common", (repo / ".git").as_posix(), "--director", director.as_posix())
     words = shlex.split(done.stdout) if done.returncode == 0 else []
     check("--git-common still works for one version, with a WARN on stderr (Q1)",
-          done.returncode == 0 and "WARN K1" in done.stderr and "2.0 removes --git-common" in done.stderr, done.stderr)
+          done.returncode == 0 and "WARN K1" in done.stderr and "legacy mode" in done.stderr
+          and "2.0 removes" not in done.stderr and "--clone" in done.stderr, done.stderr)
     check("--git-common: DW_WORKER_NAME defaults to the folder name", "DW_WORKER_NAME=repo" in words, done.stdout)
     check("--git-common sets DW_GIT_MODE=shared (doctor: K1 NOT_ENFORCED)", "DW_GIT_MODE=shared" in words, done.stdout)
     done = run("--worktree", repo_p, "--git-common", (repo / ".git").as_posix(), "--name", "w9", "--director", director.as_posix())
     check("--git-common with --name uses it", "DW_WORKER_NAME=w9" in shlex.split(done.stdout or "''"), done.stdout + done.stderr)
+
+    # 2.2.0 F11: DIRECTOR must stay outside every writable mount (equal, inside, around, alias by symlink or ..)
+    inner = clone / "DIRECTOR"
+    inner.mkdir()
+    for label, args in (
+            ("DIRECTOR inside the clone", ("--clone", c, "--name", "w1", "--director", inner.as_posix())),
+            ("DIRECTOR equal to the clone", ("--clone", c, "--name", "w1", "--director", c)),
+            ("DIRECTOR around the clone", ("--clone", c, "--name", "w1", "--director", clone.parent.as_posix())),
+            ("DIRECTOR through a .. alias of the clone", ("--clone", c, "--name", "w1", "--director", (director / ".." / "clone" / "DIRECTOR").as_posix())),
+            ("--worktree equal to DIRECTOR (with --git-common)", ("--worktree", repo_p, "--git-common", (repo / ".git").as_posix(), "--director", repo_p)),
+            ("DIRECTOR inside --git-common", ("--worktree", repo_p, "--git-common", (repo / ".git").as_posix(), "--director", (repo / ".git" / "hooks").as_posix()))):
+        done = run(*args)
+        check(f"F11 {label}: exit 2, no docker command", done.returncode == 2 and "overlaps the writable mount" in done.stderr
+              and not done.stdout.strip(), done.stdout + done.stderr)
+    try:
+        alias = folder / "alias_to_clone"
+        os.symlink(clone, alias, target_is_directory=True)
+    except (OSError, NotImplementedError, AttributeError):
+        alias = None
+        print("SKIP F11 symlink alias case: this OS or user cannot make symlinks")
+    if alias is not None:
+        done = run("--clone", c, "--name", "w1", "--director", (alias / "DIRECTOR").as_posix())
+        check("F11 DIRECTOR through a symlink to the clone: exit 2", done.returncode == 2 and "overlaps" in done.stderr, done.stdout + done.stderr)
+    done = run("--clone", c, "--name", "w1", "--director", director.as_posix())
+    check("F11 a sibling DIRECTOR still works", done.returncode == 0 and f"{director.as_posix()}:/director:ro" in done.stdout, done.stderr)
+    check("F18 an online run closes IPv6 by sysctl; the default login volume is unchanged",
+          "net.ipv6.conf.all.disable_ipv6=1" in done.stdout and "dw-claude-home:/home/dw/.claude" in done.stdout, done.stdout)
+    offline = run("--clone", c, "--name", "w1", "--director", director.as_posix(), "--offline")
+    check("F18 an offline run has no sysctl (--network none)", offline.returncode == 0 and "--sysctl" not in offline.stdout, offline.stdout + offline.stderr)
+    for volume, ok in (("dw-claude-home-projx", True), ("../x", False)):
+        named = subprocess.run([bash, (box / "run_worker.sh").as_posix(), "--dry-run", "--clone", c, "--name", "w1",
+                                "--director", director.as_posix()], capture_output=True, encoding="utf-8",
+                               env={**os.environ, "DW_DNS_UPSTREAM": "192.0.2.53", "DW_CLAUDE_HOME_VOLUME": volume})
+        check(f"F18 DW_CLAUDE_HOME_VOLUME={volume}: " + ("a separate login volume" if ok else "exit 2"),
+              (named.returncode == 0 and f"{volume}:/home/dw/.claude" in named.stdout) if ok
+              else (named.returncode == 2 and "DW_CLAUDE_HOME_VOLUME" in named.stderr), named.stdout + named.stderr)
 
 
 def test_dns_allow(tmp):

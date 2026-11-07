@@ -488,7 +488,7 @@ bash tools/container/worker_clone.sh create  --repo /mnt/d/.../repo --base <comm
 bash tools/container/run_worker.sh --clone ~/dw-clones/<名稱> --name <名稱> --director /mnt/d/.../DIRECTOR \
      [--offline | --login | --allow <host> | --allow-file <檔案>] [--dry-run] -- claude
 bash tools/container/worker_clone.sh collect --repo /mnt/d/.../repo --branch <分支> --dir ~/dw-clones/<名稱> --name <名稱>
-# 舊的寫法（1.1.0）保留一版，印 WARN K1，doctor 報 NOT_ENFORCED，2.0 拿掉：
+# 舊的寫法（1.1.0）：2.2.0 仍支援的舊模式，印 WARN K1，doctor 報 NOT_ENFORCED；只會在 major 版（最早 3.0）移除，小版本不會拿掉。要遷移就改用上面的 worker_clone.sh create + --clone：
 bash tools/container/run_worker.sh --worktree /mnt/d/.../wt --director /mnt/d/.../DIRECTOR \
      --git-common /mnt/d/.../repo/.git [--worktree-name <名稱>] [...] -- claude
 ```
@@ -508,20 +508,24 @@ bash tools/container/run_worker.sh --worktree /mnt/d/.../wt --director /mnt/d/..
 - `Dockerfile`：基底 `python:3.12-slim-bookworm` 用 digest 釘住，Claude Code 用 `ARG CLAUDE_VERSION` 釘版本，`DISABLE_AUTOUPDATER=1`。要升級就改這兩行重 build，不會自己更新。
 - `run_worker.sh` 給容器的東西只有：
   - `/work`：worker 的 worktree，唯一能寫的專案資料夾。
-  - `/director`：DIRECTOR，唯讀。
+  - `/director`：DIRECTOR，唯讀。**2.2.0（F11）起 DIRECTOR 不可以和任何可寫掛載重疊**：`--clone`、`--worktree`、`--git-common` 的真實路徑（`pwd -P`）與 DIRECTOR 相同、在它底下、或包住它，都 exit 2、不印 docker 指令；另用 inode（`-ef`）和 `/mnt/<磁碟>` 不分大小寫比對，擋住 symlink、`..`、Windows／WSL 大小寫別名。原因：DIRECTOR 放在 clone 裡時，worker 改 `/work/DIRECTOR/...` 就等於改了唯讀的 `/director`（審查實測寫入成功）。
+    - 遷移：先備份 DIRECTOR，再把它搬到 clone／repo 以外的獨立資料夾（例如 `/mnt/d/DIRECTOR-WORK-DIRECTOR`），同步改 `--director` 與專案設定裡寫死的路徑；舊專案若 DIRECTOR 在 repo 內，這是 2.1.0 → 2.2.0 唯一會從「能啟動」變成「exit 2」的行為。
+    - 啟動前的重疊檢查是掛載設定檢查，不寫任何檔；doctor 的診斷若要寫入測試，只准用一次性 canary 檔，不碰正式工單。
   - repo 的 `.git`，可寫（見 K1），其中三處另外唯讀蓋上：
     - `hooks/` 和 `config`：之後在主機上執行。少了這兩個就 exit 2，免得 docker 用 root 身分在主機上建出來。
     - `worktrees/`：別的 worktree 的紀錄。它們的 `gitdir` 檔寫的是 Windows 路徑，容器裡看起來不存在，所以容器裡的 `git worktree prune` 會把它們刪掉。
   - 兩種 worktree：
     - 主 checkout（不給 `--worktree-name`）：`--git-common` 必須是 `<worktree>/.git`，`.git` 就在 `/work/.git`。
     - linked worktree（`--worktree-name <名稱>`）：`.git` 掛在 `/repo-git`。主機上 worktree 的 `.git` 檔寫的是 Windows 路徑，Linux 的 git 讀不懂，所以另外唯讀掛一個 `/work/.git` 檔指到 `/repo-git/worktrees/<名稱>`。自己那筆紀錄可寫（index、HEAD、logs），其中 `gitdir` 檔唯讀換成 `/work/.git`，prune 就不會刪它。
-  - docker volume `dw-claude-home` → `/home/dw/.claude`：只放容器裡 Claude Code 自己的登入。
+  - docker volume `dw-claude-home` → `/home/dw/.claude`：只放容器裡 Claude Code 自己的登入。**這是同一台主機上所有 worker 共用、可寫的同一個 volume（F18）**：clone 隔離不等於登入與使用者設定隔離，一個 worker 能讀到、改到另一個 worker 的登入狀態與設定，也和跨專案、跨帳號共用。需要隔離時，每個信任範圍用自己的 volume：啟動前設環境變數 `DW_CLAUDE_HOME_VOLUME=dw-claude-home-<範圍>`（預設仍是 `dw-claude-home`，不設就和 2.1.0 一樣；名稱只准字母、數字、`_ . -`），各 volume 第一次都要在容器裡 `/login`。舊 volume 保留到確認遷移完成再刪（刪除屬於 PO 或總監的決定）。
   - `--clone`（1.2.0）：`/work` 就是 worker 自己的 clone，`.git/config` 和 `.git/hooks` 另外唯讀蓋上；原 repo 完全不掛。上面 `.git` 的三種掛法只用在舊的 `--git-common`。
-  - 環境變數只有這些：`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`、`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`、`XDG_CACHE_HOME`、`DW_ALLOW_DOMAINS`、`DW_DNS_UPSTREAM`、`DW_WORKER_NAME`（audit log 檔名用）、`DW_GIT_MODE`（`clone` 或 `shared`，doctor 用），`--git-common` 時再加 `GIT_CONFIG_COUNT/KEY/VALUE` 設的 `gc.auto=0` 和 `gc.worktreePruneExpire=never`（git 不會自己 gc 或 prune）。不帶 `--env-file`，主機的變數一個都不進去。`--offline` 沒有 `DW_ALLOW_DOMAINS` 和 `DW_DNS_UPSTREAM`。
+  - 環境變數只有這些：`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`、`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`、`XDG_CACHE_HOME`、`DW_ALLOW_DOMAINS`、`DW_DNS_UPSTREAM`、`DW_WORKER_NAME`（audit log 檔名用）、`DW_GIT_MODE`（`clone` 或 `shared`，doctor 用），有網路時 `--sysctl`（關 IPv6，不是環境變數），`--git-common` 時再加 `GIT_CONFIG_COUNT/KEY/VALUE` 設的 `gc.auto=0` 和 `gc.worktreePruneExpire=never`（git 不會自己 gc 或 prune）。不帶 `--env-file`，主機的變數一個都不進去。`--offline` 沒有 `DW_ALLOW_DOMAINS` 和 `DW_DNS_UPSTREAM`。
   - 沒有 `GIT_DIR` 和 `GIT_WORK_TREE`：設成全域變數，容器裡每個 git 都會指到這個 repo，連在別的資料夾跑的也是（selftest 在暫存區 `git init` 就壞了）。
   - 不掛主機的家目錄、`~/.ssh`、gh 設定、AppData，也沒有 docker socket。
 - 權限：`--cap-drop ALL`，只加回 NET_ADMIN、NET_RAW、SETUID、SETGID、SETPCAP，給 entrypoint 以 root 設防火牆用。設完 `setpriv` 換成使用者 `dw`，並清空所有 capability（包括 bounding set，所以要 SETPCAP）和 `no_new_privs`。另有 `--read-only`（根目錄唯讀，`/tmp`、`/run` 是 tmpfs）、`--pids-limit 512 --memory 4g --cpus 4`。
 - 網路（`init_firewall.sh`，分兩段，中間由 entrypoint 啟動 `dns_allow.py`）：OUTPUT 預設 DROP。只放行 loopback、已建立連線的回應、使用者 `dwdns`（只有 `dns_allow.py` 用）對 `DW_DNS_UPSTREAM` 的 53，以及白名單名稱在**開容器當下**解析到的 IPv4 的 TCP 443。其他一律 REJECT；IPv6 一律 DROP。
+  - **這條規則的準確說法（F18）：放行的是「解析後的目的 IP:443」，不是網域名稱。** 防火牆不看 TLS SNI，也不看 HTTP Host；同一個 IP 上若還有別的網站（CDN、共用主機），443 也連得到。要做到網域層控制，得改用受控代理並禁止直接連線，目前沒有做。
+  - IPv6（F18）：`init_firewall.sh` 設 `ip6tables` DROP 時失敗會被忽略，所以 2.2.0 的 `run_worker.sh` 在有網路時另外給 docker `--sysctl net.ipv6.conf.all.disable_ipv6=1` 和 `net.ipv6.conf.default.disable_ipv6=1`（映像不變，仍是 `dw-worker:1.2.0`）。docker 不接受這個 sysctl 時容器起不來（失敗即關閉）。實際有效與否用 `doctor.py --probe` 在容器裡驗證；本版沒有在真實 Docker 上跑（見 TASK_REPORT 的 UNVERIFIED）。
   - 名稱清單：`--allow-file`（預設是同資料夾的 `dns_allow.txt`，裡面只有 `api.anthropic.com`），加上 `--login` 和 `--allow`，依序合併、去重、轉小寫；有不合法的名稱就 exit 2，清單是空的也 exit 2（要沒網路就用 `--offline`）。
   - `--login` 加 `claude.ai`、`platform.claude.com`、`console.anthropic.com`，只有第一次登入要用。
   - `--allow <host>` 再加別的名稱。`*.example.com` 代表它底下的子網域（不含本身）：只解析，不開 443。
