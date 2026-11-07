@@ -47,6 +47,9 @@
 42. **看圖子代理用 general-purpose（L-040）。** 一週 113 個，大多只讀圖回文字，卻帶著全部工具。→ 選工具最少、做得完的類型（`docs/04` 規則 3）。
 43. **背景工作手動輪詢 log 3,359 次（L-041）。** 每次都等於重讀整段上下文。→ 只等完成通知或用 Monitor；`poll_hint.py` 提示、`poll_hint.py report` 每週計數（`docs/04` 規則 8）。
 44. **沒有一支腳本一次印出全部狀態（L-042）。** 「讀和查」佔 44%，大多是重讀自己的腳本、RESUME_STATE、規則，和反覆 ls 同一個輸出資料夾。→ 每條線一支 `status.py`（`tools/status_gen.py`），壓縮後先跑它（`docs/06b`）。
+45. **設定只從啟動資料夾讀（L-043）。** hook 和權限寫在某個 worktree 的 `.claude/settings.local.json`，session 卻是從別的資料夾啟動的，那份設定根本沒被讀到；以為有防護，其實沒有。要改或拿掉防護，也要改啟動資料夾那一份才有用。→ 設定寫進 session 實際啟動的資料夾；`doctor.py` 依對話紀錄數各資料夾的啟動次數，報 `settings unread` 和 `WARN launch folder unguarded`；改完新開 session 實測（`tools/README.md` 啟動資料夾）。
+46. **here-document 的內容被當成指令（L-044）。** 寫 log 的 `cat <<'EOF'` 裡出現 `git push origin` 幾個字，整個 Bash 被擋。→ hook_guard 只檢查真正會執行的片段：引號裡的字和 here-document 內容是資料；不加引號的 here-document 裡的 `$(...)` 和反引號照樣檢查；找不到結尾行就照原文檢查（`tools/README.md` hook_guard）。
+47. **阻擋型防護卡住已核准的 push，也讓工作線不敢動手（L-045）。** 1.3.0 的 hook_guard 預設 exit 2，PO 在對話裡同意的 push 照樣被擋，總監只好先拆 hook 才推得出去；裝了 hook 的工作線連該做的事都先停下來問。PO：防護是讓 AI 安心做，不是什麼都不敢做。→ 預設只提醒（`--mode remind`），`--mode ask` 交給使用者，`--mode block` 是明確 opt-in；使用者核准就執行，不重問（README「防護是安全帶，不是剎車」、`docs/04`、`docs/05`）。
 
 ## 每輪必讀規則的理由
 

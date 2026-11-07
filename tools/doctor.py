@@ -342,7 +342,8 @@ def main():
         elif version < ON_FAILURE:
             item("NOT_ENFORCED", "hook_guard", f"claude {show(version)} < 2.1.295 has no onFailure: a broken hook lets calls through")
         else:
-            item("ENFORCED", "hook_guard", f"hook test passed ({detail}), onFailure block, claude {show(version)}")
+            item("ENFORCED", "hook_guard", f"hook test passed ({detail}), mode {setup.mode_arg(command)}, onFailure block, "
+                 f"claude {show(version)}")
     if os.name == "nt" and guards and not disabled:
         bash = git_bash()
         if version and version >= GIT_BASH_FIX:
@@ -397,11 +398,21 @@ def main():
             item("MISSING", "sessions file", str(error))
             profiles = None
     if profile in setup.PROFILES and profiles:
-        wanted = setup.wanted_permissions(setup.load_guard_rules(), profiles)
+        mode = setup.mode_arg(command)
+        rules = setup.load_guard_rules()
+        wanted = setup.wanted_permissions(rules, profiles, mode)
         have = {k: [p for _, d in data for p in ((d.get("permissions") or {}).get(k) or []) if isinstance(d.get("permissions"), dict)]
                 for k in wanted}
         missing = {k: [p for p in v if p not in have[k]] for k, v in wanted.items()}
-        if any(missing.values()):
+        ours = setup.rule_permissions(rules)
+        stray = {k: [p for p in have[k] if p in ours and p not in wanted[k]] for k in wanted}
+        if any(stray.values()):  # a rule permission the mode does not want still stops the call (H04)
+            item("MISSING", "permissions", ", ".join(f"{len(v)} rule permission(s) in permissions.{k}" for k, v in stray.items() if v)
+                 + f" that {mode} mode does not want (they would still stop the call; setup_project_settings.py --apply)")
+        elif mode == "remind" and not any(missing.values()):
+            item("CONFIGURED_NOT_VERIFIED", "permissions", "remind mode: no deny / ask rule is written; flagged calls run "
+                 "with a reminder")
+        elif any(missing.values()):
             item("MISSING", "permissions", ", ".join(f"{len(v)} of permissions.{k}" for k, v in missing.items() if v)
                  + f" for the {profile} profile" + (" with the sessions file" if smap else ""))
         else:

@@ -1,18 +1,32 @@
-"""PreToolUse hook: block the shell commands that docs/08 reserves for the PO or forbids outright.
+"""PreToolUse hook: flag the shell commands that docs/08 reserves for the PO or forbids outright.
 
-Claude Code runs it before every Bash / PowerShell tool call and passes the call as JSON on stdin. A blocked command
-gets exit 2 and a one-line reason on stderr, which Claude Code shows to the model instead of running the command.
-Everything else exits 0 silently, so it costs no context.
+Claude Code runs it before every Bash / PowerShell tool call and passes the call as JSON on stdin. A call nothing
+flags exits 0 silently, so it costs no context. What a flagged call gets depends on --mode:
+  remind (default)  exit 0, the call runs; one JSON line on stdout: "systemMessage" (shown to the user) and
+                    hookSpecificOutput.additionalContext (shown to the model), both "hook_guard reminder [ID]: reason",
+                    the second with a note that this is only a reminder. A call the user approved in the conversation
+                    is simply run, with no second question and no settings change.
+  ask               exit 0 and a PreToolUse permissionDecision "ask" JSON on stdout: the user decides there and then.
+  block             the explicit opt-in strict mode: exit 2 and "BLOCKED by hook_guard ..." on stderr, which Claude Code
+                    shows to the model instead of running the command (the behaviour of 1.3.0 and before).
+Do not install block on worker lines by default: a guard that stops approved work teaches the agent to do nothing.
+A seat belt, not a brake. The pause flag (--pause-flag) is an explicit stop set by a person and denies in every mode;
+auto-pause and --review act in block mode only.
 
-Blocked: git push (any form, also `git -C <dir> push` and C:\\...\\git.exe push), git reset --hard,
+Flagged: git push (any form, also `git -C <dir> push` and C:\\...\\git.exe push), git reset --hard,
 git clean (except -n / --dry-run), bare git stash / stash pop / drop / clear (`git stash push -m <mark>`, list, show,
 apply stay allowed), deleting a worktree, branch or tag, and ending processes by name (taskkill /IM or /FI, pkill,
 killall, Stop-Process without -Id, which also covers `Get-Process x | Stop-Process`).
 The line is split only outside quotes, and a quoted string is checked as a command only when a wrapper runs it
 (bash / sh -c, cmd /c, powershell -Command, eval, Invoke-Expression) or it holds $(...) / `...`.
+In Bash the body of a here-document (cat <<'EOF' ... EOF, also <<- and an unquoted EOF) is data, not commands, and is
+not checked; with an unquoted EOF its $(...) and `...` still run and are checked. A here-document without its closing
+line is checked as it is. A quoted string is never split into commands, so echo "git push" or a commit message that
+names one passes.
 Not covered: deleting files (rm -rf, Remove-Item -Recurse), a command hidden in a script file or built at run time.
-This is a seat belt, not a security boundary. Install with setup_project_settings.py --hooks. A push the PO approved
-is run by the PO, or after removing the hook. A cleaner session that removes worktrees does not install it.
+This is a seat belt, not a security boundary. Install with setup_project_settings.py --hooks (remind mode unless
+--guard-mode ask or block). Below, "blocked", "denied" and "exit 2" describe block mode; in remind and ask mode the
+same calls get the reminder or the ask instead.
 
 With --protect DIRECTOR_DIR (setup_project_settings.py --protect-director) it also blocks the Write and Edit tools on
 DIRECTOR_DIR/orders/** and DIRECTOR_DIR/DIRECTOR_LOG.md, so a worker cannot slip and edit its own work order or the
@@ -56,7 +70,7 @@ director null, off), every deny while not paused adds "TIME RULE" to FILE.denies
 S seconds writes the flag itself ("PAUSE by hook_guard at TIME: auto: N denies in Ss (G02 G50 ...)"), clears
 FILE.denies and says so in the deny message. pause_ctl.py off lifts it as usual. A FILE.denies that cannot be read or
 written never changes the decision: the deny stays a deny and no pause is written.
-With --audit FILE every deny, ask and pause is also added to the action log FILE (audit_log.py) as a kind=decision
+With --audit FILE every deny, ask, remind and pause is also added to the action log FILE (audit_log.py) as a kind=decision
 line with the rule ID (G.., builtin for the checks above, PAUSE), so a blocked call is on the chain too. A log that
 cannot be written (lock busy for 5 s, broken last line) never changes the decision.
 With --review (needs --rules with a "review" section; off unless given) an ask whose rule category is in
@@ -84,7 +98,7 @@ fixed part (also a wildcard word such as D:/work/* that matches such a folder), 
 in the action log). A **/ glob only matches the named file, so deleting a folder that happens to hold one is not
 seen. The worktree, branch and tag checks above hold for the cleaner too. With --sessions the Director's session is
 never held by --pause-flag and never auto-pauses. A sessions file that cannot be read or is malformed gives exit 1.
-Without --rules the output is the same as before, byte for byte.
+Without --rules, --mode block gives the output of 1.3.0 and before, byte for byte.
 """
 import argparse
 import datetime
@@ -118,9 +132,98 @@ def matching_end(command, i):
     return len(command)
 
 
+HEREDOC = re.compile(r"""<<(-?)[ \t]*(?:'([^'\n]*)'|"([^"\n]*)"|\\([^\s;&|<>()'"]+)|([^\s;&|<>()'"]+))""")
+
+
+def heredoc_end(command, start, delim, tabs):
+    """(start of the closing line, index just past it) of a here-document whose body starts at start; None when the
+    closing line is missing."""
+    i = start
+    while i <= len(command):
+        nl = command.find("\n", i)
+        line = command[i:len(command) if nl < 0 else nl].rstrip("\r")
+        if (line.lstrip("\t") if tabs else line) == delim:
+            return i, len(command) if nl < 0 else nl + 1
+        if nl < 0:
+            return None
+        i = nl + 1
+    return None
+
+
+def substitutions(body):
+    """The $(...) and `...` of a here-document body, one per line: an unquoted EOF still runs them."""
+    found, i = [], 0
+    while i < len(body):
+        if body[i] == "\\":
+            i += 2
+            continue
+        if body[i] == "`" or body.startswith("$(", i):
+            end = matching_end(body, i + (body[i] == "$"))
+            found.append(body[i + 2 - (body[i] == "`"):end - 1])
+            i = end
+            continue
+        i += 1
+    return found
+
+
+def strip_heredocs(command):
+    """Bash: the line without the body of each here-document and without its <<WORD; the body is data. With an
+    unquoted WORD its $(...) and `...` are kept, each on a line of its own. A here-document whose closing line is
+    missing is left as it is, so nothing that runs can be hidden."""
+    if "<<" not in command:
+        return command
+    out, pending, quote, i = [], [], None, 0
+    while i < len(command):
+        c = command[i]
+        if quote == "'":
+            quote = None if c == "'" else quote
+        elif quote:
+            if c == "\\":
+                out.append(command[i:i + 2])
+                i += 2
+                continue
+            quote = None if c == '"' else quote
+        elif c == "\\":
+            out.append(command[i:i + 2])
+            i += 2
+            continue
+        elif c in "'\"":
+            quote = c
+        elif command.startswith("<<", i) and not command.startswith("<<<", i) and not command[i - 1:i] == "<":
+            m = HEREDOC.match(command, i)
+            if m:
+                delim = next(g for g in m.groups()[1:] if g is not None)
+                pending.append((len(out), m.group(0), delim, m.group(1) == "-", m.group(5) is not None))
+                out.append(m.group(0))
+                i = m.end()
+                continue
+        elif c == "\n" and pending:
+            out.append(c)
+            at, extra = i + 1, []
+            for _, _, delim, tabs, open_body in pending:
+                found = heredoc_end(command, at, delim, tabs)
+                if found is None:
+                    return command
+                extra += substitutions(command[at:found[0]]) if open_body else []
+                at = found[1]
+            for slot, _, _, _, _ in pending:
+                out[slot] = ""
+            out += [x + "\n" for x in extra]
+            pending, i = [], at
+            continue
+        out.append(c)
+        i += 1
+    if pending:  # body after the last line: nothing closes it
+        return command
+    return "".join(out)
+
+
 def parse(command, shell="bash"):
-    """Simple commands of a shell line as word lists; also the commands inside $(...) / `...` in double quotes."""
+    """Simple commands of a shell line as word lists; also the commands inside $(...) / `...` in double quotes.
+    In Bash a here-document body is not a command (strip_heredocs)."""
     quotes, esc = SHELLS[shell]
+    if shell == "bash":
+        command = strip_heredocs(command)
     separators = SEPARATORS + ("`",) if shell == "bash" else SEPARATORS
     commands, words, word, quote, i = [], [], None, None, 0
     while i < len(command):
@@ -325,6 +428,9 @@ def protected_reason(file_path, cwd, protect):
 
 
 PROFILES = ("worker", "director")
+MODES = ("remind", "ask", "block")
+REMIND_NOTE = (" (reminder only, not blocked: the call runs. Approved by the user in this conversation: go ahead and do"
+               " not ask again. Not approved: tell the user what ran.)")
 # cleaner: a worker whose "delete" rules do not apply; the sessions file's protected list still holds (--sessions)
 SESSION_PROFILES = PROFILES + ("cleaner",)
 CLEANER_OPEN = ("delete",)
@@ -659,8 +765,10 @@ FD_DUP = re.compile(r"[\d*]?>&(\d+|-)")  # 2>&1, *>&1, >&2, 3>&-: joins or close
 def redirect_targets(command, shell="bash"):
     """The file words of the line's output redirects (> >> &> >| *>), quotes removed, also inside $(...) or `...` in
     double quotes; "" for a > with no file word, such as >(...). Read from the raw line, so { } ( ) next to the >
-    cannot hide it (echo {}>file). Stream joins such as 2>&1 are not redirects."""
+    cannot hide it (echo {}>file). Stream joins such as 2>&1 are not redirects. A here-document body is skipped."""
     quotes, esc = SHELLS[shell]
+    if shell == "bash":
+        command = strip_heredocs(command)
     out, quote, i = [], None, 0
     while i < len(command):
         c = command[i]
@@ -1046,9 +1154,11 @@ def main():
     ap.add_argument("--pause-flag", help="flag file (pause_ctl.py on): while it exists, deny what the rules' pause section does not allow")
     ap.add_argument("--review", action="store_true", help="show asks of the rules' review categories to a second model "
                     "first; it can only turn an ask into a deny (uses claude -p quota)")
-    ap.add_argument("--audit", help="action log (audit_log.py): add a decision line for every deny, ask and pause")
+    ap.add_argument("--audit", help="action log (audit_log.py): add a decision line for every deny, ask, remind and pause")
     ap.add_argument("--sessions", help="sessions file: the profile per session_id (director / worker / cleaner) and "
                     "the protected list; --profile is the fallback for a session it does not name (needs --rules)")
+    ap.add_argument("--mode", choices=MODES, default="remind", help="what a flagged call gets: remind (default; it "
+                    "runs, with a one-line reminder), ask (the user decides) or block (exit 2; explicit opt-in)")
     a = ap.parse_args()
     data = sessions = None
     if a.sessions and not a.rules:
@@ -1075,13 +1185,18 @@ def main():
         return 0
     if not isinstance(call, dict):
         return 0
+    original = call
+    if (call.get("tool_name") in ("Bash", "Monitor") and isinstance(call.get("tool_input"), dict)
+            and isinstance(call["tool_input"].get("command"), str)):
+        # a here-document body is data: every check below sees the line without it; the log keeps the call as sent
+        call = dict(call, tool_input=dict(call["tool_input"], command=strip_heredocs(call["tool_input"]["command"])))
     if sessions is not None:
         a.profile = session_profile(sessions, call, a.profile)
     # one settings file serves every session of a launch folder: the Director is never held by the workers' pause
     paused = pause_state(a.pause_flag) if a.pause_flag and not (sessions is not None and a.profile == "director") else None
     if paused and not pause_allows(data, a.profile, call):
         print(f"PAUSED by {paused[0]} at {paused[1]}: {paused[2]}; {data['pause']['reason']}", file=sys.stderr)
-        audit(a.audit, call, "pause", "PAUSE")
+        audit(a.audit, original, "pause", "PAUSE")
         return 2
     tool_input = call.get("tool_input") or {}
     file_path = tool_input.get("file_path") if isinstance(tool_input, dict) else None
@@ -1102,30 +1217,41 @@ def main():
     hits = decide(data, a.profile, call, a.rules) if data is not None else []
     deny, ask = first(hits, "deny"), first(hits, "ask")
     reviewed = None
+    if a.mode != "block" and (deny or why or ask):
+        rule, text = (deny[1], deny[2]) if deny else (label, why) if why else (ask[1], ask[2])
+        if a.mode == "ask":
+            print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "ask",
+                                                     "permissionDecisionReason": f"[{rule}] {text}"}}))
+        else:
+            line = f"hook_guard reminder [{rule}]: {text}"
+            print(json.dumps({"systemMessage": line, "hookSpecificOutput": {
+                "hookEventName": "PreToolUse", "additionalContext": line + REMIND_NOTE}}))
+        audit(a.audit, original, a.mode, rule)
+        return 0
     if ask and not deny and not why and a.review and not os.environ.get("DW_HOOK_REVIEW"):
         category = next((r.get("category") for r in data["rules"] if r.get("id") == ask[1]), None)
         if category in data["review"]["categories"]:
-            reviewed = review(data["review"], call, ask[1], ask[2])
+            reviewed = review(data["review"], original, ask[1], ask[2])
             if reviewed[0] == "block":
                 deny = ("deny", ask[1], f"second-model review: {reviewed[1]}")
     if deny or why:
         rule = deny[1] if deny else label
         print(f"BLOCKED by hook_guard [{deny[1]}]: {deny[2]}" if deny else f"BLOCKED by hook_guard: {why}", file=sys.stderr)
-        audit(a.audit, call, "deny", rule + (f" review={reviewed[0]} via={reviewed[2]}" if reviewed else ""))
+        audit(a.audit, original, "deny", rule + (f" review={reviewed[0]} via={reviewed[2]}" if reviewed else ""))
         conf = ((data.get("auto_pause") or {}).get(base_profile(a.profile)) if a.pause_flag and data is not None and not paused
                 and not (sessions is not None and a.profile == "director") else None)
         paused_now = auto_pause(a.pause_flag, conf, rule)
         if paused_now:
             print(f"AUTO-PAUSED by hook_guard: {paused_now}; stop here, report where you stopped and wait for the Director"
                   " (pause_ctl.py off lifts it)", file=sys.stderr)
-            audit(a.audit, call, "pause", "AUTO")
+            audit(a.audit, original, "pause", "AUTO")
         return 2
     if ask:
         note = "" if not reviewed else (f" (second-model review: no objection: {reviewed[1]})" if reviewed[0] == "no_objection"
                                         else f" (second-model review unavailable: {reviewed[1]})")
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "ask",
                                                  "permissionDecisionReason": f"[{ask[1]}] {ask[2]}{note}"}}))
-        audit(a.audit, call, "ask", ask[1] + (f" review={reviewed[0]} via={reviewed[2]}" if reviewed else ""))
+        audit(a.audit, original, "ask", ask[1] + (f" review={reviewed[0]} via={reviewed[2]}" if reviewed else ""))
     return 0
 
 

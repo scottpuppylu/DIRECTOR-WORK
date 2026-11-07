@@ -40,7 +40,7 @@
       "id": "G02",
       "category": "push",
       "decision": {"worker": "deny", "director": "deny"},
-      "reason": "pushing needs the PO's approval (docs/08); the PO runs the push",
+      "reason": "pushing needs the PO's approval (docs/08); once the PO approved it in the conversation, run it",
       "match": [
         {"kind": "shell", "cmd": ["git"], "args": [["push", "send-pack", "http-push"]]},
         {"kind": "shell", "cmd": ["git-push", "git-send-pack", "git-http-push"]},

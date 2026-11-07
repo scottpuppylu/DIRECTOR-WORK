@@ -1186,7 +1186,7 @@ def test_hook_protect(tmp):
         if cwd:
             call["cwd"] = str(cwd)
         args = ["--protect", str(director)] if protect else []
-        done = subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), *args], capture_output=True,
+        done = subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), "--mode", "block", *args], capture_output=True,
                               encoding="utf-8", input=json.dumps(call))
         if done.returncode != code:
             failures.append(f"hook_guard protect {name}: expected exit {code}, got {done.returncode}: {done.stderr.strip()}")
@@ -1206,7 +1206,7 @@ def test_hook_protect(tmp):
     guard("without --protect", 0, "Write", director / "orders" / "WO-001-a.md", protect=False)
     guard("Bash is still checked", 0, "Bash", director / "orders" / "WO-001-a.md")
     total += 1
-    done = subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), "--protect", str(director)],
+    done = subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), "--mode", "block", "--protect", str(director)],
                           capture_output=True, encoding="utf-8", input=json.dumps({"tool_name": "Bash", "tool_input": {"command": "git push"}}))
     if done.returncode != 2:
         failures.append(f"hook_guard --protect stopped checking Bash: exit {done.returncode}")
@@ -1232,7 +1232,7 @@ def test_hook_protect(tmp):
             print("SKIP hook_guard 8.3 case: no short name on this volume (8.3 names are off)")
         else:
             total += 1
-            done = subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), "--protect", str(longdir)],
+            done = subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), "--mode", "block", "--protect", str(longdir)],
                                   capture_output=True, encoding="utf-8",
                                   input=json.dumps({"tool_name": "Write", "tool_input": {"file_path": short + "\\orders\\x.md"}}))
             if done.returncode != 2:
@@ -1265,7 +1265,7 @@ def test_hook_protect(tmp):
     repo.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
     (repo / ".git" / "info" / "exclude").write_text(".claude/settings.local.json\n", encoding="utf-8")
-    setup = ("--repo", repo, "--only-this")
+    setup = ("--repo", repo, "--only-this", "--guard-mode", "block")
     expect("plain hook installed", "setup_project_settings.py", 0, *setup, "--hooks", "--apply", says="SET")
     expect("old entry is not enough once protected", "setup_project_settings.py", 1, *setup, "--protect-director", director,
            says=["MISSING", "hooks.PreToolUse matcher"])
@@ -1326,7 +1326,7 @@ def test_hook(tmp):
     for command, code in [(c, 2) for c in blocked] + [(c, 0) for c in allowed]:
         command, tool = command if isinstance(command, tuple) else (command, "Bash")
         total += 1
-        done = subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py")], capture_output=True,
+        done = subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), "--mode", "block"], capture_output=True,
                               encoding="utf-8", input=json.dumps({"tool_name": tool, "tool_input": {"command": command}}))
         if done.returncode != code:
             failures.append(f"hook_guard {command!r}: expected exit {code}, got {done.returncode}: {done.stderr.strip()}")
@@ -1336,7 +1336,7 @@ def test_hook(tmp):
     repo.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
     (repo / ".git" / "info" / "exclude").write_text(".claude/settings.local.json\n", encoding="utf-8")
-    setup = ("setup_project_settings.py", "--repo", repo, "--only-this", "--hooks")
+    setup = ("setup_project_settings.py", "--repo", repo, "--only-this", "--hooks", "--guard-mode", "block")
     expect("hooks missing", *setup[:1], 1, *setup[1:], says="hooks.PreToolUse")
     expect("hooks written", *setup[:1], 0, *setup[1:], "--apply", says="SET")
     expect("hooks kept on rerun", *setup[:1], 0, *setup[1:], "--apply", says="OK")
@@ -1360,7 +1360,7 @@ def test_hook_rules(tmp):
     home = pathlib.Path.home().as_posix()
 
     def hook(call, profile, rules_file=rules_path):
-        return subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), "--rules", str(rules_file),
+        return subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), "--mode", "block", "--rules", str(rules_file),
                                "--profile", profile], capture_output=True, encoding="utf-8", input=json.dumps(call))
 
     def outcome(done):
@@ -1671,7 +1671,7 @@ def test_hook_rules(tmp):
     settings = repo / ".claude" / "settings.local.json"
     settings.parent.mkdir()
     settings.write_text(json.dumps({"permissions": {"deny": ["Read(./private/**)"], "allow": ["Bash(git status)"]}}), encoding="utf-8")
-    setup = ("--repo", repo, "--only-this")
+    setup = ("--repo", repo, "--only-this", "--guard-mode", "block")
     expect("guard profile missing", "setup_project_settings.py", 1, *setup, "--guard-profile", "worker",
            says=["MISSING", "hooks.PreToolUse", "permissions.deny"])
     expect("guard profile written and tested", "setup_project_settings.py", 0, *setup, "--guard-profile", "worker", "--apply",
@@ -1729,7 +1729,7 @@ def test_session_profiles(tmp):
         call = {"tool_name": tool, "tool_input": {"command": command}, "cwd": str(tmp)}
         if sid:
             call["session_id"] = sid
-        argv = [sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), "--rules", str(rules_path), "--profile",
+        argv = [sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), "--mode", "block", "--rules", str(rules_path), "--profile",
                 "worker", *extra] + (["--sessions", str(sessions)] if sessions else [])
         return subprocess.run(argv, capture_output=True, encoding="utf-8", input=json.dumps(call))
 
@@ -1783,7 +1783,7 @@ def test_session_profiles(tmp):
         bad.write_text(text, encoding="utf-8")
         case(f"bad sessions file: {name}", "S-CLEAN", "ls", 1, "bad sessions file", sessions=bad)
     total += 1
-    done = subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), "--sessions", str(smap)],
+    done = subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), "--mode", "block", "--sessions", str(smap)],
                           capture_output=True, encoding="utf-8",
                           input=json.dumps({"tool_name": "Bash", "tool_input": {"command": "ls"}}))
     if done.returncode != 1 or "--sessions needs --rules" not in done.stderr:
@@ -1803,7 +1803,7 @@ def test_session_profiles(tmp):
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
     (repo / ".git" / "info" / "exclude").write_text(".claude/settings.local.json\n", encoding="utf-8")
     settings = repo / ".claude" / "settings.local.json"
-    setup = ("--repo", repo, "--only-this")
+    setup = ("--repo", repo, "--only-this", "--guard-mode", "block")
     expect("session map missing", "setup_project_settings.py", 1, *setup, "--session-map", smap,
            says=["MISSING", "hooks.PreToolUse", "session_map="])
     expect("session map written and tested", "setup_project_settings.py", 0, *setup, "--session-map", smap, "--apply",
@@ -2371,7 +2371,7 @@ def test_pause(tmp):
 
     def hook(call, profile="worker", rules_file=rules_path):
         args = ["--rules", str(rules_file)] if rules_file else []
-        return subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), *args, "--profile", profile,
+        return subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), "--mode", "block", *args, "--profile", profile,
                                "--pause-flag", str(flag)], capture_output=True, encoding="utf-8", input=json.dumps(call))
 
     def check(name, call, want, profile="worker"):
@@ -2498,7 +2498,7 @@ def test_pause(tmp):
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
     (repo / ".git" / "info" / "exclude").write_text(".claude/settings.local.json\n", encoding="utf-8")
     settings = repo / ".claude" / "settings.local.json"
-    setup = ("--repo", repo, "--only-this", "--protect-director", director)
+    setup = ("--repo", repo, "--only-this", "--protect-director", director, "--guard-mode", "block")
     expect("setup: the worker hook gets the pause flag", "setup_project_settings.py", 0, *setup, "--guard-profile", "worker", "--apply",
            says=["SET", "block-rule=2"])
     command = json.loads(settings.read_text(encoding="utf-8"))["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
@@ -2527,7 +2527,7 @@ def test_auto_pause(tmp):
     state = folder / "PAUSE.denies"
 
     def hook(call, profile="worker", rules_file=rules_path, flag_file=flag):
-        return subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), "--rules", str(rules_file),
+        return subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), "--mode", "block", "--rules", str(rules_file),
                                "--profile", profile, "--pause-flag", str(flag_file)],
                               capture_output=True, encoding="utf-8", input=json.dumps(call))
 
@@ -2647,7 +2647,7 @@ def test_audit(tmp):
     check("failure input gives kind=failure", entries[2]["kind"] == "failure" and entries[2]["result"]["status"] == "error",
           json.dumps(entries[2]))
     expect("audit verify after 3 appends", "audit_log.py", 0, "verify", "--log", log, says=["entries=3", "head_seq=3", " OK"])
-    done = subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), "--rules", str(TOOLS / "guard_rules.json"),
+    done = subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), "--mode", "block", "--rules", str(TOOLS / "guard_rules.json"),
                            "--profile", "worker", "--audit", str(log)],
                           input=json.dumps({"tool_name": "Bash", "tool_input": {"command": "git push origin main"}}),
                           capture_output=True, encoding="utf-8")
@@ -2739,7 +2739,7 @@ def test_audit(tmp):
     subprocess.run(["git", "init", "-q"], cwd=wt, check=True)
     (wt / ".git" / "info" / "exclude").write_text(".claude/settings.local.json\n", encoding="utf-8")
     per = folder / "logs" / "{worktree}.jsonl"
-    setup = ("--repo", wt, "--only-this", "--audit-log", per)
+    setup = ("--repo", wt, "--only-this", "--audit-log", per, "--guard-mode", "block")
     expect("setup audit hooks missing", "setup_project_settings.py", 1, *setup, says=["MISSING", "hooks.PostToolUse", "hooks.PostToolUseFailure"])
     expect("setup audit hooks written", "setup_project_settings.py", 0, *setup, "--apply", says=["SET", "block=2"])
     data = json.loads((wt / ".claude" / "settings.local.json").read_text(encoding="utf-8"))
@@ -2960,7 +2960,7 @@ def test_audit_names(tmp):
 
     # hook_guard --audit fills them in too
     push = json.dumps({"tool_name": "Bash", "tool_input": {"command": "git push origin main"}})
-    done = tool(TOOLS / "hook_guard.py", "--rules", TOOLS / "guard_rules.json", "--profile", "worker",
+    done = tool(TOOLS / "hook_guard.py", "--mode", "block", "--rules", TOOLS / "guard_rules.json", "--profile", "worker",
                 "--audit", folder / "guard" / "{worktree}-{container}.jsonl", stdin=push, DW_WORKER_NAME="g1")
     written = folder / "guard" / f"g1-{here}.jsonl"
     rows = [json.loads(x) for x in written.read_text(encoding="utf-8").splitlines()] if written.is_file() else []
@@ -3043,7 +3043,7 @@ def test_review(tmp):
         env = {k: v for k, v in os.environ.items() if k not in ("DW_HOOK_REVIEW", "CLAUDE_CODE_EXECPATH")}
         env.update(CLAUDE_CODE_EXECPATH=str(fake), FAKE_REVIEW_MODE=mode, FAKE_REVIEW_LOG=str(calls_log))
         env.update(env_change)
-        argv = [sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), "--rules", str(rules_file),
+        argv = [sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), "--mode", "block", "--rules", str(rules_file),
                 "--profile", profile] + (["--review"] if review else []) + [str(x) for x in extra]
         return subprocess.run(argv, capture_output=True, encoding="utf-8", input=json.dumps(call), env=env)
 
@@ -3122,7 +3122,7 @@ def test_review(tmp):
     wt.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=wt, check=True)
     (wt / ".git" / "info" / "exclude").write_text(".claude/settings.local.json\n", encoding="utf-8")
-    setup = ("--repo", wt, "--only-this", "--guard-profile", "director")
+    setup = ("--repo", wt, "--only-this", "--guard-profile", "director", "--guard-mode", "block")
     expect("setup without review", "setup_project_settings.py", 0, *setup, "--apply", says="SET")
     expect("setup review missing", "setup_project_settings.py", 1, *setup, "--guard-review", says="MISSING")
     expect("setup review written and tested", "setup_project_settings.py", 0, *setup, "--guard-review", "--apply",
@@ -3130,6 +3130,158 @@ def test_review(tmp):
     command = json.loads((wt / ".claude" / "settings.local.json").read_text(encoding="utf-8"))["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
     check("setup puts --review on the guarded command", command.endswith(" --review") and "--profile director" in command, command)
     expect("setup review kept on rerun without the option", "setup_project_settings.py", 0, *setup, says="OK")
+
+
+def test_guard_modes(tmp):
+    """1.3.1: a flagged call is a reminder by default (it runs), ask on --mode ask, a deny only on --mode block; the
+    pause flag denies in every mode. A here-document body and quoted text are not commands. setup installs remind
+    unless --guard-mode says otherwise, and writes rule permissions only as the mode wants them."""
+    global total
+    folder = tmp / "modes"
+    folder.mkdir()
+
+    def hook(cmd, *args, tool="Bash"):
+        call = {"tool_name": tool, "tool_input": {"command": cmd} if tool in ("Bash", "Monitor", "PowerShell") else {}}
+        return subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), *map(str, args)],
+                              input=json.dumps(call), capture_output=True, encoding="utf-8")
+
+    def check(name, ok, detail=""):
+        global total
+        total += 1
+        if not ok:
+            failures.append(f"guard modes {name}: {str(detail)[-500:]}")
+
+    def out(done):
+        try:
+            return json.loads(done.stdout)
+        except ValueError:
+            return {}
+
+    # the three modes on git push
+    done = hook("git push origin main")
+    got = out(done)
+    hso = got.get("hookSpecificOutput") or {}
+    check("default remind: exit 0, the reminder to the user and the model, no decision", done.returncode == 0
+          and got.get("systemMessage", "").startswith("hook_guard reminder [builtin]: git push")
+          and hso.get("additionalContext", "").startswith(got.get("systemMessage", "-"))
+          and "do not ask again" in hso.get("additionalContext", "") and "permissionDecision" not in hso
+          and done.stderr == "", done.stdout + done.stderr)
+    done = hook("git push origin main", "--mode", "ask")
+    hso = out(done).get("hookSpecificOutput") or {}
+    check("ask: exit 0 and permissionDecision ask with the rule", done.returncode == 0 and hso.get("permissionDecision") == "ask"
+          and hso.get("permissionDecisionReason", "").startswith("[builtin] git push"), done.stdout + done.stderr)
+    done = hook("git push origin main", "--mode", "block")
+    check("block: exit 2 and BLOCKED on stderr", done.returncode == 2 and "BLOCKED by hook_guard" in done.stderr
+          and done.stdout == "", done.stdout + done.stderr)
+    for mode in ("remind", "ask", "block"):
+        done = hook("git status", "--mode", mode)
+        check(f"{mode}: an unflagged call is silent", done.returncode == 0 and done.stdout == "" and done.stderr == "",
+              done.stdout + done.stderr)
+    rules = ("--rules", TOOLS / "guard_rules.json", "--profile", "worker")
+    for cmd in ("gh pr merge 3", "rm -rf build", "git reset --hard HEAD~1"):
+        done = hook(cmd, *rules)
+        check(f"remind does not stop {cmd!r}", done.returncode == 0 and "hook_guard reminder" in done.stdout, done.stdout + done.stderr)
+    done = hook("", *rules, tool="mcp__shop__buy_item")
+    check("rules in remind mode: a rule hit is a reminder", done.returncode == 0 and "hook_guard reminder [G" in done.stdout,
+          done.stdout + done.stderr)
+    done = hook("", *rules, "--mode", "block", tool="mcp__shop__buy_item")
+    check("rules in block mode: the same call is denied", done.returncode == 2, done.stdout + done.stderr)
+    log = folder / "audit.jsonl"
+    hook("git push", "--audit", log)
+    check("remind is on the action log", '"remind"' in log.read_text(encoding="utf-8") if log.exists() else False,
+          log.read_text(encoding="utf-8") if log.exists() else "no log")
+    pause = folder / "PAUSE"
+    pause.write_text("stop\n", encoding="utf-8")
+    done = hook("git push", *rules, "--pause-flag", pause)
+    check("the pause flag denies in remind mode", done.returncode == 2 and "PAUSED" in done.stderr, done.stdout + done.stderr)
+    pause.unlink()
+
+    # here-documents and quoted text are not commands (block mode, so a miss is an exit 2)
+    cases = [
+        ("a log heredoc that names git push origin", "cat >> notes.md <<'EOF'\n- next: git push origin main\nEOF", 0),
+        ("an unquoted heredoc body", "cat > a.txt <<EOF\ngit push --force\nEOF", 0),
+        ("a <<- heredoc with tabs", "cat <<-END\n\tgit push\n\tEND", 0),
+        ('a double-quoted delimiter', 'cat <<"X"\ngit push\nX', 0),
+        ("two heredocs on one line", "cat <<A <<B\ngit push\nA\ngit tag v1\nB", 0),
+        ("python reading a heredoc", "python - <<'PY'\nimport os\nos.system('git push')\nPY", 0),
+        ("echo of quoted text", 'echo "git push origin"', 0),
+        ("a commit message that names git push", 'git commit -m "docs: say when to git push"', 0),
+        ("a here-string", 'cat <<< "git push"', 0),
+        ("$(...) in an unquoted heredoc still runs", "cat <<EOF\n$(git push)\nEOF", 2),
+        ("backticks in an unquoted heredoc still run", "cat <<EOF\n`git push`\nEOF", 2),
+        ("$(...) in a quoted heredoc is text", "cat <<'EOF'\n$(git push)\nEOF", 0),
+        ("a command after the heredoc is checked", "cat <<'EOF'\ntext\nEOF\ngit push", 2),
+        ("a command on the heredoc line is checked", "cat <<'EOF' && git push\ntext\nEOF", 2),
+        ("no closing line: checked as it is", "cat <<'EOF'\ngit push", 2),
+        ("arithmetic << is not a heredoc", "echo $((1<<2))\ngit push", 2),
+    ]
+    for name, cmd, code in cases:
+        done = hook(cmd, "--mode", "block")
+        check(f"heredoc/quote: {name}", done.returncode == code, f"exit {done.returncode}: {done.stderr}")
+    done = hook("cat <<'EOF'\ngit push\nEOF", "--mode", "block", tool="Monitor")
+    check("heredoc/quote: a Monitor heredoc body is text too", done.returncode == 0, done.stderr)
+
+    # setup: remind by default, --guard-mode ask / block on request; rule permissions follow the mode
+    repo = folder / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    (repo / ".git" / "info" / "exclude").write_text(".claude/settings.local.json\n", encoding="utf-8")
+    settings = repo / ".claude" / "settings.local.json"
+    base = ("--repo", repo, "--only-this")
+
+    def command():
+        return json.loads(settings.read_text(encoding="utf-8"))["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+
+    def perms():
+        return json.loads(settings.read_text(encoding="utf-8")).get("permissions") or {}
+
+    expect("setup --hooks installs remind and tests it", "setup_project_settings.py", 0, *base, "--hooks", "--apply",
+           says=["SET", "allow=0 block=remind"])
+    check("the remind command has no --mode", "--mode" not in command(), command())
+    expect("remind rerun is OK", "setup_project_settings.py", 0, *base, "--hooks", says="OK")
+    expect("--guard-mode ask differs from the remind entry", "setup_project_settings.py", 1, *base, "--hooks", "--guard-mode",
+           "ask", says="hooks.PreToolUse")
+    expect("--guard-mode ask written and tested", "setup_project_settings.py", 0, *base, "--hooks", "--guard-mode", "ask",
+           "--apply", says=["SET", "block=ask"])
+    check("the ask command has --mode ask", " --mode ask" in command(), command())
+    expect("--guard-mode block written and tested", "setup_project_settings.py", 0, *base, "--hooks", "--guard-mode", "block",
+           "--apply", says=["SET", "block=2"])
+    expect("a rerun without --guard-mode keeps block", "setup_project_settings.py", 0, *base, "--hooks", says=["OK", "block=2"])
+    expect("an unknown mode is refused", "setup_project_settings.py", 2, *base, "--hooks", "--guard-mode", "brake")
+    expect("guard profile in block mode", "setup_project_settings.py", 0, *base, "--guard-profile", "worker", "--apply",
+           says=["SET", "block-rule=2"])
+    check("block mode writes the deny rules", "Bash(git push *)" in perms().get("deny", []), perms())
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    data["permissions"]["deny"].append("Bash(my-own-rule *)")
+    settings.write_text(json.dumps(data), encoding="utf-8")
+    expect("remind mode wants the rule permissions out", "setup_project_settings.py", 1, *base, "--guard-profile", "worker",
+           "--guard-mode", "remind", says="permissions.deny")
+    expect("remind mode with a profile written and tested", "setup_project_settings.py", 0, *base, "--guard-profile", "worker",
+           "--guard-mode", "remind", "--apply", says=["SET", "block-rule=remind"])
+    check("remind takes the rule permissions out, keeps the user's own", perms().get("deny") == ["Bash(my-own-rule *)"]
+          and not perms().get("ask"), perms())
+    expect("ask mode with a profile written", "setup_project_settings.py", 0, *base, "--guard-profile", "worker",
+           "--guard-mode", "ask", "--apply", says=["SET", "block-rule=ask"])
+    check("ask mode puts every rule permission under ask", "Bash(git push *)" in perms().get("ask", [])
+          and perms().get("deny") == ["Bash(my-own-rule *)"], perms())
+
+    # the template is what the default --runtime-guard writes
+    wt = folder / "wt"
+    wt.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=wt, check=True)
+    (wt / ".git" / "info" / "exclude").write_text(".claude/settings.local.json\n", encoding="utf-8")
+    pause, log = folder / "PAUSE2", folder / "audit" / "wt.jsonl"
+    expect("setup --runtime-guard in remind mode", "setup_project_settings.py", 0, "--repo", wt, "--only-this",
+           "--runtime-guard", "--pause-flag", pause, "--audit-log", (folder / "audit" / "{worktree}.jsonl").as_posix(), "--apply",
+           says=["SET", "block-rule=remind"])
+    written = json.loads((wt / ".claude" / "settings.local.json").read_text(encoding="utf-8"))
+    template = (TEMPLATES / "settings.runtime-guard.json").read_text(encoding="utf-8")
+    template = template.replace("<PYTHON>", pathlib.Path(sys.executable).as_posix()).replace("<DW>/tools", TOOLS.as_posix())
+    template = json.loads(template.replace("<PAUSE_FLAG>", pause.resolve().as_posix()).replace("<AUDIT_LOG>", log.resolve().as_posix()))
+    check("the template is what setup --runtime-guard writes (remind: no permission rules)", "permissions" not in written
+          and template == {"hooks": written["hooks"], "env": {"CLAUDE_CODE_SUBPROCESS_ENV_SCRUB":
+                                                               written["env"].get("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB")}},
+          json.dumps(template)[:300] + " | " + json.dumps(written)[:300])
 
 
 def test_doctor(tmp):
@@ -3190,7 +3342,7 @@ def test_doctor(tmp):
     # setup --runtime-guard
     log = folder / "audit" / "wt.jsonl"
     pause = folder / "PAUSE"
-    setup = ("--repo", wt, "--only-this", "--pause-flag", pause)
+    setup = ("--repo", wt, "--only-this", "--pause-flag", pause, "--guard-mode", "block")
     expect("setup plain first", "setup_project_settings.py", 0, *setup, "--apply", says="SET")
     expect("setup --runtime-guard default log is in the git common dir", "setup_project_settings.py", 1, *setup,
            "--runtime-guard", says=["runtime_guard=on", "guard_profile=worker", "director-audit/{worktree}-{container}.jsonl",
@@ -3204,12 +3356,6 @@ def test_doctor(tmp):
     backups = list((main_repo / ".git" / "director-settings-backup").glob("*.settings.local.json"))
     check("one entry per hook event and a backup of the file before", [len(written["hooks"][e]) for e in
           ("PreToolUse", "PostToolUse", "PostToolUseFailure")] == [1, 1, 1] and len(backups) == 1, json.dumps(written["hooks"]))
-    template = (TEMPLATES / "settings.runtime-guard.json").read_text(encoding="utf-8")
-    template = template.replace("<PYTHON>", pathlib.Path(sys.executable).as_posix()).replace("<DW>/tools", TOOLS.as_posix())
-    template = json.loads(template.replace("<PAUSE_FLAG>", pause.resolve().as_posix()).replace("<AUDIT_LOG>", log.resolve().as_posix()))
-    check("the template is what setup --runtime-guard writes", template == {"hooks": written["hooks"],
-          "permissions": written["permissions"], "env": {"CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": written["env"].get("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB")}},
-          json.dumps(template)[:300] + " | " + json.dumps(written)[:300])
     good = settings_file.read_text(encoding="utf-8")
 
     # the full set
@@ -3221,7 +3367,7 @@ def test_doctor(tmp):
           and line(done, "isolation").startswith("NOT_ENFORCED") and line(done, "worktree").startswith("ENFORCED")
           and "INFO                     pause: off" in done.stdout and "review:" not in done.stdout
           and "DOCTOR: enforced=" in (done.stdout.splitlines() or [""])[-1], done.stdout + done.stderr)
-    subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), "--rules", str(TOOLS / "guard_rules.json"),
+    subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), "--mode", "block", "--rules", str(TOOLS / "guard_rules.json"),
                     "--profile", "worker", "--audit", str(log)], input=json.dumps({"tool_name": "Bash", "tool_input":
                     {"command": "git push"}}), capture_output=True, encoding="utf-8")
     done = doc()
@@ -3355,6 +3501,17 @@ def test_doctor(tmp):
     done = doc()
     check("review on is shown with its quota use", "review: on" in done.stdout and "quota" in done.stdout
           and line(done, "hook_guard").startswith("ENFORCED"), done.stdout)
+    expect("setup --runtime-guard back to remind", "setup_project_settings.py", 0, *guard, "--guard-mode", "remind", "--apply",
+           says=["SET", "block-rule=remind"])
+    done = doc()
+    check("remind mode: hook_guard ENFORCED with its mode, no permission rule wanted", line(done, "hook_guard").startswith("ENFORCED")
+          and "mode remind" in line(done, "hook_guard") and "remind mode" in line(done, "permissions"), done.stdout)
+    data = json.loads(settings_file.read_text(encoding="utf-8"))
+    data.setdefault("permissions", {}).setdefault("deny", []).append("Bash(git push *)")
+    settings_file.write_text(json.dumps(data), encoding="utf-8")
+    done = doc()
+    check("remind mode: a rule permission left in deny is MISSING (it would still stop the call)",
+          line(done, "permissions").startswith("MISSING") and "remind mode does not want" in line(done, "permissions"), done.stdout)
     done = doc(repo=folder)
     check("outside a git repo exit 2", done.returncode == 2 and "not inside a git repo" in done.stderr, done.stderr)
     check("no doctor run printed the fake credential value", all(fake_token not in out for out in outputs), "value leaked")
@@ -3403,7 +3560,7 @@ def test_doctor_launch(tmp):
         if not ok:
             failures.append(f"doctor launch {name}: {detail[-700:]}")
 
-    expect("guard the worktree only", "setup_project_settings.py", 0, "--repo", wt, "--only-this", "--guard-profile", "worker",
+    expect("guard the worktree only", "setup_project_settings.py", 0, "--repo", wt, "--only-this", "--guard-mode", "block", "--guard-profile", "worker",
            "--apply", says="SET")
     transcript(main_repo, "s-main")
     transcript(main_repo / "sub", "s-sub")
@@ -3431,7 +3588,7 @@ def test_doctor_launch(tmp):
     smap = folder / "sessions.json"
     smap.write_text(json.dumps({"schema_version": 1, "default": "worker", "sessions": {"S-C": "cleaner", "S-D": "director"}}),
                     encoding="utf-8")
-    expect("setup the map in the main checkout", "setup_project_settings.py", 0, "--repo", main_repo, "--only-this",
+    expect("setup the map in the main checkout", "setup_project_settings.py", 0, "--repo", main_repo, "--only-this", "--guard-mode", "block",
            "--session-map", smap, "--apply", says="SET")
     out = doc()
     check("doctor reads the sessions file", "sessions: " in out and "cleaner, director, worker" in out
@@ -4463,6 +4620,7 @@ def main():
         test_audit_names(tmp)
         test_report_vs_audit(tmp)
         test_review(tmp)
+        test_guard_modes(tmp)
         test_doctor(tmp)
         test_doctor_launch(tmp)
         test_container(tmp)
