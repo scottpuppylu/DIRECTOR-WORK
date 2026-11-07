@@ -3,6 +3,7 @@ in a temporary folder, and check that the fixed words, the size of the must-read
 not drifted.
 Prints one line per failed case and a summary; exit 1 when anything fails. Writes only to the temporary folder.
 """
+import datetime
 import hashlib
 import importlib.util
 import json
@@ -4157,8 +4158,100 @@ def test_status_gen(tmp):
     expect("status_gen wrong config type", "status_gen.py", 2, "--out", d / "s_none.py", "--config", conf, says="wrong type")
     source = full.read_text(encoding="utf-8")
     check("status.py uses only the standard library and does not write", "open(path, \"rb\")" in source
-          and not re.search(r"^import (?!datetime|hashlib|json|os|shutil|subprocess|sys)", source, re.M)
+          and not re.search(r"^import (?!datetime|glob|hashlib|json|os|re|shlex|shutil|subprocess|sys)", source, re.M)
           and not re.search(r"open\([^)]*[\"'][wa]", source), "status.py imports or writes something")
+
+
+def test_status_director(tmp):
+    """1.3.0 §6: the Director status.py: PO page counts (regex or JSON list), open orders, unsent items, the last hour of
+    each action log (lines, blocked, log reads, sessions), whether a process runs, the disk; still at most max_lines."""
+    d = tmp / "status_director"
+    (d / "orders").mkdir(parents=True)
+    (d / "audit").mkdir()
+    (d / "PO_PENDING.md").write_text("ID: OD-1\nSTATUS: answered\n\nID: OD-2\nSTATUS: open\n\nID: OD-3\nSTATUS: answered\n"
+                                     "\nID: N-1\nSTATUS: new\n", encoding="utf-8")
+    (d / "po.html").write_text("<html><script>window.DATA = " + json.dumps(
+        {"page": {"decisions": [{"status": "answered"}, {"status": "open"}], "notes": [{"status": "new"}] * 3}})
+        + ";</script></html>", encoding="utf-8")
+    (d / "orders" / "WO-1.md").write_text("# WO-1\nSTATUS: CLOSED\n", encoding="utf-8")
+    (d / "orders" / "WO-2.md").write_text("# WO-2\nREVISION = 1\n", encoding="utf-8")
+    (d / "orders" / "WO-3.md").write_text("# WO-3\n狀態：進行中\n", encoding="utf-8")
+    (d / "orders" / "notes.md").write_text("not an order\n", encoding="utf-8")
+    (d / "PENDING_SENDS.md").write_text("- [x] sent one\n- [ ] to 總監: report A\n- [ ] to line-b: retry\n",
+                                        encoding="utf-8")
+    now = datetime.datetime.now(datetime.timezone.utc)
+
+    def line(minutes_ago, session, tool, command, kind="result", status="ok"):
+        ts = (now - datetime.timedelta(minutes=minutes_ago)).isoformat(timespec="milliseconds")
+        return json.dumps({"seq": 0, "ts": ts, "session_id": session, "tool": tool, "kind": kind,
+                           "input": json.dumps({"command": command}), "result": {"status": status}}) + "\n"
+
+    old = line(180, "S0", "Bash", "tail run.log")
+    with open(d / "audit" / "a.jsonl", "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(old * (1300000 // len(old) + 1))  # more than one 1 MiB block of old lines
+        fh.write(line(30, "S1", "Bash", "tail -n 20 D:/w/run.log"))
+        fh.write(line(20, "S1", "PowerShell", "Get-Content D:\\w\\run.log -Tail 5"))
+        fh.write(line(10, "S2", "Bash", "python tools/selftest.py"))
+        fh.write(line(5, "S2", "Bash", "git push", kind="decision", status="deny"))
+        fh.write(line(4, "S2", "Bash", "rm -rf x", kind="decision", status="pause"))
+        fh.write(line(3, "S2", "Bash", "gh pr create", kind="decision", status="ask"))
+    (d / "audit" / "b.jsonl").write_text(old, encoding="utf-8")
+    marker = "dwstatusprobe" + str(os.getpid())
+    sleeper = subprocess.Popen([sys.executable, "-c", "import time, sys; time.sleep(120)", marker])
+    try:
+        conf = d / "director.json"
+        conf.write_text(json.dumps({
+            "schema_version": 1, "name": "director",
+            "po_page": {"path": "PO_PENDING.md", "counts": [{"label": "answered", "regex": r"^STATUS:\s*answered\b"},
+                                                            {"label": "new", "regex": r"^STATUS:\s*new\b"}]},
+            "orders": {"dir": "orders", "show": 1}, "pending_sends": {"path": "PENDING_SENDS.md"},
+            "audit": {"globs": ["audit/*.jsonl"]},
+            "processes": [{"label": "probe", "match": marker}, {"label": "idle_watch", "match": "no_such_process_" + marker[::-1]}],
+            "disk": str(tmp), "max_lines": 20}), encoding="utf-8")
+        script = d / "status.py"
+        expect("status_gen director config", "status_gen.py", 0, "--out", script, "--config", conf, says="WROTE")
+        done = subprocess.run([sys.executable, "-I", str(script)], capture_output=True, encoding="utf-8")
+        out = done.stdout
+        want = [f"PO {d / 'PO_PENDING.md'}: answered=2, new=1", "ORDERS ", ": 2 open of 3", "  ... 1 more",
+                ": 2 not sent", "  - [ ] to 總監: report A",
+                "AUDIT a.jsonl last 1h: lines=6 blocked=2 log_reads=2 sessions=2",
+                "AUDIT b.jsonl last 1h: lines=0 blocked=0 log_reads=0 sessions=0",
+                "PROC probe: running (1)", "PROC idle_watch: NOT RUNNING", "DISK "]
+        bad = [w for w in want if w not in out]
+        check("status.py director sections", done.returncode == 1 and not bad and len(out.splitlines()) <= 20,
+              f"exit {done.returncode}, missing {bad}: {out[-900:]}")
+        check("status.py director: WO-1 is closed, notes.md is no order", "WO-1.md" not in out and "notes.md" not in out
+              and ("WO-2.md" in out or "WO-3.md" in out), out[-600:])
+    finally:
+        sleeper.kill()
+        sleeper.wait()
+    conf.write_text(json.dumps({"schema_version": 1, "po_page": {"path": "po.html", "extract": r"window\.DATA = (\{.*\});",
+                    "counts": [{"label": "decisions answered", "list": "page.decisions", "field": "status", "value": "answered"},
+                               {"label": "notes new", "list": "page.notes", "value": "new"},
+                               {"label": "notes", "list": "page.notes"},
+                               {"label": "bad", "list": "page.none"}]},
+                    "pending_sends": {"path": "orders"}}), encoding="utf-8")
+    expect("status_gen director JSON page", "status_gen.py", 0, "--out", script, "--config", conf, "--force")
+    done = subprocess.run([sys.executable, "-I", str(script)], capture_output=True, encoding="utf-8")
+    check("status.py JSON page counts; a bad key is ? and exit 1", done.returncode == 1
+          and "decisions answered=1, notes new=3, notes=3, bad=? (" in done.stdout
+          and "SENDS " in done.stdout and ": 4 not sent" in done.stdout, done.stdout[-600:])
+    for name, body, says in (
+            ("regex and list together", {"po_page": {"path": "x", "counts": [{"label": "a", "regex": "x", "list": "y"}]}},
+             "one of them"),
+            ("a bad regex", {"orders": {"dir": "orders", "closed": "("}}, "not a regex"),
+            ("an unknown section key", {"audit": {"globs": ["a"], "days": 1}}, "unknown key"),
+            ("hours 0", {"audit": {"globs": ["a"], "hours": 0}}, "more than 0"),
+            ("a process without match", {"processes": [{"label": "x"}]}, "processes.match")):
+        conf.write_text(json.dumps(dict({"schema_version": 1}, **body)), encoding="utf-8")
+        expect(f"status_gen director {name}", "status_gen.py", 2, "--out", d / "s_none.py", "--config", conf, says=says)
+    conf.write_text((TOOLS.parent / "templates" / "status_director.json").read_text(encoding="utf-8"), encoding="utf-8")
+    expect("status_gen the director template loads", "status_gen.py", 0, "--out", d / "s_tpl.py", "--config", conf,
+           says="WROTE")
+    source = (d / "s_tpl.py").read_text(encoding="utf-8")
+    poll = (TOOLS / "poll_hint.py").read_text(encoding="utf-8")
+    check("status.py carries poll_hint's read_targets as it is",
+          re.search(r"^def read_targets.*?(?=^\S)", poll, re.M | re.S).group().rstrip() in source, "copy differs")
 
 
 def test_round_check(tmp):
@@ -4280,6 +4373,62 @@ def test_poll_hint(tmp):
         failures.append(f"poll_hint bad input: expected exit 0 and no output, got {done.returncode}: {done.stdout[-200:]}")
 
 
+def test_poll_report(tmp):
+    """1.3.0 §6: poll_hint.py report counts log reads per session from action logs, for the Director's weekly report."""
+    d = tmp / "poll_report"
+    d.mkdir()
+
+    def line(ts, session, command, tool="Bash", kind="result"):
+        return json.dumps({"seq": 0, "ts": ts, "session_id": session, "tool": tool, "kind": kind,
+                           "input": json.dumps({"command": command}), "result": {"status": "ok"}}) + "\n"
+
+    (d / "a.jsonl").write_text(
+        line("2026-11-01T01:00:00.000+00:00", "S1", "tail run.log")
+        + line("2026-11-07T01:00:00.000+00:00", "S1", "tail -n 5 D:/w/run.log")
+        + line("2026-11-07T01:02:00.000+00:00", "S1", "Get-Content D:\\w\\run.log -Tail 5", tool="PowerShell")
+        + line("2026-11-07T01:04:00.000+00:00", "S1", "cat d:/w/RUN.log")
+        + line("2026-11-07T01:05:00.000+00:00", "S1", "tail other.log")
+        + line("2026-11-07T01:06:00.000+00:00", "S1", "tail run.log", kind="decision")
+        + line("2026-11-07T01:07:00.000+00:00", "S1", "x", tool="Read")
+        + "not json\n", encoding="utf-8")
+    (d / "b.jsonl").write_text(line("2026-11-07T02:00:00.000+00:00", "S2", "tail b.log")
+                               + line("2026-11-07T02:00:30.000+00:00", "S2", "git status"), encoding="utf-8")
+    smap = d / "sessions.json"
+    smap.write_text(json.dumps({"schema_version": 1, "sessions": {"S1": {"profile": "worker", "name": "line-a"}}}),
+                    encoding="utf-8")
+
+    def rep(name, code, *args, says=(), lacks=()):
+        global total
+        total += 1
+        done = subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "poll_hint.py"), "report",
+                               *[str(x) for x in args]], capture_output=True, encoding="utf-8")
+        out = done.stdout + done.stderr
+        bad = [s for s in says if s not in out] + [f"not {s}" for s in lacks if s in out]
+        if done.returncode != code or bad:
+            failures.append(f"poll_hint report {name}: expected exit {code}, got {done.returncode}; {bad}: {out[-600:]}")
+        return done.stdout
+
+    rep("per session, glob", 0, "--log", d / "*.jsonl", "--sessions", smap,
+        says=["line-a", "POLL_REPORT: sessions=2 log_reads=6 hints=1 lines=9 logs=2 since=all", "d:/w/run.log x3"])
+    rep("--since drops the old line", 0, "--log", d / "a.jsonl", "--since", "2026-11-06",
+        says=["POLL_REPORT: sessions=1 log_reads=4 hints=1 lines=6 logs=1"])
+    out = rep("--json", 0, "--log", d / "a.jsonl", "--log", d / "b.jsonl", "--json")
+    global total
+    total += 1
+    try:
+        data = json.loads(out)
+        rows = {r["session"]: r for r in data["sessions"]}
+        ok = rows["S1"]["log_reads"] == 5 and rows["S1"]["files"] == 3 and rows["S2"]["hints"] == 0 \
+            and data["total"]["log_reads"] == 6
+    except (ValueError, KeyError):
+        ok = False
+    if not ok:
+        failures.append(f"poll_hint report --json: {out[-500:]}")
+    rep("--window 0 gives no hint", 0, "--log", d / "a.jsonl", "--window", "0", says=["hints=0"])
+    rep("a missing log", 2, "--log", d / "none.jsonl", says=["no log at"])
+    rep("a bad --since", 2, "--log", d / "a.jsonl", "--since", "last week", says=["not an ISO"])
+
+
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="director_work_selftest_")).resolve()
@@ -4328,9 +4477,11 @@ def main():
         test_trusted_isolation(tmp)
         test_usage_mix(tmp)
         test_status_gen(tmp)
+        test_status_director(tmp)
         test_round_check(tmp)
         test_test_request(tmp)
         test_poll_hint(tmp)
+        test_poll_report(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     for failure in failures:
