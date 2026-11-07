@@ -5412,7 +5412,7 @@ def test_no_git(tmp):
 
 
 def test_dispatch_plan_rule():
-    """2.1.0 (PO, L-046): docs/01 keeps the one dispatch-plan line and the Director's scope; docs/05 holds the details;
+    """2.1.0 (PO, L-057): docs/01 keeps the one dispatch-plan line and the Director's scope; docs/05 holds the details;
     docs/03 holds the PO-reading lines word for word; docs/06b holds the rehearsal and the merged tool call."""
     root = TOOLS.parent
     read = lambda name: (root / name).read_text(encoding="utf-8")
@@ -5422,7 +5422,7 @@ def test_dispatch_plan_rule():
     check("docs/01 has the dispatch-plan line", "- 每次派工前先做派工規劃，不把事情都攬在自己身上（`docs/05`「派工規劃」）。" in one)
     check("docs/01 does not narrow the Director to dispatch only", "只派工" not in one)
     check("docs/05 has the dispatch-plan section", "### 派工規劃" in five and "Single Writer" in five.split("### 派工規劃")[-1])
-    check("docs/10 has lesson L-046", "L-046" in ten)
+    check("docs/10 has lesson L-057", "L-057" in ten)
     check("docs/03 first step of each round, word for word (the reading side names the choice page, 總監 W4 N1)",
           "1. **每輪第一步讀待決頁**（任何喚醒）：照待決頁程序（含選擇頁）讀回覆和新留言，同輪執行或派工並關閉；未能完成則寫續辦紀錄。" in three)
     check("docs/03 end-of-round check, word for word",
