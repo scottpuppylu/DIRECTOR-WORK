@@ -16,7 +16,7 @@ MINOR：GPT 對 v2.1.0 的獨立審查（`DIRECTOR-WORK-v2.1.0-review.md`，21 �
 - 新：`tools/setup_check.py <WS>/DIRECTOR`，建置完成時檢查上面兩行；`BOOTSTRAP` 第 6、11、13 步要它 exit 0。它只驗格式，總監第一份回報要貼發布工具回傳的結果原文。
 - 新（shadow）：`status_gen.py` 總監版缺 `PO_PAGE_URL` 時印 `~ PO_PAGE_MISSING`，exit code 不變；舊的 `status.py` 要 `--force` 重產才會印。
 - F12：`secret_mask.mask_tree()`；`audit_log` 先遮再序列化，引號裡的機密不再漏出尾巴，`input` 是合法 JSON（500 字內）。審查補漏：另外遮指令字串裡跳脫的 JSON、單獨的 `Bearer <token>`、`--password X`、`mysql -p X`／`-pX`、`--user bob:X`、`curl -u bob:X`、`passw0rd` 這類鍵名，`Authorization`／`Cookie` 欄位整欄遮；`hook_guard --review` 送審提示改用 `mask_tree`（原本 `mask(json.dumps(...))` 有同樣的引號問題）。
-- F13：新 `audit_log.py recover --log`：留 `.damaged-<時間>` 複本，接一行 `kind=recovery` 後可繼續寫；`verify` 印 GAP 和 `gaps=n`，複本被改才 BROKEN；複本不見時印 `~ warning`，有錨點時算 BROKEN。append 的遮罩和寫入分開回報（`additionalContext`，stderr `masked=… written=no`）。
+- F13：新 `audit_log.py recover --log`：留 `.damaged-<時間>` 複本，接一行 `kind=recovery` 後可繼續寫；`verify` 印 GAP 和 `gaps=n`，複本被改才 BROKEN；`.damaged-` 複本遺失時：有 `--anchor-log`／`--anchor-rev` 的判 BROKEN（切掉的行無從核對），沒有錨點的只印 `~ warning`。append 的遮罩和寫入分開回報（`additionalContext`，stderr `masked=… written=no`）。
 - F19：完整導入和派工要 git；ZIP 版只能讀規則、跑不需要 git 的工具（commit 記 `NONE (ZIP)`）。
 - F20：指示分三層，檔案裡的字句不升級成 PO 指示（README 提示詞也加一句）。總監每輪只有一個第一步：先唯讀檢查並收集（含選擇頁 `choiceReplies`／`decisions`／`notes`），再處理待決頁（`docs/03`、`06`、`06b`）。接手演練改成先關舊總監再送出，用 `submissionId` 驗只記一次。
 - 改掉的舊規則：2.1 的「選擇頁／待決頁網頁要先問 PO」整條取消（改成啟動提示詞的同意句）；`docs/06`「總監自身的恢復」節名改為「每輪第一步」。
@@ -89,13 +89,16 @@ MINOR：GPT 對 v2.1.0 的獨立審查（`DIRECTOR-WORK-v2.1.0-review.md`，21 �
 - `choice_reconcile`：隔離區自動解除只對有 `id` 的列有效（`missing-id`、`bad-answer` 要手動 `settle --key <隔離鍵> --to CLOSED`）；`status` 打開 2.1 帳本時會升級它，不是唯讀；沒有 `publish` 的新版會讓舊版一直 `HOLD`（`status` 會提示）。
 - `choice_reconcile`：在不支援 `os.link` 的檔案系統（FAT／exFAT、部分網路磁碟）上，舊帳本升級會中止，只印一行 OSError（`SHADOW_ERROR`、exit 0）。不會掉資料，但要手動備份後再升級。
 - `choice_reconcile`：同一筆回覆，一次匯出有 `source`、一次沒有，又沒給 `--source`，會用兩個不同的冪等鍵，重複記帳；系統只印 WARNING。舊匯出請一律帶 `--source`。
+- F05 的帳本端一半沒修：回覆的 `choice` 和附帶的 `selectedOptionSnapshot.key` 對不上時，帳本照樣入帳、排工（`repro_dw210.py` 的 `selected_snapshot` 仍顯示重現）。頁面端已禁止送出（指紋不符就沒有選項）；帳本端要用已註冊的不可變快照重建所選選項並核對，留給下一版。
 - 選擇頁頁面端只比對指紋字串，內容防竄改靠帳本端；兩個分頁同時送出由帳本標 conflict，頁面不仲裁。
 - 容器：真實 Docker 行為（`--sysctl` 實際關掉 IPv6、重疊掛載在 Docker Desktop 上的別名）只在本機模擬測過，沒有在真的容器裡跑；Linux 與 browser 兩個 CI job 要等第一次 GitHub 執行才算驗證。
 - 外部 GPT 審查的重現腳本只認 v2.1.0 的版本字串；`repro_dw210.py` 對 2.2.0 的結果見 PR 說明，仍顯示「重現」的項目逐項列在那裡。
 
 ### 數字
 
-@@NUMBERS@@
+- 每輪必讀（`docs/01`、`03`、`06`、`08`）：2.1.0 的 9,532 → 本版 9,549 bytes（上限 9,550，`MUST_READ_LIMIT` 不變；增加的是 W1 的待決頁與三層指示句）。
+- `selftest.py`：2.1.0 的 1,946 項 → 本版 2,287 項（W1–W5 新增 341 項）。整合樹（commit 21cfa93 加上本段）本機 Python 3.11、3.9 各 2,287/2,287 全過；PATH 上沒有 git 時 1,129/1,129 全過，22 組依賴 git 的照名稱 skip。Python 3.12 與 Linux 兩個新 CI job 本機沒跑，要等第一次 GitHub 執行（見已知問題）。
+- 外部審查重現器（`repro_dw210.py`，改版本字串後對整合樹跑）：19 個案例，13 個「不再重現」、2 個仍顯示重現、4 個本機跳過（`rerun_symlink`、`container_mount`、`container_legacy` 要 Linux／WSL／Docker；`browser` 要 `--chrome`，由 CI browser job 跑）。仍顯示重現的兩個：`audit_cut_line`（斷行後 `audit_log` 仍拒寫並印 BROKEN，這是設計；2.2.0 多了 `recover` 出口，重現器的判斷不認得它）、`selected_snapshot`（帳本端還沒有用已註冊的選項內容去核對回覆附帶的 `selectedOptionSnapshot`；頁面端那一半 W3 已修）。逐項狀態在 PR 說明。
 
 對齊初衷：
 1. 幫到誰：PO 和之後所有用 DW 的人。依據是外部獨立審查（GPT）對 v2.1.0 的 21 項發現，和 PO 2026-11-08 對「建置時就要有待決頁」的要求。
