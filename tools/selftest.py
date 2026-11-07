@@ -2752,6 +2752,108 @@ def test_audit(tmp):
     expect("setup plain --hooks keeps --audit", "setup_project_settings.py", 0, "--repo", wt, "--only-this", "--hooks", says="OK")
 
 
+def test_report_vs_audit(tmp):
+    """1.3.0 item 10: report_vs_audit.py checks the runs a TASK REPORT claims (selftest, Unity, Blender, hash) against
+    the action log of the same session: run or not, exit (ok / error), time; a broken chain is a FAIL. Synthetic logs."""
+    global total
+    folder = tmp / "rva"
+    folder.mkdir()
+    spec = importlib.util.spec_from_file_location("audit_log_for_rva", TOOLS / "audit_log.py")
+    audit = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(audit)
+
+    def chain(path, rows):
+        prev, out = audit.GENESIS, []
+        for seq, (ts, session, tool, tool_input, kind, status) in enumerate(rows, 1):
+            entry = {"seq": seq, "ts": ts, "session_id": session, "agent_id": None, "tool": tool, "tool_use_id": f"t{seq}",
+                     "input": audit.summary(tool_input), "kind": kind, "result": {"status": status},
+                     "duration_ms": None, "prev": prev}
+            if kind == "decision":
+                entry["rule"] = "push"
+            entry["hash"] = audit.digest(entry)
+            prev = entry["hash"]
+            out.append(entry)
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write("".join(audit.canonical(e) + "\n" for e in out))
+        return out
+
+    log = folder / "a.jsonl"
+    long_cmd = "python -I -X utf8 tools/build_all.py " + "--flag " * 90 + "--end"
+    chain(log, [
+        ("2026-11-07T11:40:00.000+00:00", "S1", "Bash", {"command": "python -I -X utf8 tools/selftest.py",
+                                                         "description": "selftest"}, "result", "ok"),
+        ("2026-11-07T11:45:00.000+00:00", "S1", "PowerShell", {"command": "Get-FileHash D:\\w\\out\\pack.zip"},
+         "result", "ok"),
+        ("2026-11-07T11:50:00.000+00:00", "S1", "Bash", {"command": "\"C:/Unity/Unity.exe\" -batchmode -runTests"},
+         "failure", "error"),
+        ("2026-11-07T11:52:00.000+00:00", "S1", "mcp__blender__execute_blender_code", {"code": "x"}, "result", "ok"),
+        ("2026-11-07T11:55:00.000+00:00", "S1", "Bash", {"command": "git push"}, "decision", "deny"),
+        ("2026-11-07T11:56:00.000+00:00", "S2", "Bash", {"command": "sha256sum other.bin"}, "result", "ok"),
+        ("2026-11-07T11:57:00.000+00:00", "S1", "Bash", {"command": long_cmd}, "result", "ok"),
+    ])
+
+    def run(name, report, code, says=(), lacks=(), extra=(), logs=(log,)):
+        global total
+        total += 1
+        path = folder / f"{re.sub(r'[^A-Za-z0-9]+', '_', name)}.md"
+        path.write_text(report, encoding="utf-8")
+        args = [sys.executable, "-I", "-X", "utf8", str(TOOLS / "report_vs_audit.py"), "--report", str(path),
+                "--utc-offset", "+08:00"]
+        for item in logs:
+            args += ["--log", str(item)]
+        done = subprocess.run(args + [str(x) for x in extra], capture_output=True, encoding="utf-8")
+        out = done.stdout + done.stderr
+        wrong = [s for s in ([says] if isinstance(says, str) else says) if s not in out]
+        wrong += [f"not {s}" for s in ([lacks] if isinstance(lacks, str) else lacks) if s in out]
+        if done.returncode != code or wrong:
+            failures.append(f"report_vs_audit {name}: expected exit {code}, got {done.returncode}; {wrong}: {out[-700:]}")
+
+    good = ("SESSION_ID: S1\n"
+            "TESTS: `python -I -X utf8 tools/selftest.py` 300/300 passed\n"
+            "EVIDENCE: `Get-FileHash D:/w/out/pack.zip` OK\n"
+            "RAN:\n"
+            "- `\"C:/Unity/Unity.exe\" -batchmode -runTests` exit=1 at=19:50\n"
+            "- `mcp__blender__execute_blender_code` exit=0 at=2026-11-07T19:53+08:00\n")
+    run("all claims check out", good, 0, ("REPORT_VS_AUDIT: PASS claims=4 ok=4 failed=0 session=S1 logs=1",
+                                          "OK   selftest:", "OK   hash:", "OK   unity:", "OK   blender:"))
+    run("claimed exit 0 but the run failed", good.replace("-runTests` exit=1", "-runTests` exit=0"), 1,
+        ("FAIL unity:", "but the log says error", "REPORT_VS_AUDIT: FAIL"))
+    run("claimed failure but the run was ok", "SESSION_ID: S1\nRAN: `tools/selftest.py` exit=2\n", 1,
+        "but the log says ok")
+    run("not run at all", "SESSION_ID: S1\nTESTS: `blender -b scene.blend -P render.py` PASS\n", 1,
+        ("FAIL blender:", "not run in session S1"))
+    run("run by another session only", "SESSION_ID: S1\nEVIDENCE: `sha256sum other.bin` OK\n", 1, "not run in session S1")
+    run("same claim is fine for that session", "EVIDENCE: `sha256sum other.bin` OK\n", 0, "session=S2",
+        extra=("--session", "S2"))
+    run("time too far off", "SESSION_ID: S1\nRAN: `tools/selftest.py` exit=0 at=21:00\n", 1, "at=21:00, but the runs")
+    run("time within tolerance", "SESSION_ID: S1\nRAN: `tools/selftest.py` exit=0 at=19:50\n", 0, "PASS",
+        extra=("--tolerance-min", "10"))
+    run("full ISO time off", "SESSION_ID: S1\nRAN: `tools/selftest.py` at=2026-11-06T19:40+08:00\n", 1, "but the runs")
+    run("denied by the hook", "SESSION_ID: S1\nRAN: `git push` exit=0\n", 1, "the hook denied it")
+    run("a cut log line matches on its first part", f"SESSION_ID: S1\nRAN: `{long_cmd}` exit=0\n", 0, "PASS")
+    run("slashes, quotes and case aside", "SESSION_ID: S1\nEVIDENCE: `get-filehash D:\\w\\out\\pack.zip` 通過\n", 0,
+        "PASS")
+    run("plain code in TESTS is not a claim", "SESSION_ID: S1\nTESTS: `git status` clean\nDONE: `docs/x.md`\n", 0,
+        "REPORT_VS_AUDIT: NONE claims=0")
+    run("session from the only one in the logs", "TESTS: `tools/selftest.py` PASS\n", 2, "2 sessions")
+    run("a session with no lines", "SESSION_ID: S9\nTESTS: `tools/selftest.py` PASS\n", 1, "no line of session S9")
+    broken = folder / "broken.jsonl"
+    text = log.read_text(encoding="utf-8").replace('"status":"error"', '"status":"ok"')
+    broken.write_text(text, encoding="utf-8")
+    run("an edited log is a FAIL", good, 1, ("FAIL log: hash chain", "REPORT_VS_AUDIT: FAIL"), logs=(broken,))
+    run("a missing log cannot run", good, 2, "no such log", logs=(folder / "none.jsonl",))
+    run("a bad at= is a FAIL", "SESSION_ID: S1\nRAN: `tools/selftest.py` at=yesterday\n", 1, "not an ISO time")
+    second = folder / "b.jsonl"
+    chain(second, [("2026-11-07T12:10:00.000+00:00", "S1", "mcp__UnityMCP__run_tests", {"mode": "EditMode"}, "result",
+                    "ok")])
+    run("two logs are read together", "SESSION_ID: S1\nTESTS: `mcp__UnityMCP__run_tests` PASS\n"
+        "RAN: `tools/selftest.py` exit=0\n", 0, "PASS claims=2 ok=2 failed=0 session=S1 logs=2", logs=(log, second))
+    template = (TOOLS.parent / "templates" / "TASK_REPORT.md").read_text(encoding="utf-8")
+    total += 1
+    if "SESSION_ID:" not in template or "RAN:" not in template or "report_vs_audit.py" not in template:
+        failures.append("report_vs_audit: templates/TASK_REPORT.md has no SESSION_ID: / RAN: lines")
+
+
 def test_audit_names(tmp):
     """K6: {worktree} and {container} in the log path, filled in when the command runs; one chain per file."""
     global total
@@ -4210,6 +4312,7 @@ def main():
         test_auto_pause(tmp)
         test_audit(tmp)
         test_audit_names(tmp)
+        test_report_vs_audit(tmp)
         test_review(tmp)
         test_doctor(tmp)
         test_doctor_launch(tmp)
