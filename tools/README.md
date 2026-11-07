@@ -8,15 +8,20 @@ Python 3.9 以上，只用標準函式庫。一律用 `python -I -X utf8 <tool> 
 | `setup_project_settings.py` | 在一個 git repo 的每個 worktree 寫入壓縮門檻（`autoCompactWindow` + 環境變數）、要關掉的使用者 plugin，以及可選的 `hook_guard` hook；`--runtime-guard` 一次寫入整組執行期防護 | 只有加 `--apply` 才寫，只寫 `<worktree>/.claude/settings.local.json` | 不花 |
 | `context_probe.py` | 免費探測每輪固定成本：類別 token、`autoCompactThreshold`、記憶檔、skill | 不寫（`--json-out` 除外） | **不花**：只送 control request，不呼叫模型 |
 | `usage_report.py` | 從本機對話紀錄只彙總 usage 數字：呼叫數、上下文分佈、模型、快取重建、工具輸出量、圖片數 | 不寫（`--json-out` 除外） | 不花 |
+| `usage_mix.py`（1.3.0） | 額度花在哪：每次呼叫依它選的動作歸成五大類（讀和查、協調、看圖與審查、實際動手、等待），對照門檻，各 session 的比例，以及開新 session 划不划算（RESTART 行） | 不寫 | 不花；只印比例，不印訊息內容 |
 | `memory_size_check.py` | 檢查記憶索引大小，超過門檻 exit 1 | 不寫 | 不花 |
 | `gate_check.py` | 檢查 RESUME_STATE、工單、TASK REPORT、裁決的欄位和用詞；`--match` 逐條對照報告和工單的驗收條件，加 `--evidence-dir` 再核對證據紀錄；`--hash` 印工單雜湊 | 不寫 | 不花 |
+| `round_check.py`（1.3.0） | 修正輪數：RESUME_STATE 的 `FIX_ROUNDS:` 到第 4 輪（之後每組）沒有根因研究就 FAIL | 不寫 | 不花 |
+| `report_vs_audit.py`（1.3.0） | 用動作紀錄核對 TASK REPORT：報告說跑過的指令（`RAN:` 和 TESTS / EVIDENCE / DONE 裡的 selftest、Unity、Blender、雜湊檢查）紀錄裡有沒有、exit 和時間對不對 | 不寫 | 不花 |
 | `trace_report.py` | 從工單、報告、裁決產生追溯表：需求 → 工單 → AC → 證據 → 裁決 | 不寫 | 不花 |
 | `metrics_report.py` | 從總監的檔案數出 `PURPOSE.md` 的成效數字：返工、中斷後重做、PO 介入、導入卡住，以及規格審查的花費 | 不寫 | 不花 |
 | `vocabulary.json` | 判定、下一步、RESULT、治理模式、證據等級等固定用詞的唯一來源；`gate_check.py` 讀它 | — | — |
 | `scope_check.py` | 比對實際改動和工單的 SCOPE / FORBIDDEN | 不寫 | 不花 |
 | `evidence_record.py` | 跑驗收指令，留下 exit code、輸出結尾、產物 SHA-256；之後可重新比對 | `run` 寫一份小 JSON，不覆蓋舊的 | 不花 |
-| `hook_guard.py` | PreToolUse hook：擋下 push、`reset --hard`、`git clean`、裸 stash、刪 worktree / 分支 / tag、依名稱結束程序；加 `--protect` 時另擋 Write / Edit 改工單和 `DIRECTOR_LOG.md`；加 `--rules` 時依 `guard_rules.json` 對每個工具呼叫回 deny / ask / 不出聲；加 `--review` 時先把部分 ask 交給第二個模型看 | 不寫 | 不花；放行時不輸出。`--review` 每次審查用一次 `claude -p`（不花錢，但吃訂閱額度） |
-| `doctor.py` | 報告一個 worktree 實際生效的防護：claude 版本（生效的那個和 PATH 上每一個）、各設定層合併後的 hook、動作紀錄、權限規則、`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`、隔離、worktree；每項標 ENFORCED / CONFIGURED_NOT_VERIFIED / NOT_ENFORCED / MISSING | 不寫 | 不花：`claude --version` 只在本機印版本 |
+| `hook_guard.py` | PreToolUse hook：擋下 push、`reset --hard`、`git clean`、裸 stash、刪 worktree / 分支 / tag、依名稱結束程序；加 `--protect` 時另擋 Write / Edit 改工單和 `DIRECTOR_LOG.md`；加 `--rules` 時依 `guard_rules.json` 對每個工具呼叫回 deny / ask / 不出聲；加 `--review` 時先把部分 ask 交給第二個模型看；加 `--sessions` 時依 `session_id` 選 director / worker / cleaner | 不寫 | 不花；放行時不輸出。`--review` 每次審查用一次 `claude -p`（不花錢，但吃訂閱額度） |
+| `doctor.py` | 報告一個 worktree 實際生效的防護：claude 版本（生效的那個和 PATH 上每一個）、各設定層合併後的 hook、動作紀錄、權限規則、`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`、隔離、worktree、各 worktree 最近有沒有 session 從那裡啟動；每項標 ENFORCED / CONFIGURED_NOT_VERIFIED / NOT_ENFORCED / MISSING | 不寫 | 不花：`claude --version` 只在本機印版本 |
+| `status_gen.py`（1.3.0） | 產生一支工作線的 `status.py`：log 尾段、雜湊、磁碟 GiB、git、最新輸出；總監版再加待決頁計數、未結案工單、未送出訊息、最近 1 小時的動作紀錄、常駐程序 | 只寫 `--out` 那一支（已存在要 `--force`）；產生的 `status.py` 不寫 | 不花 |
+| `poll_hint.py`（1.3.0） | PostToolUse hook：同一個 session 10 分鐘內讀同一份 log 第 3 次時，提示「等完成通知」，不擋；`report` 從動作紀錄算各 session 讀 log 的次數 | hook 只寫暫存資料夾的小狀態檔；`report` 不寫 | 不花 |
 | `secret_mask.py` | 把文字裡的私鑰、token、API key、JWT、`password=` 這類值換成 `[MASKED:種類]`；`--check` 只列出找到的種類 | 不寫 | 不花 |
 | `pause_ctl.py` | 暫停開關：`on` / `off` 寫入或移除 `<DIRECTOR>/PAUSE` 並記進 `DIRECTOR_LOG.md`，`status` 印目前狀態；`procs` 依 CPU 增量列出停機後程序樹還剩哪些 | `on` / `off` 只寫旗標檔和 LOG 一行；`procs` 不寫、不結束任何程序 | 不花 |
 | `audit_log.py` | 動作紀錄：PostToolUse / PostToolUseFailure hook 把每個工具呼叫寫成一行有雜湊鏈的 JSONL；`verify` 檢查鏈和總監的錨點，`head` 印錨點，`cite` 印 TASK REPORT 引用的區段 | `append` 只寫紀錄檔和它的 `.lock`；其他不寫 | 不花 |
@@ -71,7 +76,8 @@ python -I -X utf8 setup_project_settings.py --runtime-guard --protect-director <
 - 依名稱結束程序：`Stop-Process` 沒帶 `-Id` 一律擋，包括 `Get-Process x | Stop-Process`。
 - 放行：`git stash push -m <標記>`、`stash apply / list / show`、`git clean -n`、`reset --soft`、`taskkill /PID`、`Stop-Process -Id`。
 - 不加 `--rules` 時**沒有涵蓋刪檔**：`rm -rf`、`Remove-Item -Recurse` 照常執行，刪檔照 `docs/08` 和 `docs/06b`「刪檔之前」。
-- 清理員的 session 不裝這個 hook：它要刪 worktree，而 `worktree remove / prune` 會被擋。
+- 清理員的 session 不裝這個 hook：它要刪 worktree，而 `worktree remove / prune` 會被擋。1.3.0 起可以改用 `--sessions`（下面）的 cleaner。
+- `--sessions <檔>`（1.3.0，要配 `--rules`）：同一個資料夾啟動的 session 共用一份 settings，所以依 hook 輸入的 `session_id` 選 profile。檔案格式見 `templates/guard_sessions.json`：`sessions` 是 `session_id` → `director` / `worker` / `cleaner`（或 `{profile, name}`），`default` 給沒列到的，`protected` 是任何角色都不能刪或搬的路徑。cleaner = worker 但刪除規則不套用。總監的 session 不受暫停旗標影響。檔案讀不到或格式錯就 exit 1。安裝：`setup_project_settings.py --hooks --rules --session-map <檔> --apply`，權限清單取各角色最寬鬆的那個。hook 輸入只有 `session_id`，沒有 session 名稱，所以要先從 Desktop 或對話紀錄查到 id 再寫進檔案。
 - 只是安全帶，不是安全邊界：寫在腳本檔裡或執行時才組出來的指令看不到。PO 核准的 push 由 PO 自己執行，或先移除 hook。
 - `--protect <DIRECTOR>`：Write / Edit 的 `file_path` 落在 `<DIRECTOR>/orders/` 底下或就是 `<DIRECTOR>/DIRECTOR_LOG.md` 時 exit 2。相對路徑以 hook 輸入的 `cwd` 為準；兩邊都先 resolve（展開 junction、symlink、`..`），Windows 再展開 8.3 短檔名、不分大小寫比對。
 - Windows 路徑先正規化：去掉 `\\?\` 和 `\\.\` 前綴（磁碟或 UNC 路徑）；NTFS 資料流（`DIRECTOR_LOG.md::$DATA`、`x.md:note`）視為檔案本身。其他裝置路徑（GLOBALROOT、volume GUID）不比對，一律擋下並請改用磁碟或 UNC 路徑。
@@ -228,6 +234,7 @@ python -I -X utf8 doctor.py --probe --director <DIRECTOR>        # 容器裡：�
   - `NOT_ENFORCED`：沒生效（有設定把它關掉、claude 版本太舊）。
   - `MISSING`：沒設定。
   - `WARN`、`INFO`、`VERSION` 只是說明，不算失敗。
+- 啟動資料夾（1.3.0）：settings 只從 session 啟動的資料夾讀。doctor 從 `~/.claude/projects` 的對話紀錄數出最近 `--launch-days` 天（預設 30）各 worktree 啟動過幾個 session，印 `INFO launch:`。有防護、卻沒有 session 從那裡啟動，印 `settings unread`；session 從沒有防護的 worktree 啟動、別的 worktree 卻有，印 `WARN launch folder unguarded`。有 `--sessions` 檔時，權限一項取各角色最寬鬆的結論，並檢查檔案權限。
 - 最後一行 `DOCTOR: enforced=n not_verified=m not_enforced=k missing=j warn=w`；有 NOT_ENFORCED 或 MISSING 就 exit 1。不在 git repo 裡 exit 2。
 - **原生 Windows 上 doctor 一定 exit 1**：`isolation: NOT_ENFORCED (native Windows, no OS-level isolation for shell)`。這是實話，不是設定錯。
 - claude 版本：
@@ -285,6 +292,7 @@ python -I -X utf8 gate_check.py --match <報告.md> <WO.md>     # 逐條對照�
 python -I -X utf8 gate_check.py --match <報告.md> <WO.md> --evidence-dir <證據資料夾>   # 再核對 AUTO 的證據紀錄
 python -I -X utf8 gate_check.py --match <報告.md> <WO.md> --dispatch-log <DIRECTOR_LOG.md>   # 再和派工紀錄的雜湊比
 python -I -X utf8 gate_check.py --match <報告.md> <WO.md> --evidence-dir <證據資料夾> --dispatch-log <DIRECTOR_LOG.md> --candidate <40 位>   # Strict 的審查要三個都給
+python -I -X utf8 gate_check.py --test-request <申請.md>       # TEST REQUEST 欄位齊、單位 GiB、寫入量涵蓋 build + 擷取 + 快取（1.3.0）
 python -I -X utf8 gate_check.py --hash <WO.md>                # 印工單 SHA-256（CRLF 當 LF 算）和要記進 LOG 的 DISPATCH 行
 python -I -X utf8 gate_check.py --preflight <報告.md> <WO.md> --evidence-dir <證據資料夾> --dispatch-log <DIRECTOR_LOG.md> --repo <受信任的 checkout>   # 舊審查升到新 Strict 前缺什麼
 ```
@@ -486,15 +494,72 @@ C5 探測，全部在容器裡以 `dw` 身分跑：
   - `*.` 開頭的名稱可以查任意子網域，資料能藏在子網域名稱裡；預設清單沒有 `*.` 名稱，加之前要想清楚。
 - **IP 只在開容器時解析一次。** `api.anthropic.com` 的 IP 在 session 中途換掉，連線就會失敗，要重開容器。
 
+## usage_mix.py（1.3.0）
+
+```text
+python -I -X utf8 usage_mix.py --since 2026-11-01 [--until ...] [--session <id 前綴>] [--project-dir <資料夾名>] [--all] [--json] [--check]
+```
+
+- 讀 `~/.claude/projects` 的對話紀錄（含 subagent），每次呼叫算額度等價量：輸入 × 1 + 快取寫入 × 1.25 + 快取讀取 × 0.1 + 輸出 × 5（每 token），平分給它選的工具呼叫。同一個 `message.id` 拆成幾行的先合併（L-035），分叉或續接的 session 重複的只算一次。
+- 印五大類的比例和門檻（讀和查 ≤ 30%、實際動手 ≥ 30%）、細類、各 session 的比例，最後一行 `RESULT ON_TARGET|OFF_TARGET`；`--check` 沒達到就 exit 1。
+- RESTART 行：新 session 第一次呼叫的上下文、新 session 或壓縮後到第一個實際動手的呼叫數和等價量、依上下文大小的單價，和由這些算出的損益兩平點（`docs/04`「開新 session 划不划算」）。
+- `--patterns <檔>` 加專案自己的字（執行檔、審查工具名），讓 shell 指令歸到對的類別；專案字只放在那個檔，不進工具。
+- 只印比例和數字，不印訊息內容。紀錄格式不是官方介面，改版後可能讀不到；讀不到就印 UNKNOWN，不印 0。
+
+## status_gen.py（1.3.0）
+
+```text
+python -I -X utf8 status_gen.py --out <線的資料夾>/status.py --log <log> --hash-file <檔> --outputs <資料夾> --disk D:/ --disk-min-gib 20 --git <worktree>
+python -I -X utf8 status_gen.py --out <DIRECTOR>/status.py --config templates/status_director.json   # 總監版：先把路徑改成專案自己的
+```
+
+- 產生的 `status.py` 只讀、只用標準庫，總長最多 `--max-lines` 行（預設 60），每行截到 `--width`。大 log 從檔尾讀，不整份讀進來。
+- 一般段：LOG（log 尾段）、HASH（雜湊檔尾段、`--checksum` 檔的 SHA-256）、DISK（GiB）、GIT（分支、領先 / 落後、改動數、最近的 commit）、OUT（最新輸出）。
+- 總監段（設定檔，都選用）：`po_page`（待決頁的計數：每項一個 regex，或 JSON 頁的 `list` 加 `field` / `value`）、`orders`（沒有結案字樣的工單）、`pending_sends`（還沒勾的 `- [ ]`）、`audit`（每份動作紀錄最近 `hours` 小時的筆數、被擋次數、讀 log 次數、session 數；讀 log 的判斷照抄 `poll_hint.py`）、`processes`（命令列含某字串的程序有沒有在跑）。
+- 讀不到的路徑印 MISSING；磁碟低於門檻、讀不到待決頁或程序沒在跑時 exit 1。
+- 已存在的 `--out` 要加 `--force` 才覆蓋。
+
+## round_check.py（1.3.0）
+
+```text
+python -I -X utf8 round_check.py [--dir <worktree>]        # 資料夾裡每份 RESUME_STATE*.md
+python -I -X utf8 round_check.py --resume <RESUME_STATE.md> ...
+```
+
+- RESUME_STATE 的 `FIX_ROUNDS:` 每個缺陷一行：`- <缺陷>: round=<n> set=<n> study=<檔名>|NONE`。`set` = (round − 1) // 3 + 1。
+- 第 4 輪起，研究檔要存在，而且每個做完的組都有 `## SET n`（或 `## <缺陷> SET n`）一節，填了 `WHERE:`、`ALTERNATIVES:`、`DECISION:`（`docs/07` 第 4 節）。
+- 每個缺陷印 OK / FAIL，最後一行 `ROUNDS: PASS|FAIL files= defects= failed=`；有 FAIL 或找不到 RESUME_STATE 就 exit 1。專案的 guard_check 對每個 worktree 跑它。
+
+## poll_hint.py（1.3.0）
+
+- PostToolUse hook（matcher `Bash|PowerShell`）。`tail`、`Get-Content`（`gc`、`cat`、`type`，以及 `head` / `less` 讀 .log .out .err .txt）算一次讀 log。同一個 session 在 `--window` 秒（預設 600）內第 3 次讀同一份檔，就回一段提示「等完成通知」，計數歸零。永遠 exit 0，不擋。
+- 安裝（專案的 `.claude/settings.local.json`）：
+  ```json
+  "PostToolUse": [{"matcher": "Bash|PowerShell", "hooks": [{"type": "command", "command": "\"<PYTHON>\" -I -X utf8 \"<DW>/tools/poll_hint.py\""}]}]
+  ```
+- 報告：`poll_hint.py report --log <動作紀錄或 glob> [--log ...] [--since 2026-11-01 | --days 7] [--sessions <sessions 檔>] [--json]`，每個 session 一列：讀幾次、幾份檔、最常讀的檔、提示會出現幾次。最後一行 `POLL_REPORT: sessions= log_reads= hints= lines= logs= since=`。只讀。
+
+## report_vs_audit.py（1.3.0）
+
+```text
+python -I -X utf8 report_vs_audit.py --report <報告.md> --log <動作紀錄.jsonl> [--log ...] [--session <id>] [--tolerance-min 15]
+```
+
+- 報告裡的主張來自兩處：`RAN:` 行（`` RAN: `指令` exit=0 at=19:40 ``，exit 和 at 可省），以及 TESTS / EVIDENCE / DONE 欄位裡看起來是跑 selftest、Unity、Blender 或雜湊檢查的 `` `指令` ``（同一行的 `exit=N`；PASS、OK、通過 當成 exit 0）。
+- session 取 `--session`，沒有就取報告的 `SESSION_ID:`，再沒有就取紀錄裡唯一的 session_id；都沒有就 exit 2。
+- shell 指令比對同一個 session 的 Bash / PowerShell 紀錄（空白、引號、斜線方向不計；紀錄被截在 500 字的比前段）；`mcp__` 工具比對工具名。exit 0 要有一筆 ok，其他 exit 要有一筆 error；有 `at=` 就要在誤差內。只被 hook 擋下的會寫明。紀錄的雜湊鏈斷了印 `FAIL log: hash chain`。
+- 最後一行 `REPORT_VS_AUDIT: PASS|FAIL|NONE claims= ok= failed= session= logs=`；FAIL exit 1，不能跑 exit 2。
+- 只證明「有跑、結果和報告一致」，不證明跑的內容對；動作紀錄沒有 exit code，用 ok / error 判斷。
+
 ## selftest.py
 
 ```text
 python -I -X utf8 selftest.py
 ```
 
-改過任何工具、`vocabulary.json`、`docs/02`、範本或每輪必讀的文件就跑一次。也會檢查：文件和範本裡的固定用詞和 `vocabulary.json` 一致；README 標「每輪必讀」的文件合計不超過上限（`MUST_READ_LIMIT`，2026-11-04 為 13,428 bytes）。要提高上限，commit 訊息寫明原因。GitHub Actions 在每次 push 和 PR 跑同一支（`.github/workflows/selftest.yml`）。
+改過任何工具、`vocabulary.json`、`docs/02`、範本或每輪必讀的文件就跑一次。也會檢查：文件和範本裡的固定用詞和 `vocabulary.json` 一致；README 標「每輪必讀」的文件合計不超過上限（`MUST_READ_LIMIT`，2026-11-06 為 12,392 bytes）。要提高上限，commit 訊息寫明原因。GitHub Actions 在每次 push 和 PR 跑同一支（`.github/workflows/selftest.yml`）。
 
 ## 建議另外寫的（依專案）
 
-- **guard_check**：逐項檢查續航機制（計時器、排程、監看、壓縮設定、記憶大小）並印重建指令，見 `docs/06b`。各專案機制不同，所以沒有通用版。
+- **guard_check**：逐項檢查續航機制（計時器、排程、監看、壓縮設定、記憶大小）並印重建指令，對每個 worktree 跑 `round_check.py`，見 `docs/06b`。各專案機制不同，所以沒有通用版。
 - **排程看板工具**：有總管時，看板的讀寫（go / wait / ack / quiet / hold）用一支小工具統一，名稱檢查和 ACK 逾時警示寫在工具裡，見 `docs/02`。

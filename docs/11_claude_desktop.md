@@ -38,7 +38,7 @@
 
 - **確認壓縮門檻生效**（`BOOTSTRAP` 第 7.5 步）：`get_usage` 看自己的 `context.contextWindow`。設定只對之後開的 session 生效，建置中的 session 會是舊值；換到下一個 session 再讀一次，要是 `250000`。
 - **98% / 99% 停工線**（`docs/04`）：每次喚醒先讀 `get_usage` 的週額度，不靠人看畫面。讀不到時 `plan.status` 會是 `unavailable`，記 UNKNOWN，不當成 0%。
-- **換 session 的時機**：`context.percentUsed` 接近 `autoCompactsAtPercent` 時，先更新 RESUME_STATE 四行，再換新 session（`docs/04` 第 2 點）。
+- **快壓縮時**：`context.percentUsed` 接近 `autoCompactsAtPercent` 時，先更新 RESUME_STATE 四行，讓壓縮後的摘要可以短；不為了縮上下文換新 session（`docs/04` 第 2 點）。
 - **看 worker 是否還在跑**：先讀它的 RESUME_STATE；要叫醒它之前，先用 `get_session` 確認狀態，不為了問進度發訊息。`get_usage` 讀別的 session 的上下文視窗時，閒置的 session 可能讀得到（實測讀得到），也可能回 unavailable；讀不到不代表它中斷了。
 
 ## 為什麼
