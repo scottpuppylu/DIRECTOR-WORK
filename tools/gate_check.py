@@ -754,7 +754,8 @@ def shared_replies(records):
     that pass acceptance_problems() count: a malformed one is already UNBOUND_PO_REPLY on its own."""
     used = {}
     for record in records:
-        if isinstance(record, dict) and isinstance(record.get("reply_ref"), str) and record["reply_ref"].strip()                 and not acceptance_problems(record):
+        if (isinstance(record, dict) and isinstance(record.get("reply_ref"), str) and record["reply_ref"].strip()
+                and not acceptance_problems(record)):
             used.setdefault(record["reply_ref"], set()).add(acceptance_identity(record))
     return {ref: ids for ref, ids in used.items() if len(ids) > 1}
 
