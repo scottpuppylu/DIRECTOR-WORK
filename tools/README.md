@@ -11,9 +11,10 @@ Python 3.9 以上，只用標準函式庫。一律用 `python -I -X utf8 <tool> 
 | `usage_mix.py`（1.3.0） | 額度花在哪：每次呼叫依它選的動作歸成五大類（讀和查、協調、看圖與審查、實際動手、等待），對照門檻，各 session 的比例，以及開新 session 划不划算（RESTART 行） | 不寫 | 不花；只印比例，不印訊息內容 |
 | `memory_size_check.py` | 檢查記憶索引大小，超過門檻 exit 1 | 不寫 | 不花 |
 | `gate_check.py` | 檢查 RESUME_STATE、工單、TASK REPORT、裁決的欄位和用詞；`--match` 逐條對照報告和工單的驗收條件，加 `--evidence-dir` 再核對證據紀錄；`--hash` 印工單雜湊 | 不寫 | 不花 |
-| `setup_check.py`（2.2.0） | 建置完成的檢查：`DIRECTOR_STATE.md` 的 `PO_PAGE_URL` 和 `PO_PAGE_PINNED` 兩行是不是三種合法寫法之一 | 不寫 | 不花 |
+| `setup_check.py`（2.2.0） | 建置完成的檢查：`DIRECTOR_STATE.md` 的 `PO_PAGE_URL` 和 `PO_PAGE_PINNED` 兩行是不是三種合法寫法之一；2.2.1 起另查旁邊的 `PO_PENDING.md`、`RESUME_STATE.md` 表頭、`director_work.json`（shadow，`--strict` 才失敗） | 不寫 | 不花 |
 | `round_check.py`（1.3.0） | 修正輪數：RESUME_STATE 的 `FIX_ROUNDS:` 到第 4 輪（之後每組）沒有根因研究就 FAIL | 不寫 | 不花 |
-| `report_vs_audit.py`（1.3.0） | 用動作紀錄核對 TASK REPORT：報告說跑過的指令（`RAN:` 和 TESTS / EVIDENCE / DONE 裡的 selftest、Unity、Blender、雜湊檢查）紀錄裡有沒有、exit 和時間對不對 | 不寫 | 不花 |
+| `report_vs_audit.py`（1.3.0） | 用動作紀錄核對 TASK REPORT：報告說跑過的指令（`RAN:` 和 TESTS / EVIDENCE / DONE 裡的 selftest、Unity、Blender、雜湊檢查）紀錄裡有沒有、exit 和時間對不對；2.2.1 修截斷的長指令（引號、反斜線）比不到 | 不寫 | 不花 |
+| `transcript_audit.py`（2.2.1） | 沒裝 hook 時，從本機 Claude Code transcript（含 subagents）重建一份 hook 格式的動作紀錄，第 1 行標明是重建的 | 只寫 `--out`（已存在要 `--force`） | 不花 |
 | `trace_report.py` | 從工單、報告、裁決產生追溯表：需求 → 工單 → AC → 證據 → 裁決 | 不寫 | 不花 |
 | `metrics_report.py` | 從總監的檔案數出 `PURPOSE.md` 的成效數字：返工、中斷後重做、PO 介入、導入卡住，以及規格審查的花費；`--run` 另數接手演練的決策、重問、PO 操作和第一個可用預覽的時間 | 不寫 | 不花 |
 | `vocabulary.json` | 判定、下一步、RESULT、治理模式、證據等級等固定用詞的唯一來源；`gate_check.py` 讀它 | — | — |
@@ -352,6 +353,11 @@ python -I -X utf8 setup_check.py <WS>/DIRECTOR [更多資料夾或檔案]   # �
 - 缺行、同一行寫兩次、不是 claude.ai 的 Artifact 網址、`<...>` 佔位、`NONE` / `no` 沒寫原因、檔案不存在，都 exit 1。全部合法 exit 0。
 - 只驗格式，不驗頁面真的存在或真的置頂：偽造的 Artifact 網址、`NONE reason=x` 都會 exit 0。所以總監回報時要貼出發布工具回傳的結果原文（BOOTSTRAP 第 6 步第 7 點、第 13 步）。
 - `BOOTSTRAP` 第 6、11、13 步要它 exit 0 才送第一份回報。只用在建置流程；舊專案不跑它，`status.py` 只印 shadow 提示 `PO_PAGE_MISSING`（`status_gen.py`）。
+- 2.2.1（shadow）：給資料夾、或檔名是 `DIRECTOR_STATE.md` 時，連旁邊的三個檔案一起查；檔案還沒產生只印 `~ not checked, not there yet: ...`。
+  - `PO_PENDING.md`：每筆 `ID: OD-xx` / `ID: ACT-xx` 的 ID、STATUS、QUESTION、OPTIONS、RECOMMENDED、SOURCE、ANSWER 各一次（缺 CREATED 只提示）；STATUS 是 open、answered 或 closed；QUESTION、OPTIONS、RECOMMENDED 有填；SOURCE 有填或寫 NONE；answered / closed 要有真的 ANSWER；同一個 ID 只用一次。
+  - `RESUME_STATE.md`：前四行依序是 PROGRESS、DOING、NEXT_STEP、COMMS 而且有填，UPDATED 有日期（和 `gate_check.py --resume` 同一條規則）。
+  - `director_work.json`：JSON 物件；`schema_version` 是 1（或不寫）；window 在 100000–1000000；mode 是 general / beginner；`plugins_off` 是 `名稱@marketplace`；guard_profile / guard_mode 是已知的值；`*_pattern` 是合法正規式；其他已知鍵型別要對（不認得的鍵只提示）。
+  - 問題印成 `  ~ shadow: ...`，exit code 只看待決頁兩行；加 `--strict` 改成 `  - ...` 並 exit 1。從範本複製、還沒填的資料夾會看到 shadow 提示（範本的範例條目和佔位）。
 
 ## trace_report.py
 
@@ -654,6 +660,20 @@ python -I -X utf8 report_vs_audit.py --report <報告.md> --log <動作紀錄.js
 - shell 指令比對同一個 session 的 Bash / PowerShell 紀錄（空白、引號、斜線方向不計；紀錄被截在 500 字的比前段）；`mcp__` 工具比對工具名。exit 0 要有一筆 ok，其他 exit 要有一筆 error；有 `at=` 就要在誤差內。只被 hook 擋下的會寫明。紀錄的雜湊鏈斷了印 `FAIL log: hash chain`。
 - 最後一行 `REPORT_VS_AUDIT: PASS|FAIL|NONE claims= ok= failed= session= logs=`；FAIL exit 1，不能跑 exit 2。
 - 只證明「有跑、結果和報告一致」，不證明跑的內容對；動作紀錄沒有 exit code，用 ok / error 判斷。
+- 2.2.1：被截在 500 字的紀錄行照 JSON 規則解回（`\"`、`\\` 還原；2.2.0 沒還原，含引號或反斜線路徑的長指令比不到）。比對前去掉 `&`、`cmd /c`、啟動程式（python、py、pwsh、powershell、node、bash 等）和它的啟動旗標；`...`、`…`、`<名稱>` 當萬用字；單一檔名可以對到以它結尾的較長路徑；靠詞比對時至少要 2 個實詞（只寫啟動程式不算）。只比 Bash / PowerShell 的紀錄。紀錄有 `kind=rebuild` 行時多印 `~ note: a log was rebuilt from a transcript ...`。
+
+## transcript_audit.py（2.2.1）
+
+```text
+python -I -X utf8 transcript_audit.py build --out <新紀錄.jsonl> [--force] --transcript <transcript.jsonl> [--transcript ...]
+python -I -X utf8 transcript_audit.py build --out <新紀錄.jsonl> [--force] --session <ID> [--project-dir <專案資料夾>] [--root <~/.claude/projects>] [--no-subagents]
+```
+
+- 沒裝 hook 做完的工作，從本機 transcript 重建一份 `audit_log.py` 格式的紀錄：每個有結果的工具呼叫一行，`input` 用 `audit_log` 同一段程式遮罩、截在 500 字；`is_error` 的結果是 `kind=failure`（使用者中斷是 `interrupted`），其他是 `kind=result`；依結果的時間排序後串成雜湊鏈。`audit_log.py verify` 和 `report_vs_audit.py` 照讀。
+- `--transcript` 也讀旁邊的 `<檔名>/subagents/*.jsonl`（`--no-subagents` 不讀）。`--session` 找 `<root>/<專案資料夾換成 - 的名字>/<ID>.jsonl`。
+- 第 1 行是 `kind=rebuild`，`source` 記來源 transcript 的名稱、sha256、大小，和 `no_result`（還沒有結果，不寫）、`duplicates`（同一個 id 又出現，留第一筆）、`no_time`、`bad_lines` 的數目。
+- 印 `TRANSCRIPT_AUDIT file= lines= sessions= no_result= duplicates= no_time=` 和新紀錄的 `AUDIT_HEAD`。exit 0 寫好；1 拒絕（`--out` 已存在）或沒寫成；2 不能跑（沒有 transcript、找不到工具呼叫、參數不對）。
+- 限制：`result.sha256` 算的是 transcript 裡的結果，和 hook 紀錄的不能互比；`duration_ms` 是 null；hook_guard 的 decision 行無法重建。transcript 格式是 Claude Code 自己的、沒有文件，格式改了會找不到工具呼叫並 exit 2。重建的紀錄只表示 transcript 裡有什麼，不能證明沒做別的事；有 hook 紀錄和 AUDIT_HEAD 錨點時，以那份為準。
 
 ## browser_check.py（2.2.0）
 

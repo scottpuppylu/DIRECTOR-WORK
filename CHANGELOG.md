@@ -6,6 +6,49 @@
 - **MINOR**：新增規則、文件、工具或選項，舊檔案照樣通過。
 - **PATCH**：修正文字、修 bug，規則不變。
 
+## 2.2.1 — 2026-11-14
+
+PATCH（版本號照總監的工單）：依 DeepSeek 版與 2.2.0 的比較報告 A 節，修 `report_vs_audit` 的截斷 bug，`setup_check` 多查三個檔案（shadow），新增從 transcript 重建動作紀錄的工具。照上面的定義，新增工具和選項（`transcript_audit.py`、`setup_check --strict`）算 MINOR；版本號是否改成 2.3.0 待總監決定。舊檔案、舊紀錄照樣能讀；結果會變的只有 `report_vs_audit` 原本判錯的幾類（下面）。
+
+### report_vs_audit.py：截斷的紀錄行（bug）與指令比對
+
+- bug：紀錄的 `input` 超過 500 字時被截成 `…` 結尾。2.2.0 直接用文字切出 command，`\"` 和 `\\` 沒有還原，含引號或反斜線路徑的長 Windows 指令永遠比不到。2.2.1 照 JSON 規則把截斷的字串解回來；只有「字串沒收尾、行尾是 `…`」才當成截斷。
+- 比對加強：去掉 `&`、`cmd /c`、啟動程式（python、py、pwsh、powershell、node、bash 等）和它的啟動旗標；`...`、`…`、`<名稱>` 當萬用字；單一檔名可以對到以它結尾的較長路徑；靠詞比對時至少要 2 個實詞，只寫啟動程式或只有萬用字不算證明；只比 Bash / PowerShell 的紀錄。
+- 紀錄有 `kind=rebuild` 行（`transcript_audit.py` 重建的）時多印 `~ note: a log was rebuilt from a transcript ...`。
+- 結果會變：21 個案例，2.2.0 判對 10 個，2.2.1 判對 21 個。其中 2.2.0 把只寫 `python -I -X utf8` 的主張判成 PASS（假通過），2.2.1 判 FAIL。
+
+### setup_check.py：PO_PENDING、RESUME 表頭、director_work.json（shadow）
+
+- 給資料夾、或檔名是 `DIRECTOR_STATE.md` 時，連旁邊三個檔案一起查。
+  - `PO_PENDING.md`：每筆的 ID、STATUS、QUESTION、OPTIONS、RECOMMENDED、SOURCE、ANSWER 各一次；STATUS 合法；answered / closed 要有真的答案；ID 不重複。
+  - `RESUME_STATE.md`：前四行依序是 PROGRESS、DOING、NEXT_STEP、COMMS 而且有填；UPDATED 有日期（和 `gate_check.py --resume` 同一條規則）。
+  - `director_work.json`：JSON 物件、`schema_version` 1、已知鍵的型別和值、`*_pattern` 是合法正規式；不認得的鍵只印提示。
+- 先 shadow：問題印成 `  ~ shadow: ...`，exit code 只看待決頁兩行（和 2.2.0 相同）；加 `--strict` 才算失敗。檔案還沒產生只印提示。
+- 已知：從範本複製、還沒填的資料夾會看到 shadow 提示（PO_PENDING 範本的範例條目、RESUME 範本的佔位）。改成 strict 之前，要先決定範本怎麼寫。
+
+### 新 tools/transcript_audit.py：從 transcript 重建動作紀錄
+
+- 沒裝 hook 做完的工作，可以從本機 Claude Code transcript（`.jsonl`，含 subagents）重建一份 hook 格式的紀錄，`audit_log.py verify` 和 `report_vs_audit.py` 照讀。欄位、遮罩、截斷都用 `audit_log.py` 的同一段程式。
+- 第 1 行是 `kind=rebuild`，記來源 transcript 的名稱、sha256、大小，以及沒有結果、重複、讀不到時間、壞行的數目，所以重建的紀錄不會被當成 hook 當時寫的。
+- 限制：`result.sha256` 算的是 transcript 裡的工具結果，和 hook 紀錄的不能互比；沒有 `duration_ms`；hook_guard 的 decision 行無法重建。transcript 格式是 Claude Code 自己的、沒有文件，格式改了會找不到工具呼叫並 exit 2。重建的紀錄只表示 transcript 裡有什麼，不能證明沒做別的事；hook 紀錄加 AUDIT_HEAD 錨點仍是較強的證據。
+- 只讀 transcript、只寫 `--out`（已存在要 `--force`）。
+
+### 遷移
+
+- 不用遷移。舊報告用 `report_vs_audit` 重跑，結果可能和 2.2.0 不同（見上）；`setup_check` 的新檢查是 shadow。
+
+### 數字
+
+- 每輪必讀（`docs/01`、`03`、`06`、`08`）沒改，仍是 9,549 bytes。
+- `selftest.py`：2.2.0 的 2,302 項 → 本版 2,391 項（+89：新增 report_vs_audit 31 項、setup_check 33 項、transcript_audit 23 項；另 2 項是既有的逐檔檢查涵蓋到新檔 transcript_audit.py，例如 py39 newline 掃描）。
+
+對齊初衷：
+1. 幫到誰：用動作紀錄核對 TASK REPORT 的總監（截斷的長指令不再誤判，只寫啟動程式不再假通過）、建置新專案的總監（三個檔案的格式問題一開始就看得到）、沒裝 hook 的專案（事後也能有一份能驗的紀錄）。依據：DeepSeek 版與 2.2.0 的比較報告 A 節。
+2. Desktop：三支都是本機命令列工具，Desktop Code 分頁的 session 照常用；沒有在真的 Desktop 流程裡全程跑過。
+3. 服務：初衷 5（成品要真的對）：核對不假通過；初衷 4（中斷不丟進度）：沒有 hook 也能事後重建紀錄；初衷 7（零成本）：只用標準庫。
+4. 核心：每輪必讀不變；新檢查先 shadow。
+5. 舊檔案和舊指令：照樣能讀；結果會變的只有 `report_vs_audit` 原本判錯的那幾類。
+
 ## 2.2.0 — 2026-11-08
 
 MINOR：GPT 對 v2.1.0 的獨立審查（`DIRECTOR-WORK-v2.1.0-review.md`，21 項發現 F01–F21，每項附重現）PO 2026-11-08 決定全部併進 2.2.0，另加「建置時強制做出待決頁並置頂」。每項由負責的 worker 修前先重現、修後再跑 `repro_dw210.py` 確認不再重現（W1–W4 的 TASK REPORT 附輸出）。新的檢查先 shadow；審查明說要改結果的幾項（F10、F11、F15 等）改了結果，列在下面「誰會從成功變成待處理」。

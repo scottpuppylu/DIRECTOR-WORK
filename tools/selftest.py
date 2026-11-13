@@ -3410,6 +3410,296 @@ def test_report_vs_audit(tmp):
         failures.append("report template: templates/TASK_REPORT.md has no CANDIDATE_ID: line")
 
 
+RVA_WIN = '"C:\\Program Files\\Python312\\python.exe" -I -X utf8 D:\\w\\tools\\build_all.py ' + "--flag " * 90 + "--end"
+RVA_UNC = "Get-FileHash \\\\server\\share\\out\\pack.zip; " + "Write-Output done; " * 40
+RVA_QUOTE = 'python -I -X utf8 tools/report.py --title "say \\"hi\\" twice" ' + "--x " * 140
+RVA_PLAIN = 'python -I -X utf8 tools/report.py --title "big title" --out "D:/w/out dir" ' + "--x " * 140
+RVA_CLOSED = "python -I -X utf8 tools/selftest.py --quick --group report_vs_audit"
+# (name, tool, tool input, claimed command, should match); the log lines are cut at 500 characters like the hook's
+RVA_221_CASES = [
+    ("cut Windows command with a quoted path", "Bash", {"command": RVA_WIN, "description": "build"},
+     '"C:\\Program Files\\Python312\\python.exe" -I -X utf8 D:\\w\\tools\\build_all.py --flag --flag', True),
+    ("cut Windows command, other slash direction", "PowerShell", {"command": RVA_WIN},
+     "C:/Program Files/Python312/python.exe -I -X utf8 D:/w/tools/build_all.py --flag", True),
+    ("cut command with a UNC backslash path", "PowerShell", {"command": RVA_UNC},
+     "Get-FileHash \\\\server\\share\\out\\pack.zip", True),
+    ("cut UNC path, wrong file", "PowerShell", {"command": RVA_UNC}, "Get-FileHash \\\\server\\share\\out\\other.zip", False),
+    ("cut command with quotes", "Bash", {"command": RVA_PLAIN},
+     'tools/report.py --title "big title" --out "D:/w/out dir" --x --x', True),
+    ("quotes, wrong title", "Bash", {"command": RVA_PLAIN}, 'tools/report.py --title "small title"', False),
+    ("cut command with shell-escaped quotes, claimed as typed", "Bash", {"command": RVA_QUOTE},
+     'python -I -X utf8 tools/report.py --title "say \\"hi\\" twice" --x', True),
+    ("escaped quotes, wrong title", "Bash", {"command": RVA_QUOTE}, 'tools/report.py --title "say bye twice"', False),
+    ("closed command in a cut line: same command", "Bash", {"command": RVA_CLOSED, "description": "d " * 300},
+     RVA_CLOSED, True),
+    ("closed command in a cut line: a longer claim is not a prefix match", "Bash",
+     {"command": RVA_CLOSED, "description": "d " * 300}, RVA_CLOSED + " --full", False),
+    ("launcher and startup flags dropped", "Bash", {"command": RVA_CLOSED}, "py tools\\selftest.py --quick", True),
+    ("leading & of PowerShell dropped", "PowerShell", {"command": '& "C:\\Py\\python.exe" -I tools\\selftest.py --quick'},
+     "python tools/selftest.py --quick", True),
+    ("a file name matches a longer path", "PowerShell", {"command": "Get-FileHash D:\\w\\out\\pack.zip"},
+     "Get-FileHash pack.zip", True),
+    ("a file name does not match a different file", "PowerShell", {"command": "Get-FileHash D:\\w\\out\\pack.zip"},
+     "Get-FileHash ack.zip", False),
+    ("... skips words", "Bash", {"command": RVA_WIN}, "build_all.py ... --flag", True),
+    ("<name> skips words", "Bash", {"command": RVA_CLOSED}, "tools/selftest.py <mode> --group report_vs_audit", True),
+    ("one real word with wildcards proves nothing", "Bash", {"command": RVA_CLOSED}, "... selftest.py", False),
+    ("only wildcards prove nothing", "Bash", {"command": RVA_CLOSED}, "... <x> ...", False),
+    ("words out of order do not match", "Bash", {"command": RVA_CLOSED}, "--group tools/selftest.py", False),
+    ("a launcher alone is not a claim", "Bash", {"command": RVA_CLOSED}, "python -I -X utf8", False),
+    ("only Bash / PowerShell lines count", "Agent", {"command": RVA_CLOSED}, "tools/selftest.py --quick", False)]
+
+
+def rva_wrong(module, audit):
+    """Names of the RVA_221_CASES that report_vs_audit's matches() gets wrong."""
+    return [name for name, tool, data, claim, want in RVA_221_CASES
+            if bool(module.matches({"command": claim}, {"tool": tool, "input": audit.summary(data)})) != want]
+
+
+def test_report_vs_audit_221(tmp):
+    """2.2.1: a cut log line's command is decoded as JSON (escaped quotes and backslashes put back), so long Windows
+    commands with quoted or backslash paths match; launchers are dropped, ... / <name> skip words, a file name matches a
+    longer path, and a word match needs 2 real words. End to end through the CLI, in process, and mutation tested."""
+    global total
+    folder = tmp / "rva221"
+    folder.mkdir()
+    spec = importlib.util.spec_from_file_location("audit_log_for_rva221", TOOLS / "audit_log.py")
+    audit = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(audit)
+    total += 1
+    cut = [name for name, _, data, _, _ in RVA_221_CASES[:10] if not audit.summary(data).endswith("…")]
+    if cut:
+        failures.append(f"report_vs_audit 2.2.1: these log lines are not cut, so they test nothing: {cut}")
+
+    def write(path, rows, rebuild=False):
+        prev, out = audit.GENESIS, []
+        if rebuild:
+            rows = [(None, None, "", "rebuild", "rebuilt")] + rows
+        for seq, (session, tool, data, kind, status) in enumerate(rows, 1):
+            entry = {"seq": seq, "ts": f"2026-11-14T03:{seq:02d}:00.000+00:00", "session_id": session, "agent_id": None,
+                     "tool": tool, "tool_use_id": f"t{seq}" if tool else None,
+                     "input": audit.summary(data) if tool else "", "kind": kind, "result": {"status": status},
+                     "duration_ms": None, "prev": prev}
+            if kind == "rebuild":
+                entry["source"] = {"by": "selftest"}
+            entry["hash"] = audit.digest(entry)
+            prev = entry["hash"]
+            out.append(entry)
+        path.write_text("".join(audit.canonical(e) + "\n" for e in out), encoding="utf-8")
+
+    rows = [("S1", tool, data, "result", "ok") for _, tool, data, _, _ in RVA_221_CASES]
+    log, rebuilt = folder / "a.jsonl", folder / "rebuilt.jsonl"
+    write(log, rows)
+    write(rebuilt, rows, rebuild=True)
+    for n, (name, tool, _, claim, want) in enumerate(RVA_221_CASES):
+        if tool not in ("Bash", "PowerShell"):
+            continue  # in one shared log another line would match; checked in process below
+        expect(f"report_vs_audit 2.2.1 CLI: {name}", "report_vs_audit.py", 0 if want else 1, "--report",
+               _write_text(folder / f"r{n}.md", f"SESSION_ID: S1\nRAN: `{claim}` exit=0\n"),
+               "--log", log, says=["REPORT_VS_AUDIT: PASS" if want else "not run in session S1"],
+               lacks=["rebuilt from a transcript"])
+    report = _write_text(folder / "rebuilt.md", f"SESSION_ID: S1\nRAN: `{RVA_CLOSED}` exit=0\n")
+    expect("report_vs_audit 2.2.1: a rebuilt log is read and noted", "report_vs_audit.py", 0, "--report", report,
+           "--log", rebuilt, says=["~ note: a log was rebuilt from a transcript", "REPORT_VS_AUDIT: PASS claims=1 ok=1"])
+    real = mutant(TOOLS / "report_vs_audit.py", [], "report_vs_audit_real")
+    total += 1
+    if real is None or rva_wrong(real, audit):
+        failures.append(f"report_vs_audit 2.2.1 in process gets cases wrong: {real and rva_wrong(real, audit)}")
+    for name, swaps in [
+            ("no JSON decoding of a cut line", [("        text, closed = json_string_prefix(body[found.end():])\n",
+                                                 "        text, closed = body[found.end():], False\n")]),
+            ("the 2.2.0 slash-and-quote norm only", [("    want, have = canonical_command(claim[\"command\"]), "
+                                                      "canonical_command(command)\n",
+                                                      "    want, have = norm(claim[\"command\"]), norm(command)\n")]),
+            ("a closed command still counts as cut", [('        return text, not closed and raw.endswith("…")\n',
+                                                       '        return text, raw.endswith("…")\n')]),
+            ("no launcher drop", [("    if parts and LAUNCHER.search(parts[0]):\n", "    if False:\n")]),
+            ("no path-suffix word", [('    return claim_word == log_word or log_word.endswith("/" + claim_word.lstrip("/"))\n',
+                                      "    return claim_word == log_word\n")]),
+            ("no 2-word guard", [("MIN_WORDS = 2  #", "MIN_WORDS = 0  #")]),
+            ("no wildcard", [('WILDCARD = re.compile(r"^(?:\\.{2,}|…|<[^<>]+>)$")', 'WILDCARD = re.compile(r"^$")')]),
+            ("no shell-tool check", [('    if str(entry.get("tool") or "").lower() not in SHELL_TOOLS:\n',
+                                      "    if False:\n")])]:
+        module = mutant(TOOLS / "report_vs_audit.py", swaps, "report_vs_audit_mutant")
+        killed(f"report_vs_audit 2.2.1 {name}", module is None or rva_wrong(module, audit))
+
+
+def _write_text(path, text):
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+TA_SECRET = "ghp_" + "Ab1" * 12  # synthetic, built at run time; secret_mask's github_token shape
+TA_INPUTS = {"u1": {"command": "python -I -X utf8 tools/selftest.py --quick"},
+             "u2": {"file_path": "D:/w/notes.md"},
+             "u3": {"command": f"git push https://x:{TA_SECRET}@example.invalid/r.git --token {TA_SECRET}"},
+             "u4": {"command": "sleep 999"}, "u5": {"command": "python long_job.py"}, "u6": {"command": "echo no time"},
+             "u7": {"command": "git status --short"}}
+TA_ORDER = ["u1", "u7", "u2", "u3", "u5"]  # by result time; u4 has no result, u6 no readable time
+
+
+def ta_transcripts(folder):
+    """A synthetic main transcript (folder/S1.jsonl) and one subagent transcript beside it; no real user data."""
+    def use(key, tool):
+        return {"type": "tool_use", "id": key, "name": tool, "input": TA_INPUTS[key], "caller": {"type": "direct"}}
+
+    def said(*blocks, **extra):
+        return dict({"type": "assistant", "sessionId": "S1", "timestamp": "2026-11-14T03:00:00.000Z",
+                     "message": {"role": "assistant", "content": list(blocks)}}, **extra)
+
+    def answer(ts, *results, **extra):
+        return dict({"type": "user", "sessionId": "S1", "timestamp": ts,
+                     "message": {"role": "user", "content": list(results)}}, **extra)
+
+    def result(key, content, error=False):
+        return {"type": "tool_result", "tool_use_id": key, "content": content, "is_error": error}
+
+    blob = {"type": "tool_use", "id": "uB", "name": "Bash", "input": {"command": "blob copy"}}
+    main = [said(use("u1", "Bash")),
+            {"type": "api-request-blob", "message": {"content": [blob]}},
+            {"type": "api-request-blob", "message": {"content": [result("uB", "blob out")]},
+             "timestamp": "2026-11-14T03:00:01.500Z"},
+            answer("2026-11-14T03:00:01.000Z", result("u1", "ok 12/12"),
+                   toolUseResult={"stdout": "ok 12/12", "stderr": "", "interrupted": False}),
+            "not json {",
+            said(use("u2", "Read"), use("u3", "Bash"), use("u4", "Bash")),
+            answer("2026-11-14T03:00:03.000Z", result("u2", [{"type": "text", "text": "line one"}]),
+                   result("u3", "Exit code 128\nfatal: denied", error=True), toolUseResult={"wrong": "for two"}),
+            said(use("u5", "Bash")),
+            answer("2026-11-14T03:00:04.000Z", result("u5", "[Request interrupted by user for tool use]", error=True)),
+            said(use("u1", "Bash")), answer("2026-11-14T03:00:05.000Z", result("u1", "again")),
+            said(use("u6", "Bash")), answer("yesterday", result("u6", "x"))]
+    sub = [dict(said(use("u7", "Bash")), agentId="ag1"),
+           answer("2026-11-14T03:00:02.000Z", result("u7", "clean"), agentId="ag1", toolUseResult={"stdout": "clean"})]
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "S1" / "subagents").mkdir(parents=True, exist_ok=True)
+    for path, rows in ((folder / "S1.jsonl", main), (folder / "S1" / "subagents" / "agent-ag1.jsonl", sub)):
+        path.write_text("".join((row if isinstance(row, str) else json.dumps(row)) + "\n" for row in rows),
+                        encoding="utf-8")
+    return folder / "S1.jsonl"
+
+
+def ta_wrong(path, audit):
+    """What a rebuilt log at PATH gets wrong for ta_transcripts (empty when right)."""
+    try:
+        entries = [json.loads(line) for line in pathlib.Path(path).read_text(encoding="utf-8").splitlines()]
+    except (OSError, ValueError) as error:
+        return [f"not readable: {error}"]
+    wrong = []
+    first, rows = entries[0], entries[1:]
+    hook_keys = set(audit.hook_entry({"hook_event_name": "PostToolUse", "tool_name": "Bash"})) | {"seq", "ts", "prev",
+                                                                                                    "hash"}
+    if first.get("kind") != "rebuild" or (first.get("source") or {}).get("by") != "transcript_audit.py":
+        wrong.append("line 1 is not the rebuild line")
+    source = first.get("source") or {}
+    if [source.get(k) for k in ("lines", "no_result", "duplicates", "no_time", "bad_lines")] != [5, 1, 2, 1, 1]:
+        wrong.append(f"source counts {source}")
+    if [e.get("tool_use_id") for e in rows] != TA_ORDER:
+        wrong.append(f"order {[e.get('tool_use_id') for e in rows]}")
+    for e in rows:
+        if set(e) != hook_keys:
+            wrong.append(f"{e.get('tool_use_id')} keys {sorted(set(e) ^ hook_keys)}")
+        if e.get("input") != audit.summary(TA_INPUTS.get(e.get("tool_use_id"))):
+            wrong.append(f"{e.get('tool_use_id')} input is not audit_log.summary")
+    want = {"u1": ("result", audit.output_record("ok", {"stdout": "ok 12/12", "stderr": "", "interrupted": False})),
+            "u7": ("result", audit.output_record("ok", {"stdout": "clean"})),
+            "u2": ("result", audit.output_record("ok", [{"type": "text", "text": "line one"}])),
+            "u3": ("failure", audit.output_record("error", "Exit code 128\nfatal: denied")),
+            "u5": ("failure", audit.output_record("interrupted", "[Request interrupted by user for tool use]"))}
+    for e in rows:
+        if (e.get("kind"), e.get("result")) != want.get(e.get("tool_use_id")):
+            wrong.append(f"{e.get('tool_use_id')} kind / result {e.get('kind')} {e.get('result')}")
+    agents = {e.get("tool_use_id"): (e.get("session_id"), e.get("agent_id")) for e in rows}
+    if agents.get("u7") != ("S1", "ag1") or agents.get("u1") != ("S1", None):
+        wrong.append(f"session / agent {agents}")
+    if TA_SECRET in pathlib.Path(path).read_text(encoding="utf-8"):
+        wrong.append("the secret is in the log")
+    return wrong
+
+
+def test_transcript_audit(tmp):
+    """2.2.1: transcript_audit.py rebuilds a hook-format log from synthetic transcripts (main + subagent): same keys as
+    the hook, input = audit_log.summary (masked), failure / interrupted from is_error, api-request copies skipped, no
+    result / duplicates / no time / bad lines counted, sorted by result time; the chain verifies and report_vs_audit
+    reads it with a note. Refusals, lookup by --session, and mutation tests."""
+    import argparse
+    import contextlib
+    import io
+    global total
+    folder = tmp / "ta221"
+    project = folder / "My Project_1"
+    project.mkdir(parents=True)
+    root = folder / "projects"
+    main_t = ta_transcripts(root / re.sub(r"[^A-Za-z0-9]", "-", str(project.resolve())))
+    spec = importlib.util.spec_from_file_location("audit_log_for_ta221", TOOLS / "audit_log.py")
+    audit = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(audit)
+    out = folder / "out" / "rebuilt.jsonl"
+    expect("transcript_audit build", "transcript_audit.py", 0, "build", "--out", out, "--transcript", main_t,
+           says=["TRANSCRIPT_AUDIT file=", "lines=5 sessions=1 no_result=1 duplicates=2 no_time=1", "AUDIT_HEAD file=",
+                 " seq=6 sha="])
+    total += 1
+    wrong = ta_wrong(out, audit)
+    if wrong:
+        failures.append(f"transcript_audit rebuilt log is wrong: {wrong}")
+    expect("transcript_audit log verifies", "audit_log.py", 0, "verify", "--log", out, says="entries=6 head_seq=6 OK")
+    report = _write_text(folder / "r_pass.md", "SESSION_ID: S1\nRAN: `tools/selftest.py --quick` exit=0\n")
+    expect("transcript_audit log: report_vs_audit PASS with a note", "report_vs_audit.py", 0, "--report", report,
+           "--log", out, says=["~ note: a log was rebuilt from a transcript", "REPORT_VS_AUDIT: PASS claims=1 ok=1"])
+    report = _write_text(folder / "r_fail.md", "SESSION_ID: S1\nRAN: `tools/build_all.py --release` exit=0\n")
+    expect("transcript_audit log: report_vs_audit FAIL for a command not run", "report_vs_audit.py", 1, "--report",
+           report, "--log", out, says="not run in session S1")
+    expect("transcript_audit refuses an existing --out", "transcript_audit.py", 1, "build", "--out", out,
+           "--transcript", main_t, says="REFUSED")
+    expect("transcript_audit --force replaces", "transcript_audit.py", 0, "build", "--out", out, "--force",
+           "--transcript", main_t, says="lines=5")
+    expect("transcript_audit no transcript", "transcript_audit.py", 2, "build", "--out", folder / "x.jsonl",
+           "--transcript", folder / "missing.jsonl", says="NOT_RUN no transcript")
+    expect("transcript_audit no tool call", "transcript_audit.py", 2, "build", "--out", folder / "y.jsonl",
+           "--transcript", _write_text(folder / "empty.jsonl", '{"type": "user", "message": {"content": "hi"}}\n'),
+           says="NOT_RUN no tool call")
+    expect("transcript_audit bad --session", "transcript_audit.py", 2, "build", "--out", folder / "z.jsonl",
+           "--session", "../S1", says="NOT_RUN --session")
+    expect("transcript_audit --session lookup", "transcript_audit.py", 0, "build", "--out", folder / "s.jsonl",
+           "--session", "S1", "--root", root, "--project-dir", project, says="lines=5 sessions=1")
+    expect("transcript_audit --no-subagents", "transcript_audit.py", 0, "build", "--out", folder / "n.jsonl",
+           "--session", "S1", "--root", root, "--project-dir", project, "--no-subagents", says="lines=4")
+    for path in (folder / "x.jsonl", folder / "y.jsonl", folder / "z.jsonl"):
+        total += 1
+        if path.exists():
+            failures.append(f"transcript_audit wrote {path.name} although it could not run")
+
+    def rebuilt_wrong(module, name):
+        target = folder / "mut" / f"{name}.jsonl"
+        a = argparse.Namespace(out=str(target), force=True, transcript=[str(main_t)], session=None, project_dir=None,
+                               root=str(root), no_subagents=False)
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = module.build(a)
+        except Exception as error:  # a mutant that crashes is a wrong answer
+            return [f"crashed: {type(error).__name__}"]
+        return [f"exit {code}"] if code != 0 else ta_wrong(target, audit)
+
+    real = mutant(TOOLS / "transcript_audit.py", [], "transcript_audit_real")
+    total += 1
+    if real is None or rebuilt_wrong(real, "real"):
+        failures.append(f"transcript_audit in process is wrong: {real and rebuilt_wrong(real, 'real')}")
+    for n, (name, swaps) in enumerate([
+            ("no masking", [('"input": audit.summary(call["input"])', '"input": audit.text_of(call["input"])')]),
+            ("is_error ignored", [('"is_error": result.get("is_error") is True', '"is_error": False')]),
+            ("api-request copies read", [('    if line.get("type") == "assistant":\n',
+                                          '    if line.get("type") != "user":\n'),
+                                         ('    elif line.get("type") == "user":\n',
+                                          '    if line.get("type") != "assistant":\n')]),
+            ("no interrupt status", [('"interrupted" if text.startswith(INTERRUPT) else "error"', '"error"')]),
+            ("not sorted by time", [("    rows.sort(key=lambda row: (row[0], row[1]))\n", "    pass\n")]),
+            ("toolUseResult used for several results", [('single = len(found) == 1 and "toolUseResult" in line',
+                                                         'single = "toolUseResult" in line')]),
+            ("a repeated id replaces the first", [("            if key in results:\n", "            if False:\n")])]):
+        module = mutant(TOOLS / "transcript_audit.py", swaps, "transcript_audit_mutant")
+        killed(f"transcript_audit {name}", module is None or rebuilt_wrong(module, f"m{n}"))
+
+
 def test_audit_names(tmp):
     """K6: {worktree} and {container} in the log path, filled in when the command runs; one chain per file."""
     global total
@@ -6215,6 +6505,186 @@ def test_setup_check(tmp):
         killed(f"setup_check {name}", module is None or setup_wrong(module.check_setup))
 
 
+PO_ENTRY = ("ID: OD-01\nCREATED: 2026-11-14 03:00 +08:00\nSTATUS: open\nQUESTION: 哪個配色？\nOPTIONS: A 藍 / B 綠\n"
+            "RECOMMENDED: A，比較清楚\nIMAGES: NONE\nSOURCE: NONE\nANSWER:\nRESOLUTION:\n")
+PO_ANSWERED = PO_ENTRY.replace("OD-01", "OD-02").replace("STATUS: open", "STATUS: answered").replace(
+    "SOURCE: NONE", "SOURCE: 聊天").replace("ANSWER:\n", "ANSWER: A\n")
+# (name, PO_PENDING.md text, has a problem)
+SETUP_PO_CASES = [
+    ("one open entry", "# PO 待決頁\n\n## 未關閉\n\n" + PO_ENTRY, False),
+    ("open and answered", "## 未關閉\n" + PO_ENTRY + "\n" + PO_ANSWERED, False),
+    ("no entry yet", "# PO 待決頁\n## 未關閉\n## 已關閉\n", False),
+    ("an ACT entry with a code span", PO_ENTRY.replace("OD-01", "ACT-01").replace("哪個配色？", "請跑 `<WS>/x.py`"), False),
+    ("no CREATED is only a note", PO_ENTRY.replace("CREATED: 2026-11-14 03:00 +08:00\n", ""), False),
+    ("an ID that is not OD / ACT is only a note", "ID: X-1\nSTATUS: whatever\n", False),
+    ("OPTIONS missing", PO_ENTRY.replace("OPTIONS: A 藍 / B 綠\n", ""), True),
+    ("SOURCE missing", PO_ENTRY.replace("SOURCE: NONE\n", ""), True),
+    ("ANSWER missing", PO_ENTRY.replace("ANSWER:\n", ""), True),
+    ("STATUS not a known value", PO_ENTRY.replace("STATUS: open", "STATUS: pending"), True),
+    ("STATUS twice", PO_ENTRY.replace("STATUS: open\n", "STATUS: open\nSTATUS: closed\n"), True),
+    ("QUESTION placeholder", PO_ENTRY.replace("哪個配色？", "<一句話>"), True),
+    ("RECOMMENDED empty", PO_ENTRY.replace("RECOMMENDED: A，比較清楚", "RECOMMENDED:"), True),
+    ("SOURCE placeholder", PO_ENTRY.replace("SOURCE: NONE", "SOURCE: <回覆從哪來>"), True),
+    ("answered without an answer", PO_ANSWERED.replace("ANSWER: A", "ANSWER:"), True),
+    ("closed with ANSWER NONE", PO_ANSWERED.replace("answered", "closed").replace("ANSWER: A", "ANSWER: NONE"), True),
+    ("the same ID twice", PO_ENTRY + "\n" + PO_ENTRY, True),
+    ("a field after a heading is not the entry's", PO_ENTRY.replace("ANSWER:\n", "") + "## 已關閉\nANSWER: A\n", True),
+    ("the template entry left as it is", "## 未關閉\n\nID: OD-01（要 PO 決定）或 ACT-01（要 PO 動手）\nCREATED: <date>\n"
+     "STATUS: open | answered | closed\nQUESTION: <一句話>\nOPTIONS: <A / B / C>\nRECOMMENDED: <建議>\n"
+     "SOURCE: <回覆從哪來>\nANSWER: <PO 填>\n", True)]
+RESUME_OK = "PROGRESS: 做完 1\nDOING: 2\nNEXT_STEP: 跑 3\nCOMMS: NONE\n\n# RESUME_STATE — T1\nUPDATED: 2026-11-14 03:00 +08:00\n"
+SETUP_RESUME_CASES = [
+    ("header in order", RESUME_OK, False),
+    ("blank lines before the header", "\n\n" + RESUME_OK, False),
+    ("DOING before PROGRESS", RESUME_OK.replace("PROGRESS: 做完 1\nDOING: 2\n", "DOING: 2\nPROGRESS: 做完 1\n"), True),
+    ("COMMS missing", RESUME_OK.replace("COMMS: NONE\n", ""), True),
+    ("COMMS empty", RESUME_OK.replace("COMMS: NONE", "COMMS:"), True),
+    ("a title line first", "# RESUME\n" + RESUME_OK, True),
+    ("NEXT_STEP placeholder", RESUME_OK.replace("跑 3", "<精確動作>"), True),
+    ("no UPDATED date", RESUME_OK.replace("2026-11-14 03:00 +08:00", "today"), True)]
+SETUP_CONFIG_CASES = [
+    ("empty object", "{}", False),
+    ("a full good config", json.dumps({"_comment": "x", "schema_version": 1, "mode": "beginner", "window": 250000,
+                                       "plugins_off": ["a@b"], "backup_dir": None, "skip_worktrees": [], "hooks": True,
+                                       "guard_profile": "director", "guard_mode": "block", "audit_log": "x/{worktree}.jsonl",
+                                       "trace_id_pattern": "^(B|DD)-\\d+$", "po_pending_files": ["PO_PENDING.md"]}), False),
+    ("the example plugin and an unknown key are notes", '{"plugins_off": ["example-plugin@example-marketplace"], "windw": 1}',
+     False),
+    ("not JSON", "{window: 250000}", True),
+    ("a list, not an object", "[1]", True),
+    ("schema_version 2", '{"schema_version": 2}', True),
+    ("schema_version true", '{"schema_version": true}', True),
+    ("window too small", '{"window": 50000}', True),
+    ("window as text", '{"window": "250000"}', True),
+    ("mode unknown", '{"mode": "expert"}', True),
+    ("plugin without @", '{"plugins_off": ["foo"]}', True),
+    ("plugins_off a string", '{"plugins_off": "a@b"}', True),
+    ("guard_profile unknown", '{"guard_profile": "admin"}', True),
+    ("guard_mode unknown", '{"guard_mode": "deny"}', True),
+    ("backup_dir a number", '{"backup_dir": 3}', True),
+    ("skip_worktrees a string", '{"skip_worktrees": "wt"}', True),
+    ("hooks as text", '{"hooks": "yes"}', True),
+    ("trace_id_pattern not a regex", '{"trace_id_pattern": "(B|DD"}', True),
+    ("po_open_pattern a number", '{"po_open_pattern": 1}', True)]
+
+
+def setup_221_wrong(module):
+    """Names of the 2.2.1 setup_check cases a module gets wrong."""
+    sets = [(module.check_po_pending, SETUP_PO_CASES), (module.check_resume_header, SETUP_RESUME_CASES),
+            (module.check_config, SETUP_CONFIG_CASES)]
+    def wrong(check, text, bad):
+        try:
+            return bool(check(text, [])) != bad
+        except Exception:  # a crash is a wrong answer too
+            return True
+
+    return [name for check, cases in sets for name, text, bad in cases if wrong(check, text, bad)]
+
+
+def test_setup_check_221(tmp):
+    """2.2.1: setup_check.py also checks PO_PENDING.md entries, the RESUME_STATE.md header (gate_check's rule) and
+    director_work.json beside DIRECTOR_STATE.md; shadow notes by default, failures with --strict, a file not there yet
+    is a note. Each rule mutation tested; the shipped templates and example are checked as they are."""
+    global total
+    folder = tmp / "setup_check_221"
+    real = mutant(TOOLS / "setup_check.py", [], "setup_check_221_real")
+    total += 1
+    if real is None or setup_221_wrong(real):
+        failures.append(f"setup_check 2.2.1 in process gets cases wrong: {real and setup_221_wrong(real)}")
+    if real is not None:
+        notes = []
+        real.check_po_pending("ID: X-1\n", notes)
+        check("setup_check 2.2.1: an ID that is not OD / ACT is a note", any("not OD-xx" in n for n in notes), str(notes))
+        notes = []
+        real.check_config('{"plugins_off": ["example-plugin@m"], "windw": 1}', notes)
+        check("setup_check 2.2.1: example plugin and unknown key notes",
+              any("example-plugin@m" in n for n in notes) and any("windw" in n for n in notes), str(notes))
+        example = (TOOLS.parent / "director_work.example.json").read_text(encoding="utf-8")
+        check("setup_check 2.2.1: director_work.example.json has no problem", real.check_config(example, []) == [],
+              str(real.check_config(example, [])))
+        for name, check_fn in (("templates/PO_PENDING.md", real.check_po_pending),
+                               ("templates/RESUME_STATE.md", real.check_resume_header)):
+            text = (TOOLS.parent / name).read_text(encoding="utf-8")
+            check(f"setup_check 2.2.1: the unfilled {name} is caught", bool(check_fn(text, [])))
+    good = folder / "good" / "DIRECTOR"
+    good.mkdir(parents=True)
+    (good / "DIRECTOR_STATE.md").write_text(SETUP_CASES[0][1], encoding="utf-8")
+    (good / "PO_PENDING.md").write_text("## 未關閉\n" + PO_ENTRY, encoding="utf-8")
+    (good / "RESUME_STATE.md").write_text(RESUME_OK, encoding="utf-8")
+    (good / "director_work.json").write_text('{"schema_version": 1, "window": 250000}', encoding="utf-8")
+    expect("setup_check 2.2.1: a good folder passes --strict", "setup_check.py", 0, "--strict", good,
+           says="OK   setup", lacks=["shadow", "not there yet"])
+    bad = folder / "bad" / "DIRECTOR"
+    bad.mkdir(parents=True)
+    for name in ("DIRECTOR_STATE.md", "director_work.json"):
+        (bad / name).write_text((good / name).read_text(encoding="utf-8"), encoding="utf-8")
+    (bad / "PO_PENDING.md").write_text(PO_ENTRY.replace("STATUS: open", "STATUS: pending"), encoding="utf-8")
+    (bad / "RESUME_STATE.md").write_text("DOING: x\n" + RESUME_OK, encoding="utf-8")
+    expect("setup_check 2.2.1: shadow by default (notes, exit unchanged)", "setup_check.py", 0, bad,
+           says=["OK   setup", "~ shadow: PO_PENDING OD-01 (line 1): STATUS", "~ shadow: RESUME_STATE: line 1"])
+    expect("setup_check 2.2.1: --strict fails on the same folder", "setup_check.py", 1, "--strict", bad,
+           says=["FAIL setup", "  - PO_PENDING OD-01 (line 1): STATUS", "  - RESUME_STATE: line 1"], lacks="~ shadow")
+    expect("setup_check 2.2.1: --strict, state file given by name", "setup_check.py", 1, "--strict",
+           bad / "DIRECTOR_STATE.md", says="  - RESUME_STATE: line 1")
+    (bad / "director_work.json").write_text("{", encoding="utf-8")
+    expect("setup_check 2.2.1: --strict, broken director_work.json", "setup_check.py", 1, "--strict", bad,
+           says="  - director_work.json: not JSON")
+    only = folder / "only" / "DIRECTOR"
+    only.mkdir(parents=True)
+    (only / "DIRECTOR_STATE.md").write_text(SETUP_CASES[0][1], encoding="utf-8")
+    expect("setup_check 2.2.1: files not there yet are a note, even with --strict", "setup_check.py", 0, "--strict",
+           only, says=["OK   setup", "~ not checked, not there yet: PO_PENDING.md, RESUME_STATE.md, director_work.json"])
+    other = folder / "other.md"
+    other.write_text(SETUP_CASES[0][1], encoding="utf-8")
+    expect("setup_check 2.2.1: a state file with another name checks only the PO page", "setup_check.py", 0, "--strict",
+           other, says="OK   setup", lacks="not there yet")
+    for name, swaps in [
+            ("PO: no missing-field check", [('                problems.append(f"{label}: {key}: line missing")\n',
+                                             "                pass\n")]),
+            ("PO: no repeated-field check", [("            elif len(fields[key]) > 1:\n", "            elif False:\n")]),
+            ("PO: no STATUS value check", [('        if "STATUS" in fields and status not in PO_STATUSES:\n',
+                                            "        if False:\n")]),
+            ("PO: no filled-in check", [('                filled(f"{label}: {key}", fields[key][0], problems)\n',
+                                         "                pass\n")]),
+            ("PO: no SOURCE check", [('            filled(f"{label}: SOURCE (or NONE)", fields["SOURCE"][0], problems)\n',
+                                      "            pass\n")]),
+            ("PO: no answer check", [('        if status in ("answered", "closed") and not real_answer(answer):\n',
+                                      "        if False:\n")]),
+            ("PO: no repeated-ID check", [('        if entry["id"] in seen:\n', "        if False:\n")]),
+            ("PO: a heading does not end the entry", [("            section, current = heading.group(1), None\n",
+                                                       "            section = heading.group(1)\n")]),
+            ("RESUME: no header check", [('    return [f"RESUME_STATE: {problem}" for problem in '
+                                          'neighbour("gate_check").check_resume(text, notes)]\n', "    return []\n")]),
+            ("config: no object check", [("    if not isinstance(data, dict):\n", "    if False:\n")]),
+            ("config: no schema_version check", [("    if version != settings.CONFIG_VERSION or isinstance(version, bool):\n",
+                                                  "    if False:\n")]),
+            ("config: no mode check", [('    if "mode" in data and data["mode"] not in CONFIG_MODES:\n', "    if False:\n")]),
+            ("config: no window check", [('    if "window" in data and (not isinstance', "    if False and (not isinstance")]),
+            ("config: no plugin name check", [('            elif "@" not in name:\n', "            elif False:\n")]),
+            ("config: no profile / mode values", [("        if data.get(key) is not None and data[key] not in allowed:\n",
+                                                   "        if False:\n")]),
+            ("config: no path type check", [("        if data.get(key) is not None and not isinstance(data[key], str):\n",
+                                             "        if False:\n")]),
+            ("config: no list type check", [("        if key in data and not (isinstance(data[key], list)",
+                                             "        if False and (isinstance(data[key], list)")]),
+            ("config: no bool type check", [("        if key in data and not isinstance(data[key], bool):\n",
+                                             "        if False:\n")]),
+            ("config: no regex check", [("        if data.get(key) is not None and pattern_problem(key, data[key]):\n",
+                                         "        if False:\n")])]:
+        module = mutant(TOOLS / "setup_check.py", swaps, "setup_check_221_mutant")
+        killed(f"setup_check 2.2.1 {name}", module is None or setup_221_wrong(module))
+    module = mutant(TOOLS / "setup_check.py", [("            if a.strict:\n", "            if False:\n")],
+                    "setup_check_221_strict")
+    if module is not None:
+        with open(os.devnull, "w", encoding="utf-8") as sink:
+            saved, sys.stdout = sys.stdout, sink
+            try:
+                code = module.main(["--strict", str(bad)])
+            finally:
+                sys.stdout = saved
+    killed("setup_check 2.2.1 --strict does nothing", module is None or code == 0)
+
+
 def test_status_po_page_missing(tmp):
     """2.2.0 MUST 6 (shadow): the Director status.py prints `~ PO_PAGE_MISSING` when DIRECTOR_STATE.md beside the PO
     page (or po_page.state) has no PO_PAGE_URL line, and the exit code stays the same. Mutation tested on the script."""
@@ -7213,6 +7683,8 @@ def main():
         guarded(test_audit, tmp)
         guarded(test_audit_names, tmp)
         guarded(test_report_vs_audit, tmp)
+        guarded(test_report_vs_audit_221, tmp)
+        guarded(test_transcript_audit, tmp)
         guarded(test_review, tmp)
         guarded(test_guard_modes, tmp)
         guarded(test_doctor, tmp)
@@ -7250,6 +7722,7 @@ def main():
         guarded(test_po_page_docs)
         guarded(test_first_step_docs)
         guarded(test_setup_check, tmp)
+        guarded(test_setup_check_221, tmp)
         guarded(test_status_po_page_missing, tmp)
         guarded(test_audit_mask_tree, tmp)
         guarded(test_mask_leaks_v22)

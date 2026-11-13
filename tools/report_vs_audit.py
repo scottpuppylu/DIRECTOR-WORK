@@ -15,10 +15,16 @@ Claims come from two places in the report:
     PASS / OK / 通過 there means exit 0.
 
 The session is --session, else the report's SESSION_ID: line, else the only session_id in the logs (else exit 2).
-A shell claim matches a Bash / PowerShell line of that session whose command holds the claimed command (spaces, quotes
-and slash direction aside; a line cut at 500 characters matches on its first part); an mcp__ claim matches the tool
-name. The log does not hold exit codes: exit 0 must meet a "result" line with status ok, another exit a "failure"
-line. When at= is given the matching line must lie within --tolerance-min minutes of it.
+A shell claim matches a Bash / PowerShell line of that session whose command holds the claimed command (spaces, quotes,
+case and slash direction aside; a line cut at 500 characters matches on its first part); an mcp__ claim matches the
+tool name. Since 2.2.1 the command of a cut line is decoded like the JSON string it is (escaped quotes and
+backslashes put back, so a long Windows command still matches), a leading & / cmd /c and a python / node / pwsh launcher
+with its startup flags (-I -X utf8 ...) are dropped from both sides, and the claim's words may also be found in order
+on a run of the log's words: "..." or "<name>" skips any number of words and a file name or path matches a longer path
+that ends with it; this word match needs at least 2 claim words that are not "..." / "<name>". The log does not hold
+exit codes: exit 0 must meet a "result" line with status ok, another exit a "failure" line. When at= is given the
+matching line must lie within --tolerance-min minutes of it. A log rebuilt from a transcript (transcript_audit.py,
+first line kind=rebuild) is read the same way; a note says so.
 
 Prints OK / FAIL per claim and a last line
   REPORT_VS_AUDIT: PASS|FAIL|NONE claims=n ok=n failed=n session=ID logs=n
@@ -32,7 +38,14 @@ import pathlib
 import re
 import sys
 
-SHELL_TOOLS = ("Bash", "PowerShell")
+SHELL_TOOLS = frozenset(("bash", "powershell", "pwsh"))  # compared lower-case
+LAUNCHER = re.compile(r"(?:^|/)(?:python(?:\d+(?:\.\d+)*)?|py|node|pwsh|powershell)(?:\.exe)?$", re.I)
+STARTUP = frozenset(("-i", "-x", "-u", "-b", "-e", "-s", "-o", "-oo", "-v", "-q", "utf8", "-utf8", "-noprofile",
+                     "-noninteractive", "-nologo", "-noexit", "-command", "-commandwithargs", "-inputformat",
+                     "-outputformat", "-windowstyle", "-version"))
+WILDCARD = re.compile(r"^(?:\.{2,}|…|<[^<>]+>)$")
+MIN_WORDS = 2  # a word match needs this many claim words that are not wildcards
+JSON_ESCAPES = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
 CLAIM_FIELDS = ("TESTS", "EVIDENCE", "DONE")
 KINDS = [
     ("selftest", re.compile(r"selftest\.py", re.I)),
@@ -100,25 +113,111 @@ def norm(text):
     return re.sub(r"\s+", " ", text).strip().lower()
 
 
+def json_string_prefix(text):
+    """(decoded value, closed) of a JSON string body that may be cut; text starts after the opening quote. Escapes are
+    put back (quote, backslash, slash, b f n r t, u and 4 hex digits), an escape cut at the end is dropped, and closed
+    is True when the closing quote is there (what follows it is ignored)."""
+    out, i = [], 0
+    while i < len(text):
+        char = text[i]
+        if char == '"':
+            return "".join(out), True
+        if char != "\\":
+            out.append(char)
+            i += 1
+            continue
+        if i + 1 >= len(text):
+            break  # cut in the middle of an escape
+        code = text[i + 1]
+        if code in JSON_ESCAPES:
+            out.append(JSON_ESCAPES[code])
+            i += 2
+        elif code == "u" and re.fullmatch(r"[0-9a-fA-F]{4}", text[i + 2:i + 6]):
+            value = int(text[i + 2:i + 6], 16)
+            low = re.fullmatch(r"\\u([dD][c-fC-F][0-9a-fA-F]{2})", text[i + 6:i + 12])
+            if 0xD800 <= value < 0xDC00 and low:
+                value = 0x10000 + ((value - 0xD800) << 10) + (int(low.group(1), 16) - 0xDC00)
+                i += 6
+            out.append(chr(value))
+            i += 6
+        elif code == "u":
+            break  # \u cut short
+        else:
+            out.append(code)  # not valid JSON; keep the character
+            i += 2
+    return "".join(out), False
+
+
 def shell_command(entry):
-    """The command of a Bash / PowerShell log line (its input is the masked tool input as JSON, maybe cut)."""
+    """(command, cut) of a Bash / PowerShell log line (its input is the masked tool input as JSON, maybe cut at 500
+    characters). 2.2.1: a cut line's command is decoded as the JSON string it is, so escaped quotes and backslashes are put back."""
     raw = entry.get("input") or ""
     try:
         value = json.loads(raw)
         return str(value.get("command", "")) if isinstance(value, dict) else raw, False
     except ValueError:
-        found = re.match(r'\{"command":\s*"(.*)', raw, re.S)
-        return (found.group(1) if found else raw).rstrip("…"), raw.endswith("…")
+        body = raw[:-1] if raw.endswith("…") else raw
+        found = re.match(r'\{"command":\s*"', body)
+        if not found:
+            return body, raw.endswith("…")
+        text, closed = json_string_prefix(body[found.end():])
+        return text, not closed and raw.endswith("…")
+
+
+def canonical_command(command):
+    """norm() with a leading & / ; / cmd /c and a python / node / pwsh launcher with its startup flags dropped."""
+    parts = [part for part in norm(command).split(" ") if part]
+    while parts and parts[0] in ("&", ";", "&&", "||"):
+        parts.pop(0)
+    if parts and (parts[0] == "cmd" or parts[0].endswith("/cmd.exe")):
+        parts.pop(0)
+        while parts and parts[0] in ("/c", "/k"):
+            parts.pop(0)
+    if parts and LAUNCHER.search(parts[0]):
+        parts.pop(0)
+        while parts and (parts[0] in STARTUP or re.fullmatch(r"-x\w+", parts[0])):
+            parts.pop(0)
+    return " ".join(parts)
+
+
+def same_word(claim_word, log_word):
+    """Equal, or the log word is a longer path that ends with the claim word (tools/x.py matches d:/w/tools/x.py)."""
+    return claim_word == log_word or log_word.endswith("/" + claim_word.lstrip("/"))
+
+
+def word_match(claim, log):
+    """True when the claim words sit, in order, on a run of the log words; "..." / "<name>" skip any number of words.
+    Needs MIN_WORDS claim words that are not wildcards, so a claim made mostly of wildcards proves nothing."""
+    if sum(1 for word in claim if not WILDCARD.match(word)) < MIN_WORDS or not log:
+        return False
+    cache = {}
+
+    def walk(ci, li):
+        if ci == len(claim):
+            return True
+        key = (ci, li)
+        if key not in cache:
+            if WILDCARD.match(claim[ci]):
+                cache[key] = any(walk(ci + 1, skip) for skip in range(li, len(log) + 1))
+            else:
+                cache[key] = li < len(log) and same_word(claim[ci], log[li]) and walk(ci + 1, li + 1)
+        return cache[key]
+
+    return any(walk(0, start) for start in range(len(log)))
 
 
 def matches(claim, entry):
     if claim["command"].startswith("mcp__"):
         return entry.get("tool") == claim["command"].split()[0]
-    if entry.get("tool") not in SHELL_TOOLS:
+    if str(entry.get("tool") or "").lower() not in SHELL_TOOLS:
         return False
     command, cut = shell_command(entry)
-    want, have = norm(claim["command"]), norm(command)
-    return want in have or (cut and len(have) >= 40 and want.startswith(have))
+    want, have = canonical_command(claim["command"]), canonical_command(command)
+    if not want:
+        return False
+    if want in have or (cut and len(have) >= 40 and want.startswith(have)):
+        return True
+    return word_match(want.split(" "), have.split(" "))
 
 
 def parse_time(value, offset):
@@ -190,6 +289,9 @@ def main(argv=None):
             return 2
         session = ids[0]
     mine = [e for e in entries if e.get("session_id") == session]
+    if any(e.get("kind") == "rebuild" for e in entries):
+        print("  ~ note: a log was rebuilt from a transcript after the fact (transcript_audit.py), not written by the hook "
+              "while the agent worked; it shows what the transcript holds, not that nothing else was done")
     found_claims = claims(text)
     failed = 0
     for problem in broken:
