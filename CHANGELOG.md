@@ -8,7 +8,7 @@
 
 ## 2.2.1 — 2026-11-14
 
-PATCH（版本號照總監的工單）：依 DeepSeek 版與 2.2.0 的比較報告 A 節，修 `report_vs_audit` 的截斷 bug，`setup_check` 多查三個檔案（shadow），新增從 transcript 重建動作紀錄的工具。照上面的定義，新增工具和選項（`transcript_audit.py`、`setup_check --strict`）算 MINOR；版本號是否改成 2.3.0 待總監決定。舊檔案、舊紀錄照樣能讀；結果會變的只有 `report_vs_audit` 原本判錯的幾類（下面）。
+PATCH（版本號照 PO 指定）：依 DeepSeek 版與 2.2.0 的比較報告 A 節，修 `report_vs_audit` 的截斷 bug，`setup_check` 多查三個檔案（shadow），新增從 transcript 重建動作紀錄的工具。照上面的定義，新增工具和選項（`transcript_audit.py`、`setup_check --strict`）本來算 MINOR；PO 指定這版叫 2.2.1，所以仍標 PATCH。新工具只是加上去，舊檔案、舊指令都不受影響。舊檔案、舊紀錄照樣能讀；結果會變的只有 `report_vs_audit` 原本判錯的幾類（下面）。
 
 ### report_vs_audit.py：截斷的紀錄行（bug）與指令比對
 
