@@ -1,6 +1,7 @@
 """Write one `status.py` for a work line: after a compaction or a restart the line runs it once instead of re-checking
 each thing by hand (lesson L-042). The generated script only reads, uses only the standard library and prints at most
---max-lines lines (default 60), each cut to --width characters:
+--max-lines lines (default 60), each at most --width characters (a longer line keeps both ends: the middle of its
+longest path, or else of the line, becomes "…", so the status word at the end stays; 2.2.4):
 
   LOG      the last --log-lines lines of each log (read from the end of the file, so a large log costs nothing)
   HASH     the last lines of each hash file, and the SHA-256 of each --checksum file
@@ -75,8 +76,24 @@ problems = 0
 out = []
 
 
+def fit(text, width):
+    """At most width characters, both ends kept (2.2.4): a cut from the end lost the status word after a long path."""
+    if len(text) <= width:
+        return text
+    over = len(text) - width + 1
+    paths = list(re.finditer(r"[^\s'\"]*[\\/][^\s'\"]*", text))
+    if paths:
+        m = max(paths, key=lambda m: len(m.group()))
+        keep = len(m.group()) - over
+        if keep >= 12:
+            head = keep // 3
+            return text[:m.start()] + m.group()[:head] + "…" + m.group()[len(m.group()) - (keep - head):] + text[m.end():]
+    head = (width - 1) // 3
+    return text[:head] + "…" + text[len(text) - (width - 1 - head):]
+
+
 def say(text=""):
-    out.append(str(text)[:CONFIG["width"]])
+    out.append(fit(str(text), CONFIG["width"]))
 
 
 def age(path):

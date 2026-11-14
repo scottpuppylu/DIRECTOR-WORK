@@ -667,7 +667,7 @@ python -I -X utf8 status_gen.py --out <線的資料夾>/status.py --log <log> --
 python -I -X utf8 status_gen.py --out <DIRECTOR>/status.py --config templates/status_director.json   # 總監版：先把路徑改成專案自己的
 ```
 
-- 產生的 `status.py` 只讀、只用標準庫，總長最多 `--max-lines` 行（預設 60），每行截到 `--width`。大 log 從檔尾讀，不整份讀進來。
+- 產生的 `status.py` 只讀、只用標準庫，總長最多 `--max-lines` 行（預設 60），每行最多 `--width` 字；超過時頭尾都留，行內最長路徑（路徑太短就整行）的中段換成 `…`，行尾的狀態字（OK、LOW、計數）不會被切掉（2.2.4）。大 log 從檔尾讀，不整份讀進來。
 - 一般段：LOG（log 尾段）、HASH（雜湊檔尾段、`--checksum` 檔的 SHA-256）、DISK（GiB）、GIT（分支、領先 / 落後、改動數、最近的 commit）、OUT（最新輸出）。
 - 總監段（設定檔，都選用）：`po_page`（待決頁的計數：每項一個 regex，或 JSON 頁的 `list` 加 `field` / `value`）、`orders`（沒有結案字樣的工單）、`pending_sends`（還沒勾的 `- [ ]`）、`audit`（每份動作紀錄最近 `hours` 小時的筆數、被擋次數、讀 log 次數、session 數；讀 log 的判斷照抄 `poll_hint.py`）、`processes`（命令列含某字串的程序有沒有在跑）。
 - 讀不到的路徑印 MISSING；磁碟低於門檻、讀不到待決頁或程序沒在跑時 exit 1。
@@ -780,7 +780,15 @@ python -I -X utf8 selftest.py
 
 改過任何工具、`vocabulary.json`、`docs/02`、範本或每輪必讀的文件就跑一次。也會檢查：文件和範本裡的固定用詞和 `vocabulary.json` 一致；README 標「每輪必讀」的文件合計不超過上限（`MUST_READ_LIMIT`，2.1.0 起為 9,550 bytes：四份必讀從 12,433 減到 9,550）。要提高上限，commit 訊息寫明原因。GitHub Actions 在每次 push 和 PR 跑同一支（`.github/workflows/selftest.yml`），另外在 PATH 上沒有 git 時再跑一次。
 
-- 沒有 git（2.1.0）：要建 git 測試資料的測試組整組略過，每組印一行 `SKIP <測試組>: needs git, none on PATH`，最後一行寫 `skipped N git group(s)`；其餘照跑，有失敗照樣 exit 1。有 git 時這些測試組照常跑，建資料失敗仍是失敗。`test_no_git` 自己把 git 從 PATH 拿掉，確認 `evidence_record run` 仍寫紀錄、`--rerun` 是 NOT_RUN、doctor 說沒有 git。
+- 沒有 git（2.1.0）：要建 git 測試資料的測試組整組略過，每組印一行 `SKIP <測試組>: needs git, none on PATH`；其餘照跑，有失敗照樣 exit 1。有 git 時這些測試組照常跑，建資料失敗仍是失敗。`test_no_git` 自己把 git 從 PATH 拿掉，確認 `evidence_record run` 仍寫紀錄、`--rerun` 是 NOT_RUN、doctor 說沒有 git。
+- 最後一行（2.2.4）：`selftest: 通過/總數 passed; skipped=N`。每一行 `SKIP`（沒有 git、沒有 bash、不能建 symlink、沒有 8.3 短檔名、GIT_DIR 太長）都算進 skipped，不算進 passed；exit 規則不變（有 FAIL 才 exit 1），所以有 SKIP 要看這一行。
+- 長路徑（2.2.4）：selftest 開頭給整個 process 設 `GIT_CONFIG_COUNT`／`core.longpaths=true`（原本有就接在後面），它叫起來的工具裡的 git 也吃得到；測試建的本機 origin 另外在 repo 裡設 `core.longpaths`。`test_submodule_ignore` 的 GIT_DIR 超過 220 字時印 `SKIP test_submodule_ignore: GIT_DIR <n> chars > 220 (git limit)`。
+
+### 已知限制（2.2.4，Windows 長路徑）
+
+- 路徑超過 260 字時 git 會報 `Filename too long`。工具不替你改設定，要自己跑一次 `git config --global core.longpaths true`。
+- GIT_DIR（`.git` 資料夾，或子模組在 `.git/modules/` 下的資料夾）超過約 220 字時，git 本身就停止（`'$GIT_DIR' too big`），`core.longpaths` 也沒用；只能把 repo 放在短一點的路徑。
+- 本機路徑當 remote（push、clone、fetch 到同一台電腦的另一個 repo）時，對方那一側的 git 不會繼承 `GIT_CONFIG_COUNT`／`GIT_CONFIG_PARAMETERS`（`git -c` 也一樣），要在對方 repo 裡設 `core.longpaths`，或用 `--global`。
 
 ## 建議另外寫的（依專案）
 

@@ -22,6 +22,11 @@ import time
 
 TOOLS = pathlib.Path(__file__).resolve().parent
 TEMPLATES = TOOLS.parent / "templates"
+# 2.2.4: under a long TMP, git on Windows stops at 260 characters ("Filename too long"). core.longpaths=true for every
+# git that selftest starts, also inside the tools it runs; an existing GIT_CONFIG_COUNT list is kept and extended.
+_GIT_N = int(os.environ.get("GIT_CONFIG_COUNT") or 0)
+os.environ.update({"GIT_CONFIG_COUNT": str(_GIT_N + 1), f"GIT_CONFIG_KEY_{_GIT_N}": "core.longpaths",
+                   f"GIT_CONFIG_VALUE_{_GIT_N}": "true"})
 
 RESUME = """PROGRESS: tests pass at abc123
 DOING: AC-2 of WO-001
@@ -127,6 +132,7 @@ GIT_GROUPS = {
 
 
 def skip(group, why="needs git, none on PATH"):
+    """A named skip: printed now and counted in the summary's skipped=N (2.2.4: every SKIP line, not only git)."""
     skipped.append(f"{group} ({why})")
     print(f"SKIP {group}: {why}")
 
@@ -1326,6 +1332,9 @@ def test_submodule_ignore(tmp):
     """v0.13 batch 3 (S04): `submodule.<name>.ignore=all` does not hide a staged change of a FORBIDDEN submodule."""
     root = tmp / "submodule"
     source, outer = root / "source", root / "outer"
+    gitdir = len(str(outer / ".git" / "modules" / "vendor" / "lib"))
+    if gitdir > 220:  # 2.2.4: git itself stops with "'$GIT_DIR' too big" past this, core.longpaths or not
+        return skip("test_submodule_ignore", f"GIT_DIR {gitdir} chars > 220 (git limit)")
     source.mkdir(parents=True)
     outer.mkdir()
 
@@ -1431,13 +1440,13 @@ def test_hook_protect(tmp):
     if done.returncode != 2:
         failures.append(f"hook_guard --protect stopped checking Bash: exit {done.returncode}")
     if os.name != "nt":
-        print("SKIP hook_guard junction and 8.3 cases: not Windows")
+        skip("hook_guard junction and 8.3 cases", "not Windows")
     else:
         link = tmp / "protect" / "dirlink"
         made = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(director)], capture_output=True,
                               encoding="utf-8", errors="replace")
         if made.returncode != 0:
-            print(f"SKIP hook_guard junction case: mklink /J failed: {(made.stdout + made.stderr).strip()}")
+            skip("hook_guard junction case", f"mklink /J failed: {(made.stdout + made.stderr).strip()}")
         else:
             guard("junction to DIRECTOR", 2, "Write", link / "orders" / "WO-009.md")
             os.rmdir(link)  # removes the junction only, not its target
@@ -1449,7 +1458,7 @@ def test_hook_protect(tmp):
         n = ctypes.windll.kernel32.GetShortPathNameW(str(longdir), buf, len(buf))
         short = buf.value if n else str(longdir)
         if os.path.normcase(short) == os.path.normcase(str(longdir)):
-            print("SKIP hook_guard 8.3 case: no short name on this volume (8.3 names are off)")
+            skip("hook_guard 8.3 case", "no short name on this volume (8.3 names are off)")
         else:
             total += 1
             done = subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), "--mode", "block", "--protect", str(longdir)],
@@ -1469,7 +1478,7 @@ def test_hook_protect(tmp):
         try:
             os.link(director / "DIRECTOR_LOG.md", hard)
         except OSError as error:
-            print(f"SKIP hook_guard hardlink case: {error}")
+            skip("hook_guard hardlink case", f"{error}")
         else:
             guard("hardlink of DIRECTOR_LOG.md (same file id)", 2, "Write", hard)
             hard.unlink()
@@ -1479,7 +1488,7 @@ def test_hook_protect(tmp):
             guard("administrative UNC share of an existing order", 2, "Edit", unc + "\\orders\\WO-001-a.md")
             guard("new file in orders through the UNC share", 2, "Write", unc + "\\orders\\WO-003.md")
         else:
-            print(f"SKIP hook_guard UNC case: {unc} is not reachable")
+            skip("hook_guard UNC case", f"{unc} is not reachable")
 
     repo = tmp / "protect" / "repo"
     repo.mkdir()
@@ -5084,8 +5093,7 @@ def test_container(tmp):
     spec.loader.exec_module(doctor)
     bash = doctor.git_bash() if os.name == "nt" else shutil.which("bash")
     if not bash:
-        print("SKIP run_worker.sh --dry-run cases: no bash (Git Bash on Windows)")
-        return
+        return skip("run_worker.sh --dry-run cases", "no bash (Git Bash on Windows)")
 
     def run(*args):
         argv = [bash, (box / "run_worker.sh").as_posix(), "--dry-run", *[str(a) for a in args]]
@@ -5172,8 +5180,7 @@ def test_worker_clone(tmp):
     spec.loader.exec_module(doctor)
     bash = doctor.git_bash() if os.name == "nt" else shutil.which("bash")
     if not bash:
-        print("SKIP worker_clone.sh cases: no bash (Git Bash on Windows)")
-        return
+        return skip("worker_clone.sh cases", "no bash (Git Bash on Windows)")
 
     def git(where, *args, check_rc=True):
         done = subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "core.autocrlf=false",
@@ -5189,6 +5196,7 @@ def test_worker_clone(tmp):
     repo = folder / "repo"
     repo.mkdir()
     git(repo, "init", "-q", "-b", "main")
+    git(repo, "config", "core.longpaths", "true")  # 2.2.4: the clone's upload-pack ignores GIT_CONFIG_COUNT
     (repo / "a.txt").write_text("one\n", encoding="utf-8")
     git(repo, "add", "a.txt")
     git(repo, "commit", "-qm", "one")
@@ -5243,6 +5251,7 @@ def test_worker_clone(tmp):
 
     good = bundle("good", clone, "refs/heads/wb")
     evil = folder / "evil"
+    git(clone, "config", "core.longpaths", "true")  # 2.2.4: this clone's upload-pack ignores GIT_CONFIG_COUNT too
     git(folder, "clone", "-q", "--no-local", clone, evil)
     git(evil, "update-ref", "refs/heads/other", tip)
     git(evil, "update-ref", "refs/heads/wbx", tip)
@@ -5403,7 +5412,7 @@ def test_worker_clone(tmp):
         os.symlink(clone, alias, target_is_directory=True)
     except (OSError, NotImplementedError, AttributeError):
         alias = None
-        print("SKIP F11 symlink alias case: this OS or user cannot make symlinks")
+        skip("F11 symlink alias case", "this OS or user cannot make symlinks")
     if alias is not None:
         done = run("--clone", c, "--name", "w1", "--director", (alias / "DIRECTOR").as_posix())
         check("F11 DIRECTOR through a symlink to the clone: exit 2", done.returncode == 2 and "overlaps" in done.stderr, done.stdout + done.stderr)
@@ -5591,8 +5600,7 @@ def test_dns_allow(tmp):
     spec.loader.exec_module(doctor)
     bash = doctor.git_bash() if os.name == "nt" else shutil.which("bash")
     if not bash:
-        print("SKIP run_worker.sh allowlist cases: no bash (Git Bash on Windows)")
-        return
+        return skip("run_worker.sh allowlist cases", "no bash (Git Bash on Windows)")
     clone, director = folder / "c", folder / "D"
     (clone / ".git" / "hooks").mkdir(parents=True)
     (clone / ".git" / "config").write_text("[core]\n", encoding="utf-8")
@@ -5767,6 +5775,24 @@ def test_usage_mix(tmp):
     expect("usage_mix break-even UNKNOWN", "usage_mix.py", 0, *base, says="RESTART break-even UNKNOWN")
 
 
+def path_line(out, prefix, path, suffix):
+    """2.2.4: a status line that names a path: the whole line, or (cut to the width) the same line with the middle of the
+    path turned into "…" while the prefix, the start of the path, its file name and the suffix all stay. So a test does
+    not depend on how long TMP is, and still checks the status word and the counts at the end."""
+    path = str(path)
+    for line in out.splitlines():
+        if line == prefix + path + suffix:
+            return True
+        if not (line.startswith(prefix) and line.endswith(suffix) and len(line) > len(prefix) + len(suffix)):
+            continue
+        middle = line[len(prefix):len(line) - len(suffix)]
+        if middle.count("…") == 1:
+            head, end = middle.split("…")
+            if head and path.startswith(head) and path.endswith(end) and end.endswith(pathlib.PurePath(path).name):
+                return True
+    return False
+
+
 def test_status_gen(tmp):
     """status_gen.py writes a status.py that only reads, prints at most max_lines lines of at most width characters,
     and exits 1 on a missing path or a disk below the threshold (L-042)."""
@@ -5878,12 +5904,14 @@ def test_status_director(tmp):
         expect("status_gen director config", "status_gen.py", 0, "--out", script, "--config", conf, says="WROTE")
         done = subprocess.run([sys.executable, "-I", str(script)], capture_output=True, encoding="utf-8")
         out = done.stdout
-        want = [f"PO {d / 'PO_PENDING.md'}: answered=2, new=1", "ORDERS ", ": 2 open of 3", "  ... 1 more",
+        want = ["ORDERS ", ": 2 open of 3", "  ... 1 more",
                 ": 2 not sent", "  - [ ] to 總監: report A",
                 "AUDIT a.jsonl last 1h: lines=6 blocked=2 log_reads=2 sessions=2",
                 "AUDIT b.jsonl last 1h: lines=0 blocked=0 log_reads=0 sessions=0",
                 "PROC probe: running (1)", "PROC idle_watch: NOT RUNNING", "DISK "]
         bad = [w for w in want if w not in out]
+        if not path_line(out, "PO ", d / "PO_PENDING.md", ": answered=2, new=1"):
+            bad.append(f"PO {d / 'PO_PENDING.md'}: answered=2, new=1")
         check("status.py director sections", done.returncode == 1 and not bad and len(out.splitlines()) <= 20,
               f"exit {done.returncode}, missing {bad}: {out[-900:]}")
         check("status.py director: WO-1 is closed, notes.md is no order", "WO-1.md" not in out and "notes.md" not in out
@@ -7307,6 +7335,59 @@ def test_status_po_page_missing(tmp):
         killed(f"status PO_PAGE_MISSING {name}", wrong(swap))
 
 
+def test_status_long_path(tmp):
+    """2.2.4: status.py under a folder of 150 characters or more (a long TMP): every line still fits the width (160) and
+    keeps its end (OK, the counts, the file name), and a line without a path keeps its start and its end. A cut from
+    the end of the line (before 2.2.4) lost the status word; mutation tested on the generated script."""
+    d = tmp / "status_long"
+    while len(str(d)) < 150:
+        d = d / ("long_path_" + "p" * 30)
+    d.mkdir(parents=True)
+    check("status long path: the folder is 150 characters or more", len(str(d)) >= 150, f"{len(str(d))} characters")
+    (d / "run.log").write_text("first\n" + "x" * 300 + " END\n", encoding="utf-8")
+    (d / "out").mkdir()
+    (d / "out" / "a.png").write_bytes(b"x")
+    (d / "PO_PENDING.md").write_text("ID: OD-1\nSTATUS: answered\n", encoding="utf-8")
+    conf = _write(d / "status.json", {
+        "schema_version": 1, "name": "long", "logs": ["run.log"], "log_lines": 2, "outputs": ["out"], "disk": str(d),
+        "disk_min_gib": 0.001, "po_page": {"path": "PO_PENDING.md", "counts": [{"label": "answered",
+                                                                              "regex": r"^STATUS:\s*answered\b"}]}})
+    script = d / "status.py"
+    expect("status_gen writes the long-path script", "status_gen.py", 0, "--out", script, "--config", conf, says="WROTE")
+
+    def wrong(swap=None):
+        run = script
+        if swap:
+            source = script.read_text(encoding="utf-8")
+            if source.count(swap[0]) != 1:
+                return [f"anchor {swap[0]!r} not found once"]
+            run = d / "mutant.py"
+            run.write_text(source.replace(*swap), encoding="utf-8")
+        done = subprocess.run([sys.executable, "-I", str(run)], capture_output=True, encoding="utf-8")
+        out, lines = done.stdout, done.stdout.splitlines()
+        bad = [f"exit {done.returncode}"] if done.returncode != 0 else []
+        bad += [f"{len(x)} characters: {x}" for x in lines if len(x) > 160]
+        for start, end in (("DISK ", " OK"), ("OUT ", ": 1 files, newest 1"), ("LOG ", " ago)"), ("  xxx", "x END")):
+            if not any(x.startswith(start) and x.endswith(end) for x in lines):
+                bad.append(f"no line {start}...{end}")
+        if not any(x.startswith("LOG ") and "run.log (" in x for x in lines):
+            bad.append("LOG line lost the file name")
+        if not path_line(out, "PO ", d / "PO_PENDING.md", ": answered=1"):
+            bad.append("PO line")
+        if not path_line(out, "~ PO_PAGE_MISSING: ", d / "DIRECTOR_STATE.md",
+                         " has no PO_PAGE_URL line; publish and pin the PO page (BOOTSTRAP step 6)"):
+            bad.append("PO_PAGE_MISSING line")
+        return bad + ([out[-600:]] if bad else [])
+
+    bad = wrong()
+    check("status.py under a long path keeps every line's end within the width", not bad, str(bad))
+    for name, swap in [("cut from the end of the line", ('    out.append(fit(str(text), CONFIG["width"]))\n',
+                                                         '    out.append(str(text)[:CONFIG["width"]])\n')),
+                       ("a line without a path cut from its end",
+                        ('    return text[:head] + "…" + text[len(text) - (width - 1 - head):]\n', '    return text[:width]\n'))]:
+        killed(f"status long path: {name}", wrong(swap))
+
+
 def _write(path, data):
     path.write_text(json.dumps(data), encoding="utf-8")
     return path
@@ -8540,6 +8621,7 @@ def rel_origin(tmp, name):
     base = tmp / name
     base.mkdir(parents=True)
     rel_git(base, "init", "-q", "--bare", "-b", "main", "origin.git")
+    rel_git(base / "origin.git", "config", "core.longpaths", "true")  # 2.2.4: a local remote ignores GIT_CONFIG_COUNT
     origin = base / "origin.git"
     seed = rel_clone(origin, base / "seed")
     rel_write((seed / "a.txt"), "base\n")
@@ -8713,6 +8795,7 @@ def test_base_ref_222(tmp):
     base = tmp / "base_ref_222"
     base.mkdir(parents=True)
     rel_git(base, "init", "-q", "--bare", "-b", "main", "origin.git")
+    rel_git(base / "origin.git", "config", "core.longpaths", "true")  # 2.2.4: a local remote ignores GIT_CONFIG_COUNT
     proj = rel_clone(base / "origin.git", base / "proj")
     rel_write((proj / "src.txt"), "x\n")
     rel_git(proj, "add", "-A")
@@ -8854,6 +8937,7 @@ def main():
         guarded(test_setup_check, tmp)
         guarded(test_setup_check_221, tmp)
         guarded(test_status_po_page_missing, tmp)
+        guarded(test_status_long_path, tmp)
         guarded(test_audit_mask_tree, tmp)
         guarded(test_mask_leaks_v22)
         guarded(test_audit_recover, tmp)
@@ -8879,8 +8963,8 @@ def main():
         shutil.rmtree(tmp, ignore_errors=True)
     for failure in failures:
         print(f"FAIL {failure}")
-    note = f"; skipped {len(skipped)} git group(s), see SKIP lines" if skipped else ""
-    print(f"selftest: {total - len(failures)}/{total} passed{note}")
+    note = ", see SKIP lines" if skipped else ""  # 2.2.4: every SKIP counted on its own, never inside passed
+    print(f"selftest: {total - len(failures)}/{total} passed; skipped={len(skipped)}{note}")
     return 1 if failures else 0
 
 

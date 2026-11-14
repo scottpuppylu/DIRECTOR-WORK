@@ -32,6 +32,14 @@ PATCH（版本號照 PO 指定；PO 2026-11-14：WO-DS-006 試跑學到的修進
 - `docs/05`「派工規劃」加三行：平行線在整合前至少切成一段完整功能加測試；兩條長線能同時跑就同時派；派工前估每條線的時間，同時在跑的時間不到一半就合併或重切。
 - 都只在寫工單、審規格、開 worker、派工時讀，不是每輪必讀。
 
+### status.py 長路徑（總監驗收時發現）
+
+- 問題：TMP 設成約 110 字的長路徑時，產生的 `status.py` 每行從行尾切到 `width`，路徑後面的狀態字（OK、LOW、計數）被切掉，selftest 有 6 個 status 案例 FAIL。
+- `tools/status_gen.py` 產生的 `status.py`：一行超過 `width` 時頭尾都留，把行內最長路徑的中段換成 `…`（路徑太短不夠換時，換整行的中段），寬度上限照舊。selftest 加一個 150 字以上路徑的案例和 2 個 mutation（改回從行尾切要被抓到）；比對路徑的案例改成接受中段換成 `…` 的寫法，路徑開頭、檔名和行尾的狀態字仍逐字比。
+- selftest 開頭給整個 process 設 `GIT_CONFIG_COUNT`／`GIT_CONFIG_KEY_n=core.longpaths`／`GIT_CONFIG_VALUE_n=true`（原本有 `GIT_CONFIG_COUNT` 就接在後面），它叫起來的工具裡的 git 也吃到，長 TMP 下 git 不會因 Windows 260 字上限報「Filename too long」；只在 selftest 裡設，tools 不變。
+- 本機 remote 那一側（receive-pack／upload-pack）不繼承 `GIT_CONFIG_COUNT`，所以 release、BASE_REF 測試建的 bare origin 和 worker_clone 測試裡被 clone 的兩個 repo，另外在 repo 裡設 `core.longpaths`。`test_submodule_ignore` 的 GIT_DIR 超過 220 字時 git 本身會停（`'$GIT_DIR' too big`，`core.longpaths` 無效），改印 `SKIP test_submodule_ignore: GIT_DIR <n> chars > 220 (git limit)`。
+- selftest 最後一行改成 `selftest: 通過/總數 passed; skipped=N`：每一行 SKIP 都分開算，不算進 passed；exit 規則不變。三項 Windows 長路徑限制寫進 `tools/README.md` 的「已知限制」。
+
 ### 已知限制
 
 - container 執行（`container/run_worker.sh`）沒有 WORK_DIR/tmp：container 裡沒有 WORK_DIR，暫存檔規則只寫在文件和範本。
@@ -39,13 +47,13 @@ PATCH（版本號照 PO 指定；PO 2026-11-14：WO-DS-006 試跑學到的修進
 
 ### 遷移
 
-- 不用遷移。report_vs_audit 最後一行多了 `unverified=n`（放在最後，原有欄位位置不變）；`--after-verdict` 是新選項，預設 shadow；`--strict` 以前只配 `--resume`，現在也配 `--after-verdict`。
+- 不用遷移。report_vs_audit 最後一行多了 `unverified=n`（放在最後，原有欄位位置不變）；`--after-verdict` 是新選項，預設 shadow；`--strict` 以前只配 `--resume`，現在也配 `--after-verdict`。已經產生的 `status.py` 要用 `status_gen.py --force` 重新產生，才會換成頭尾都留的截寬。selftest 最後一行原本的 `skipped N git group(s)` 換成 `skipped=N`，有程式讀這一行的要跟著改。
 - 舊工單沒有「不做」「可呼叫的入口」照樣通過 `gate_check`（欄位不是工具檢查項，由規格審查看）。
 
 ### 數字
 
 - 每輪必讀（`docs/01`、`03`、`06`、`08`）：9,548 → 9,548 bytes（沒變）。本版沒有改這四份，也沒有新增每輪必讀的檔案或步驟。
-- `selftest.py`：2.2.3 的 2,551 項 → 本版 2,617 項（+66：report_vs_audit 2.2.4 案例與 mutation（含 UNVERIFIED 兩個案例與 4 個 mutation）、`--after-verdict` 案例與 mutation、本段 CHANGELOG 的對齊初衷檢查），全過（Python 3.11 與 3.9）。
+- `selftest.py`：2.2.3 的 2,551 項 → 本版 2,622 項（+71：report_vs_audit 2.2.4 案例與 mutation（含 UNVERIFIED 兩個案例與 4 個 mutation）、`--after-verdict` 案例與 mutation、status.py 長路徑案例與 mutation、本段 CHANGELOG 的對齊初衷檢查），Python 3.11 與 3.9 各用短 TMP 和剛好 140 字的長 TMP 跑，四次都全過（`GIT_DIR` 的 SKIP 一次都沒出現；這台機器另有 2 個和 TMP 無關的環境 SKIP：8.3 短檔名關閉、不能建 symlink，所以 skipped=2）。
 - WO-DS-006 回歸：report_vs_audit 對三組 TASK REPORT 原樣重跑，FAIL 64 → 0、UNVERIFIED 18（claude 8 → FAIL 0／UNVERIFIED 4、dsh-sdd 32 → 0／11、dsh-nosdd 24 → 0／3）；其餘 46 條 OK。去識別的對照組（沒人跑的指令）仍 FAIL。
 
 對齊初衷：
