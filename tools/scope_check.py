@@ -22,6 +22,18 @@ files as they are now (tracked files that differ from the merge base, untracked 
 or, with `--candidate SHA`, the candidate commit's tree against its merge base with BASE_REF (use it on the commit you
 hand in). A `REQUIRED_BASIS:` line says which. A file staged and then put back as it was is MISSING.
 
+2.2.5 (B10, shared checkout; ported from the DeepSeek port's 2.2.4-ds.4 B2): when several workers share one checkout
+the four states above hold the other workers' files too. With --shared, or when the order's WORKTREE line says 共用 /
+shared, only this order's work is counted: the commits in merge-base..HEAD (or ..--candidate) whose message names the
+order ID (`WO-12: ...`; the leading WO-n of the title and of the file name), each commit's own files (one commit at a
+time, not the sum of the branch), plus, without --candidate, uncommitted files inside SCOPE. Anything else changed in
+the checkout prints `OTHER path` and is not checked; an out-of-scope file in this order's own commit is still OUTSIDE.
+STATES shows own_commits= own_uncommitted=, the last line ends with ` shared=1 others=n`.
+2.2.5 (B10): `BASE_REF = origin/main @ abc1234（v2.2.4）`: text in brackets, and after ` #`, is a comment. A
+`WORKTREE:` line says, from `git worktree list`, whether the folder is a linked worktree (隔離 worktree) or the main
+checkout (共用 checkout); copy it into the report instead of writing it by hand.
+2.2.5 (B11): a path too long for git on Windows gives one line naming the path and how far over it is.
+
 The last line is the one to paste into the TASK REPORT. Exit 0 pass, 1 violation, 2 could not check.
 """
 import argparse
@@ -77,8 +89,93 @@ def matches(path, patterns):
 def git(root, *args, stdin=None):
     done = subprocess.run(["git", "-C", str(root), *args], capture_output=True, input=stdin)
     if done.returncode:
-        raise RuntimeError(f"git {' '.join(args)}: {done.stderr.decode('utf-8', 'replace').strip()}")
+        message = done.stderr.decode("utf-8", "replace").strip()
+        raise RuntimeError(long_path(message, root) or f"git {' '.join(args)}: {message}")
     return done.stdout.decode("utf-8", "replace")
+
+
+def long_path(message, root):
+    """2.2.5 (B11): gate_check's one clear line for git's `Filename too long` (which path, how far over), else None."""
+    if "Filename too long" not in message:
+        return None
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("gate_check_for_scope", pathlib.Path(__file__).with_name("gate_check.py"))
+    try:
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.long_path(message, root)
+    except (OSError, ImportError, SyntaxError, AttributeError):
+        return None
+
+
+BRACKETED = re.compile(r"[（(][^（()）]*[)）]")
+
+
+def order_base(text):
+    """The base ref of a work order's BASE_REF line (`origin/main @ abc1234（v2.2.4） # note` gives abc1234), or None.
+    2.2.5 (B10): text in brackets and after ` #` is a comment."""
+    m = re.search(r"^\s*BASE_REF\s*=\s*(.*)$", text, re.M)
+    value = BRACKETED.sub(" ", re.split(r"\s+#", m.group(1))[0]).split("@")[-1].split() if m else []
+    return value[0] if value and not value[0].startswith("<") else None
+
+
+ORDER_ID = re.compile(r"[A-Za-z]+(?:-[A-Za-z]+)*-\d+")
+
+
+def order_ids(text, path):
+    """2.2.5 (from ds.4 B2): the IDs a commit message may name this order by: the leading `WO-n` / `WO-DS-n` of the
+    title's first word and of the file name."""
+    title = re.search(r"^#\s+(\S+)", text, re.M)
+    ids = []
+    for name in (title.group(1) if title else "", pathlib.Path(path).stem):
+        m = ORDER_ID.match(name)
+        if m and m.group(0).upper() not in (i.upper() for i in ids):
+            ids.append(m.group(0))
+    return ids
+
+
+def shared_mode(text, flag):
+    """2.2.5 (from ds.4 B2): on with --shared, or when the order's WORKTREE field says the workers share one checkout
+    (共用 / shared)."""
+    if flag:
+        return True
+    m = re.search(r"^[ \t]*WORKTREE[ \t]*=[ \t]*(.*)$", text, re.M)
+    return bool(m and re.search(r"共用|shared", m.group(1), re.I))
+
+
+def own_commits(root, since, until, ids):
+    """Commits in since..until whose message names one of ids (as a whole word), oldest first."""
+    if not ids:
+        return []
+    named = re.compile("|".join(rf"(?<![\w-]){re.escape(i)}(?!\w)" for i in ids), re.I)
+    out = []
+    for entry in git(root, "log", "--reverse", "--format=%H%x1f%B%x1e", f"{since}..{until}").split("\x1e"):
+        sha, _, message = entry.strip().partition("\x1f")
+        if sha and named.search(message):
+            out.append(sha)
+    return out
+
+
+def commit_files(root, sha):
+    """The paths one commit changes (against its first parent; all of them for a root commit)."""
+    out = git(root, "diff-tree", "--no-commit-id", "-r", "--root", "--name-only", "--no-renames", "-z", sha)
+    return {path for path in out.split("\0") if path}
+
+
+def worktree_line(root):
+    """2.2.5 (B10): `WORKTREE: 隔離 worktree <root>` for a linked worktree, `WORKTREE: 共用 checkout <root>` for the
+    main checkout, from `git worktree list --porcelain` (its first entry is the main checkout); None when git cannot
+    list them."""
+    try:
+        listed = [line[len("worktree "):].strip() for line in git(root, "worktree", "list", "--porcelain").splitlines()
+                  if line.startswith("worktree ")]
+    except RuntimeError:
+        return None
+    if not listed:
+        return None
+    same = os.path.normcase(os.path.normpath(listed[0])) == os.path.normcase(os.path.normpath(root))
+    kind = "共用 checkout（主 checkout）" if same else "隔離 worktree"
+    return f"WORKTREE: {kind} {root} (git worktree list: {len(listed)})"
 
 
 def hidden_changes(root):
@@ -117,6 +214,9 @@ def main():
     ap.add_argument("--base", help="base ref (default: BASE_REF of the work order)")
     ap.add_argument("--max-lines", type=int, default=20, help="how many violating paths to print (default 20)")
     ap.add_argument("--candidate", help="2.2: the commit handed in; REQUIRED_CHANGES is matched against its tree")
+    ap.add_argument("--shared", action="store_true", help="2.2.5: several workers share this checkout; count only "
+                    "this order's commits, one at a time, and its in-scope uncommitted files (on by itself when the "
+                    "order's WORKTREE says 共用 / shared)")
     a = ap.parse_args()
     sys.stdout.reconfigure(encoding="utf-8")
 
@@ -135,13 +235,13 @@ def main():
         return cannot("SCOPE: / FORBIDDEN: has no `- item` line right below it (run gate_check.py --order)")
     scope, forbidden = [s for s in scope if s != "NONE"], [f for f in forbidden if f != "NONE"]
     required = parse_list(text, "REQUIRED_CHANGES")
-    base = a.base
-    if not base:
-        m = re.search(r"^\s*BASE_REF\s*=\s*(.*)$", text, re.M)
-        value = m.group(1).split("@")[-1].split() if m else []
-        base = value[0] if value else ""
+    base = a.base or order_base(text)
     if not base or base.startswith("<"):
         return cannot("no usable BASE_REF in the work order; pass --base")
+    shared = shared_mode(text, a.shared)
+    scope_rx = [(g, glob_regex(g)) for g in scope]
+    forbidden_rx = [(g, glob_regex(g)) for g in forbidden]
+    notes, others, per_commit, where = [], set(), {}, None
 
     try:
         root = git(a.repo, "rev-parse", "--show-toplevel").strip()
@@ -151,11 +251,23 @@ def main():
                   "unstaged": git(root, *names),
                   "untracked": git(root, "ls-files", "--others", "--exclude-standard", "-z")}
         marked, hidden = hidden_changes(root)
+        where = worktree_line(root)
+        commit = git(root, "rev-parse", "--verify", a.candidate + "^{commit}").strip() if a.candidate else None
+        since = git(root, "merge-base", base, commit).strip() if commit else merge_base
         final, basis = None, None
-        if required is not None:  # 2.2 (F14): the final result, not the union of layers
-            if a.candidate:
-                commit = git(root, "rev-parse", "--verify", a.candidate + "^{commit}").strip()
-                since = git(root, "merge-base", base, commit).strip()
+        if shared:  # 2.2.5 (B10, from ds.4 B2): this order's commits, one at a time
+            ids = order_ids(text, order)
+            mine = own_commits(root, since, commit or "HEAD", ids)
+            if not mine and commit:
+                mine = [commit]
+                notes.append(f"SHARED: no commit in {since[:10]}..{commit[:10]} names {'/'.join(ids) or 'this order'}; "
+                             "only --candidate itself is counted")
+            elif not mine:
+                notes.append(f"SHARED: no commit in {since[:10]}..HEAD names {'/'.join(ids) or 'this order'} yet; "
+                             "name the order ID in each commit message")
+            per_commit = {sha: commit_files(root, sha) for sha in mine}
+        elif required is not None:  # 2.2 (F14): the final result, not the union of layers
+            if commit:
                 final = git(root, *names, since, commit)
                 basis = f"candidate={commit[:12]}"
             else:
@@ -166,9 +278,19 @@ def main():
 
     states = {state: {path for path in out.split("\0") if path} for state, out in states.items()}
     states["unstaged"] |= hidden
-    changed = sorted(set().union(*states.values()))
-    scope_rx = [(g, glob_regex(g)) for g in scope]
-    forbidden_rx = [(g, glob_regex(g)) for g in forbidden]
+    if shared:
+        uncommitted = states["staged"] | states["unstaged"] | states["untracked"]
+        committed = set().union(*per_commit.values()) if per_commit else set()
+        in_scope = {path for path in uncommitted if matches(path, scope_rx)} if not commit else set()
+        if not commit:
+            others = (uncommitted - in_scope) | {path for path in states["committed"] if path not in committed}
+        states = {"own_commits": committed, "own_uncommitted": in_scope}
+        changed = sorted(committed | in_scope)
+        final = set(changed)
+        basis = (f"shared commits={len(per_commit)}" + (f" candidate={commit[:12]}" if commit else "")
+                 if required is not None else None)
+    else:
+        changed = sorted(set().union(*states.values()))
     hits = []
     for path in changed:
         rule = matches(path, forbidden_rx)
@@ -177,20 +299,30 @@ def main():
         elif not matches(path, scope_rx):
             hits.append(("OUTSIDE", path, ""))
     count = sum(1 for hit in hits if hit[0] == "FORBIDDEN")
-    final = {path for path in (final or "").split("\0") if path} | (hidden if basis == "worktree-final" else set())
+    if not shared:
+        final = {path for path in (final or "").split("\0") if path} | (hidden if basis == "worktree-final" else set())
     missing = [g for g in required or [] if g != "NONE" and not any(glob_regex(g).fullmatch(path) for path in final)]
     hits += [("MISSING", glob, "") for glob in missing]
     for kind, path, rule in hits[:a.max_lines]:
         print(f"{kind:9} {path}" + (f"  ({rule})" if rule else ""))
     if len(hits) > a.max_lines:
         print(f"... {len(hits) - a.max_lines} more")
+    for path in sorted(others)[:a.max_lines]:
+        print(f"OTHER     {path}  (shared checkout: not this order's; not checked)")
+    if len(others) > a.max_lines:
+        print(f"... {len(others) - a.max_lines} more OTHER")
+    for note in notes:
+        print(f"NOTE: {note}")
+    if where:
+        print(where)
     if marked:
         print(f"FLAGGED: {len(marked)} file(s) marked assume-unchanged or skip-worktree; {len(hidden)} differ from the index")
     print("STATES: " + " ".join(f"{state}={len(paths)}" for state, paths in states.items()))
     if basis:
         print(f"REQUIRED_BASIS: {basis} final={len(final)}")
     print(f"SCOPE_CHECK: {'VIOLATION' if hits else 'PASS'} base={merge_base[:10]} changed={len(changed)} "
-          f"forbidden={count} outside={len(hits) - count - len(missing)}" + ("" if required is None else f" missing={len(missing)}"))
+          f"forbidden={count} outside={len(hits) - count - len(missing)}" + ("" if required is None else f" missing={len(missing)}")
+          + (f" shared=1 others={len(others)}" if shared else ""))
     return 1 if hits else 0
 
 
@@ -223,4 +355,7 @@ if __name__ == "__main__":
         sys.exit(main())
     except UnicodeDecodeError as error:  # 2.2: one line and NOT_RUN (exit 2), never a traceback
         print(f"SCOPE_CHECK: NOT_RUN {not_utf8(error)}")
+        sys.exit(2)
+    except (RuntimeError, OSError, ValueError) as error:  # 2.2.5 (B7): never a traceback
+        print(f"SCOPE_CHECK: NOT_RUN {type(error).__name__}: {' '.join(str(error).split())[:300]}")
         sys.exit(2)

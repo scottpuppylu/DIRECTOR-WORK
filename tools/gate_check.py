@@ -113,15 +113,43 @@ The hash only detects a changed order after the fact; it cannot stop anyone from
 a command ran and passed, not that it tests the right thing.
 Lines starting with `~` are notes for the newer format (v0.10): they never fail a file.
 
-2.2.4 (shadow: WARN lines, the exit code stays the same; --strict makes them FAIL):
+2.2.4, 2.2.5 (B4: code is locked after the verdict; FAIL by default, --warn prints WARN and exits 0):
   --after-verdict VERDICT [VERDICT ...] --repo DIR [--orders DIR]
              commits made after the last gate verdict. Of the verdicts' `CANDIDATE_HEAD:` commits (resolved in --repo),
              the last is the one the others lead to (else the newest commit date). Each commit from it to HEAD that
-             changes a file outside the verdict order's SCOPE that is not a document prints `~ WARN LATE_COMMIT <sha>
-             <subject>: <files>`. A document is a file under a DIRECTOR/ folder or a .md / .rst / .txt file. The order
-             is the verdict's `ORDER:` file, looked up in --orders, the verdict's folder and ../orders; without it every
-             non-document file counts. A candidate that cannot be resolved, or a HEAD that does not contain it, says it
-             did not compare (NOT_CHECKED, never a silent pass). Only reads (git rev-parse / rev-list / diff).
+             changes a file that is not a document prints `~ FAIL LATE_COMMIT <sha> <subject>: <files>`: the verdict
+             judged the candidate, so changed code needs a new GATE_VERDICT whose CANDIDATE_HEAD is the new commit
+             (2.2.5: inside the order's SCOPE too). A document is a file under a DIRECTOR/ or docs/ folder or a .md /
+             .rst / .txt file; commits that only change documents pass. A verdict whose candidate is a commit that is
+             no longer in HEAD's history (the branch was rewritten after the verdict) prints `~ FAIL REWRITTEN`. The
+             order (`ORDER:` file, looked up in --orders, the verdict's folder and ../orders) is named in the title.
+             A candidate that cannot be resolved says it did not compare (NOT_CHECKED, never a silent pass). Only reads
+             (git rev-parse / rev-list / diff / merge-base).
+
+2.2.5 (B3, gate order; B5, final acceptance):
+  --sequence ORDER [ORDER ...] --dispatch-log DIRECTOR_LOG.md --repo DIR
+             for each Standard / Strict order (Direct is skipped):
+             - the plan approval must come before the worker's first action. The approval is the order's earliest
+               whole line `PLAN_APPROVED <WO-ID> ...` in the log, else its earliest DISPATCH line; its time is the
+               line's `<date time [zone]> |` column, else the nearest dated heading or dated line above it. The first
+               action is the earliest commit on any ref (author time) whose subject starts with the order's ID
+               (`WO-12: ...`, the commit convention). Approval later than that commit fails (an approval written
+               after the work began); no approval line at all fails. A log time without a zone is read in the
+               commit's zone. No commit, or no time for the approval, is a NOT_CHECKED note.
+             - its own spec review: a whole line `SPEC_REVIEW <WO-ID> tokens=.. issues=.. adopted=..` in the log, else
+               a reviews/*SPEC_REVIEW* file whose name holds the ID (ported from the DeepSeek port's ds.4 B4). None
+               fails; a line without the three fields is noted.
+             - the reviews come from other sessions: the spec review's session (`session=<id>` on its line, or
+               `SESSION_ID:` in its file) must differ from the author's (`session=` on the DISPATCH line, or
+               `SESSION_ID:` in the order), and the gate verdict's `SESSION_ID:` (a *VERDICT* file holding the ID)
+               from the task report's (a *TASK_REPORT* file holding the ID). The same id fails; a missing id is
+               `~ WARN SESSION` (not shown either way).
+  --final DIR
+             final acceptance of the DIRECTOR folder DIR (or a folder holding DIRECTOR/): FAIL without end-to-end
+             evidence, a non-empty file in evidence/E2E/ (the lead ran the spec's scenarios once through the product's
+             public entry point). Notes (never fail): an E2E record without an `ENTRY_POINT:` line, a
+             DECISION_REGISTER.md table of DD rows without a 驗收案例 column, and each DD row (not SUPERSEDED) whose
+             驗收案例 cell is empty: `~ WARN DD_CASE`.
 
 Bringing in a project that already has files in another format:
   --warn          print WARN instead of FAIL and exit 0, so old files do not block work
@@ -1446,9 +1474,10 @@ def preflight(report, order, order_path, evidence_dir=None, dispatch=None, log_n
 
 
 def is_document(path):
-    """2.2.4: a file under a DIRECTOR/ folder, or a .md / .rst / .txt file."""
+    """2.2.4: a file under a DIRECTOR/ folder, or a .md / .rst / .txt file. 2.2.5 (B4): or under a top-level docs/."""
     parts = path.replace("\\", "/").split("/")
-    return "DIRECTOR" in parts[:-1] or parts[-1].lower().endswith((".md", ".rst", ".txt"))
+    return "DIRECTOR" in parts[:-1] or parts[0] == "docs" and len(parts) > 1 \
+        or parts[-1].lower().endswith((".md", ".rst", ".txt"))
 
 
 def verdict_order(verdict, text, orders_dir=None):
@@ -1464,9 +1493,10 @@ def verdict_order(verdict, text, orders_dir=None):
     return None
 
 
-def after_verdict(verdicts, repo, orders_dir=None, strict=False):
-    """2.2.4 (shadow): commits after the last verdict's candidate that change files outside its order's SCOPE that are
-    not documents. Returns (lines to print, number of late commits found, files not found)."""
+def after_verdict(verdicts, repo, orders_dir=None, strict=True):
+    """2.2.4, 2.2.5 (B4): commits after the last verdict's candidate that change files that are not documents (code
+    needs a new verdict for the new candidate), and verdicts whose candidate is no longer in HEAD's history (rewritten).
+    strict=False (--warn) prints WARN. Returns (lines to print, number of late or rewritten found, files not found)."""
     lines, missing, found = [], [], []
     for path in verdicts:
         if not pathlib.Path(path).is_file():
@@ -1488,6 +1518,22 @@ def after_verdict(verdicts, repo, orders_dir=None, strict=False):
 
     def leads_to(a, b):
         return a == b or base_git(repo, "merge-base", "--is-ancestor", a, b)[0] == 0
+    word = "FAIL" if strict else "WARN"
+    code, out = base_git(repo, "rev-parse", "--verify", "--quiet", "HEAD^{commit}")
+    head_sha = out.lower() if code == 0 else ""
+    rewritten = []  # 2.2.5 (B4): the verdict's commit is no longer on the branch
+    if head_sha:
+        for full, path, text in found:
+            if not leads_to(full, head_sha):
+                subject = base_git(repo, "log", "-1", "--format=%s", full)[1]
+                rewritten.append(f"  ~ {word} REWRITTEN {path}: CANDIDATE_HEAD {full[:12]} ({subject}) is not in the "
+                                 f"history of HEAD {head_sha[:12]}; the branch was rewritten after the verdict (or HEAD "
+                                 "is another branch): judge the new commit again")
+        kept = [f for f in found if leads_to(f[0], head_sha)]
+        if rewritten and not kept:
+            return ([f"{word} AFTER_VERDICT: no verdict candidate is in the history of HEAD {head_sha[:12]}"]
+                    + rewritten + lines, len(rewritten), missing)
+        found = kept or found
     last = next((f for f in found if all(leads_to(o[0], f[0]) for o in found)), None)
     how = "the others lead to it"
     if last is None:
@@ -1495,39 +1541,257 @@ def after_verdict(verdicts, repo, orders_dir=None, strict=False):
         how = "newest commit date; the candidates are on different lines"
     candidate, path, text = last
     order = verdict_order(path, text, orders_dir)
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("scope_check", pathlib.Path(__file__).resolve().parent / "scope_check.py")
-    scope_check = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(scope_check)
-    scope_items = parse_list(order.read_text(encoding="utf-8-sig"), "SCOPE") if order else None
-    scope = [scope_check.glob_regex(g) for g in scope_items or [] if g != "NONE"]
-    code, out = base_git(repo, "rev-parse", "--verify", "--quiet", "HEAD^{commit}")
-    head_sha = out.lower() if code == 0 else ""
     title = (f"AFTER_VERDICT {path} candidate {candidate[:12]} ({how}); order "
-             + (f"{order.name} SCOPE {len(scope_items or [])} item(s)" if order else "not found: every non-document file counts"))
+             + (f"{order.name}" if order else "not found") + "; every non-document file counts (SCOPE too)")
+    head = f"{word} {title}" if rewritten else None
     if not head_sha:
         return [f"NOT_CHECKED {title}", f"  ~ NOT_CHECKED HEAD is not a commit in {repo}"] + lines, 0, missing
     if head_sha == candidate:
-        return [f"OK   {title}", "  ~ HEAD is the candidate; no commit after the verdict"] + lines, 0, missing
-    if not leads_to(candidate, head_sha):
-        return [f"NOT_CHECKED {title}", f"  ~ NOT_CHECKED HEAD {head_sha[:12]} does not contain the candidate; not compared"] \
-            + lines, 0, missing
+        return [head or f"OK   {title}", "  ~ HEAD is the candidate; no commit after the verdict"] + rewritten + lines, \
+            len(rewritten), missing
     code, out = base_git(repo, "rev-list", "--reverse", "--parents", f"{candidate}..{head_sha}")
     late = []
     for row in (out.split("\n") if code == 0 and out else []):
         commit, *parents = row.split()
         code, names = base_git(repo, "-c", "core.quotePath=false", "diff", "--name-only", "--no-renames",
                                parents[0] if parents else "4b825dc642cb6eb9a060e54bf8d69288fbee4904", commit)
-        outside = [n for n in names.split("\n") if n and not is_document(n) and not any(rx.fullmatch(n) for rx in scope)]
-        if outside:
+        code_files = [n for n in names.split("\n") if n and not is_document(n)]
+        if code_files:
             subject = base_git(repo, "log", "-1", "--format=%s", commit)[1]
-            late.append(f"  ~ {'FAIL' if strict else 'WARN'} LATE_COMMIT {commit[:12]} {subject}: "
-                        + ", ".join(outside[:8]) + (f" (+{len(outside) - 8} more)" if len(outside) > 8 else ""))
+            late.append(f"  ~ {word} LATE_COMMIT {commit[:12]} {subject}: "
+                        + ", ".join(code_files[:8]) + (f" (+{len(code_files) - 8} more)" if len(code_files) > 8 else ""))
     count = len(out.split("\n")) if code == 0 and out else 0
-    word = "FAIL" if late and strict else ("WARN" if late else "OK  ")
-    return ([f"{word} {title}: HEAD {head_sha[:12]} is {count} commit(s) later, {len(late)} change files outside "
-             f"SCOPE that are not documents" + ("" if strict else "; shadow, exit unchanged")] + late + lines,
-            len(late), missing)
+    found_any = len(late) + len(rewritten)
+    lead = f"{word} " if found_any else "OK   "
+    return ([f"{lead}{title}: HEAD {head_sha[:12]} is {count} commit(s) later, {len(late)} change files that are not "
+             "documents" + ("; a code change needs a new GATE_VERDICT for the new candidate" if late else "")
+             + ("" if strict else "; --warn, exit unchanged")] + late + rewritten + lines, found_any, missing)
+
+
+# 2.2.5 (B3): events read like DISPATCH (a whole line, outside fences), optionally after a `<date> |` column and an
+# `EVENT |` column, before a `| note` column.
+EVENT_COLUMN = r"(?:[A-Z][A-Z_]*[ \t]*\|[ \t]*)?"
+PLAN_APPROVED = re.compile(LOG_DATE + EVENT_COLUMN + r"PLAN_APPROVED[ \t]+([^\s|`]+?)(?:\.md)?(?:[ \t]+([^|`]*))?(?:\|[^`]*)?")
+DISPATCH_EVENT = re.compile(LOG_DATE + EVENT_COLUMN + r"DISPATCH[ \t]+([^\s|`]+?)(?:\.md)?[ \t]+(rev=\d+[ \t]+sha=[0-9a-fA-F]{64})"
+                            r"[ \t]*(?:\|[^`]*)?")
+SPEC_REVIEW_EVENT = re.compile(LOG_DATE + EVENT_COLUMN + r"SPEC_REVIEW[ \t]+([^\s|`]+?)(?:\.md)?(?:[ \t]+([^|`]*))?(?:\|[^`]*)?")
+LOG_TIME = re.compile(r"#*[ \t]*(\d{4})-(\d{2})-(\d{2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?"
+                      r"(?:[ \t]*(?:([+-])(\d{2}):?(\d{2})|(Z)))?")
+SESSION = re.compile(r"(?:^[ \t]*SESSION_ID[ \t]*[:=][ \t]*|\bsession=)`?([A-Za-z0-9][\w.:-]*)", re.M)
+REVIEW_FIELDS = ("tokens=", "issues=", "adopted=")
+
+
+def log_time(line):
+    """The time a log line or heading starts with (naive when it gives no zone), else None."""
+    import datetime
+    m = LOG_TIME.match(line)
+    if not m:
+        return None
+    year, month, day, hour, minute, second, sign, zone_h, zone_m, zulu = m.groups()
+    try:
+        when = datetime.datetime(int(year), int(month), int(day), int(hour), int(minute), int(second or 0))
+    except ValueError:
+        return None
+    if zulu:
+        return when.replace(tzinfo=datetime.timezone.utc)
+    if sign:
+        shift = datetime.timedelta(hours=int(zone_h), minutes=int(zone_m))
+        return when.replace(tzinfo=datetime.timezone(shift if sign == "+" else -shift))
+    return when
+
+
+def timed_events(text, pattern):
+    """[(id, time or None, how, match)] of the whole-line events in log order. A line without a time of its own takes
+    the time of the nearest dated heading or dated line above it. The log is append-only, so a line is not older than
+    the dated lines above it: a line dated earlier than the latest dated line above it (headings aside) gets that
+    later time. how says where the time came from ("" for the line's own)."""
+    out, above, latest = [], None, None
+    for line in log_lines(text):
+        own = log_time(line)
+        m = pattern.fullmatch(line)
+        if m:
+            when, how = (own, "") if own else (above, " (from the dated heading or line above it)")
+            if when is not None and latest is not None and when.replace(tzinfo=None) < latest.replace(tzinfo=None):
+                how = (f" (the line says {when:%H:%M} but comes below a line dated {latest:%Y-%m-%d %H:%M}; an "
+                       "append-only log line is not older than the lines above it)")
+                when = latest.replace(tzinfo=when.tzinfo or latest.tzinfo)
+            out.append((m.group(1), when, how, m))
+        if own:
+            above = own
+            if not line.lstrip().startswith("#") and (latest is None
+                                                      or own.replace(tzinfo=None) > latest.replace(tzinfo=None)):
+                latest = own
+    return out
+
+
+def named_id(ids):
+    """A regex for any of the order IDs as a whole word (WO-1 does not match WO-10)."""
+    return re.compile("|".join(rf"(?<![A-Za-z0-9]){re.escape(i)}(?![0-9])" for i in sorted(ids)), re.I)
+
+
+def first_commit(repo, ids):
+    """(author time, sha, subject) of the earliest commit on any ref whose subject starts with one of ids, else None.
+    Raises RuntimeError when git cannot list the commits."""
+    import datetime
+    code, out = base_git(repo, "log", "--all", "--format=%H%x09%aI%x09%s")
+    if code:
+        raise RuntimeError(out.splitlines()[-1][:200] if out else f"git log exit {code}")
+    starts = re.compile(r"[\[(]?(?:" + named_id(ids).pattern + ")", re.I)
+    best = None
+    for row in out.splitlines():
+        sha, _, rest = row.partition("\t")
+        when, _, subject = rest.partition("\t")
+        if starts.match(subject.strip()):
+            try:
+                # git writes a UTC time as ...Z; fromisoformat takes Z only from Python 3.11 on
+                at = datetime.datetime.fromisoformat(re.sub(r"Z$", "+00:00", when.strip()))
+            except ValueError:
+                continue
+            if best is None or at < best[0]:
+                best = (at, sha, subject.strip())
+    return best
+
+
+def session_in(text):
+    m = SESSION.search(text or "")
+    return m.group(1) if m else None
+
+
+def files_naming(folder, ids, word):
+    """The .md files under folder (not .git) whose name holds word and one of the order IDs."""
+    rx = named_id(ids)
+    try:
+        return sorted(p for p in folder.rglob("*.md") if ".git" not in p.parts and word in p.name.upper()
+                      and rx.search(p.name))
+    except OSError:
+        return []
+
+
+def read_or_none(path):
+    try:
+        return path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeError):
+        return None
+
+
+def sequence_problems(order_text, order_path, log_text, log_path, repo, notes):
+    """2.2.5 (B3) for one Standard / Strict order: approval before the first commit, its own spec review, reviews from
+    another session. Returns the problems; notes get NOT_CHECKED and WARN lines."""
+    problems = []
+    ids = id_prefixes(order_ids(order_text, order_path)) or {pathlib.Path(order_path).stem.upper()}
+    label = "/".join(sorted(ids))
+    mine = lambda events: [e for e in events if id_prefixes([e[0]]) & ids]  # noqa: E731
+    approvals = mine(timed_events(log_text, PLAN_APPROVED))
+    kind = "PLAN_APPROVED"
+    if not approvals:
+        approvals, kind = mine(timed_events(log_text, DISPATCH_EVENT)), "DISPATCH"
+    try:
+        first = first_commit(repo, ids)
+    except RuntimeError as error:
+        first = None
+        notes.append(f"NOT_CHECKED first action: git log in {repo} failed ({error})")
+    if not approvals:
+        problems.append(f"PLAN_APPROVED: no `PLAN_APPROVED {label} ...` or `DISPATCH {label} rev=.. sha=..` line in "
+                        f"{log_path}; the work has no approval on record")
+    elif first is None:
+        notes.append(f"NOT_CHECKED gate order: no commit subject starts with {label}; the first action was not found")
+    else:
+        timed = [e for e in approvals if e[1] is not None]
+        if not timed:
+            notes.append(f"NOT_CHECKED gate order: the {kind} line for {label} has no time and no dated heading above it")
+        else:
+            at, sha, subject = first
+            name, when, how, _ = min(timed, key=lambda e: e[1].replace(tzinfo=e[1].tzinfo or at.tzinfo))
+            approved = when if when.tzinfo else when.replace(tzinfo=at.tzinfo)
+            shown = approved.strftime("%Y-%m-%d %H:%M %z") + how
+            if approved > at:
+                problems.append(f"GATE_ORDER: {kind} {name} at {shown} is later than the worker's first commit "
+                                f"{sha[:10]} at {at.isoformat()} `{subject[:80]}`; the approval was written after the "
+                                "work began")
+            else:
+                notes.append(f"gate order: {kind} {name} at {shown}, first commit {sha[:10]} at {at.isoformat()}")
+    # its own spec review (ported from the DeepSeek port's ds.4 B4 spec_review_problems)
+    reviews = mine(timed_events(log_text, SPEC_REVIEW_EVENT))
+    review_files = files_naming(pathlib.Path(log_path).resolve().parent / "reviews", ids, "SPEC_REVIEW")
+    reviewer = None
+    if reviews:
+        rest = reviews[-1][3].group(2) or ""
+        lacking = [f for f in REVIEW_FIELDS if f not in rest]
+        if lacking:
+            notes.append(f"SPEC_REVIEW {label}: the log line lacks {' '.join(lacking)}")
+        reviewer = session_in(reviews[-1][3].group(0))
+    elif review_files:
+        notes.append(f"SPEC_REVIEW {label}: no log line; review file {review_files[-1].name}")
+    else:
+        problems.append(f"SPEC_REVIEW: no `SPEC_REVIEW {label} tokens=... issues=... adopted=...` line in {log_path} "
+                        "and no reviews/*SPEC_REVIEW* file naming it; every Standard / Strict order needs its own")
+    if reviewer is None and review_files:
+        reviewer = session_in(read_or_none(review_files[-1]))
+    dispatches = mine(timed_events(log_text, DISPATCH_EVENT))
+    author = session_in(order_text) or next((session_in(e[3].group(0)) for e in reversed(dispatches)
+                                             if session_in(e[3].group(0))), None)
+    folder = pathlib.Path(log_path).resolve().parent
+    verdicts = files_naming(folder, ids, "VERDICT")
+    reports = files_naming(folder, ids, "TASK_REPORT")
+    pairs = [("SPEC_REVIEW", reviewer, "the order's author", author, bool(reviews or review_files))]
+    if verdicts:
+        pairs.append(("GATE_VERDICT", session_in(read_or_none(verdicts[-1])), "the task report's",
+                      session_in(read_or_none(reports[-1])) if reports else None, True))
+    for what, theirs, whose, own, present in pairs:
+        if not present:
+            continue
+        if theirs and own and theirs == own:
+            problems.append(f"SESSION: the {what} for {label} came from session {theirs}, the same as {whose}; a review "
+                            "must come from another session")
+        elif not (theirs and own):
+            lacking = [name for name, value in (("the reviewer", theirs), (whose, own)) if not value]
+            notes.append(f"WARN SESSION: {what} {label}: no session id for {' and '.join(lacking)}; not shown that the "
+                         "review came from another session")
+    return problems
+
+
+E2E_ENTRY = re.compile(r"^[ \t]*ENTRY_POINT[ \t]*[:=][ \t]*\S", re.M)
+
+
+def final_problems(folder, notes):
+    """2.2.5 (B5): final acceptance of a DIRECTOR folder (or a folder holding DIRECTOR/)."""
+    base = pathlib.Path(folder)
+    if not (base / "evidence").is_dir() and (base / "DIRECTOR").is_dir():
+        base = base / "DIRECTOR"
+    problems = []
+    e2e = base / "evidence" / "E2E"
+    records = sorted(p for p in e2e.rglob("*") if p.is_file() and p.stat().st_size > 0) if e2e.is_dir() else []
+    if not records:
+        problems.append(f"E2E: no end-to-end evidence in {e2e}; before the final verdict the lead runs the spec's "
+                        "scenarios once through the product's public entry point and keeps the output there")
+    elif not any(E2E_ENTRY.search(read_or_none(p) or "") for p in records):
+        notes.append(f"WARN E2E: no record in {e2e} names its `ENTRY_POINT:` (the one public entry point it ran)")
+    register = base / "DECISION_REGISTER.md"
+    text = read_or_none(register) if register.is_file() else None
+    if text is None:
+        notes.append(f"NOT_CHECKED DD cases: {register} not found")
+        return problems
+    column, no_column, empty = None, 0, []
+    for line in text.splitlines():
+        if not line.lstrip().startswith("|"):
+            column = None if not line.strip() else column
+            continue
+        cells = split_cells(line)
+        if cells and cells[0] == "ID":
+            column = next((i for i, c in enumerate(cells) if "驗收案例" in c), -1)
+            continue
+        if not cells or not re.fullmatch(r"\**DD-\d+\**", cells[0]) or any("SUPERSEDED" in c for c in cells):
+            continue
+        if column is None or column < 0:
+            no_column += 1
+        elif column >= len(cells) or blank(cells[column]) or cells[column].strip() in ("-", "—", "無"):
+            empty.append(cells[0].strip("*"))
+    if no_column:
+        notes.append(f"WARN DD_CASE: {no_column} DD row(s) in {register.name} are in a table without a 驗收案例 column")
+    if empty:
+        notes.append(f"WARN DD_CASE: {', '.join(empty[:12])}" + (f" (+{len(empty) - 12} more)" if len(empty) > 12 else "")
+                     + " have no 驗收案例 (an end-to-end case with exact expected numbers)")
+    return problems
 
 
 def check_verdict(text, notes):
@@ -1662,6 +1926,7 @@ def dated(kind, text):
 
 BASE_DEFAULTS = {"check": True, "fetch": True, "strict": False}
 BASE_SHA = re.compile(r"(?:(?P<ref>[\w./-]+)\s*@\s*)?\b(?P<sha>[0-9a-fA-F]{7,40})\b")
+BRACKETED = re.compile(r"[（(][^（()）]*[)）]")
 
 
 def base_config(order_path, config_path, notes):
@@ -1696,6 +1961,30 @@ def base_config(order_path, config_path, notes):
     return config
 
 
+LONG_PATH_QUOTED = re.compile(r"""['"]([^'"\n]+)['"]""")
+LONG_PATH_BARE = re.compile(r"(\S+): Filename too long")
+WINDOWS_PATH_MAX = 259  # MAX_PATH 260 with the closing NUL
+
+
+def long_path(message, root):
+    """2.2.5 (B11): one clear line for git's `Filename too long`: which path, how long, how much over, what to do.
+    None when the message is about something else."""
+    line = next((row for row in (message or "").splitlines() if "Filename too long" in row), None)
+    if line is None:
+        return None
+    quoted = LONG_PATH_QUOTED.findall(line)
+    bare = LONG_PATH_BARE.search(line)
+    name = (next((q for q in quoted if "/" in q or "\\" in q), quoted[0]) if quoted else bare.group(1) if bare else "")
+    name = name.strip()
+    base = str(root).rstrip("/\\")
+    full = name if not name or os.path.isabs(name) else base + "/" + name
+    size = len(full)
+    over = (f"{size} characters, {size - WINDOWS_PATH_MAX} over the {WINDOWS_PATH_MAX} Windows allows"
+            if size > WINDOWS_PATH_MAX else f"{size} characters")
+    return (f"path too long for git on Windows: {full or root} ({over}); use a shorter origin / worktree folder "
+            "(for example D:/w/<name>) or `git config core.longpaths true` in that repository")
+
+
 def base_git(repo, *args, timeout=120):
     import subprocess
     try:
@@ -1703,7 +1992,8 @@ def base_git(repo, *args, timeout=120):
                               errors="replace", timeout=timeout)
     except (OSError, subprocess.TimeoutExpired) as error:
         return 1, str(error)
-    return proc.returncode, (proc.stdout if proc.returncode == 0 else (proc.stderr or proc.stdout)).strip()
+    out = (proc.stdout if proc.returncode == 0 else (proc.stderr or proc.stdout)).strip()
+    return proc.returncode, (long_path(out, repo) or out) if proc.returncode else out
 
 
 def base_ref_problems(order_text, repo, config, notes, fetched):
@@ -1715,6 +2005,7 @@ def base_ref_problems(order_text, repo, config, notes, fetched):
         return []
     m = re.search(r"^[ \t]*BASE_REF[ \t]*=[ \t]*(.*)$", order_text, re.M)
     value = re.split(r"\s+#", m.group(1))[0].strip() if m else ""  # a trailing ` # comment` is not the ref
+    value = BRACKETED.sub(" ", value).strip()  # 2.2.5 (B10): `origin/main @ abc1234（v2.2.4）`: brackets are a comment
     found = BASE_SHA.search(value)
     if not found:  # no commit named (e.g. `main @ <placeholder>`): nothing to compare, and no note (older orders unchanged)
         return []
@@ -1791,11 +2082,16 @@ def main():
     ap.add_argument("--order-history", metavar="DIR", help="with --match: old orders, found by hash, for carried-over evidence")
     ap.add_argument("--artifact-root", metavar="DIR", help="with --po-acceptance: the folder the entry and manifest paths "
                     "are read from (default: the record file's folder)")
-    ap.add_argument("--after-verdict", nargs="+", default=[], metavar="VERDICT", help="2.2.4: with --repo, WARN for "
-                    "commits after the last verdict's candidate that change files outside its order's SCOPE (shadow)")
+    ap.add_argument("--after-verdict", nargs="+", default=[], metavar="VERDICT", help="2.2.4, 2.2.5: with --repo, FAIL "
+                    "for commits after the last verdict's candidate that change files that are not documents, and for "
+                    "a candidate no longer in HEAD's history (--warn: WARN, exit 0)")
     ap.add_argument("--orders", metavar="DIR", help="2.2.4: with --after-verdict, the folder the verdict's ORDER file is in")
+    ap.add_argument("--sequence", nargs="+", default=[], metavar="ORDER", help="2.2.5: with --dispatch-log and --repo, "
+                    "approval before the first commit, a spec review per order, reviews from another session")
+    ap.add_argument("--final", metavar="DIR", help="2.2.5: final acceptance of a DIRECTOR folder: evidence/E2E/ and the "
+                    "DD 驗收案例 column")
     ap.add_argument("--strict", action="store_true", help="2.2.2: with --resume, RESUME_SIZE fails instead of a shadow note; "
-                    "2.2.4: with --after-verdict, a late commit fails")
+                    "with --after-verdict, the default since 2.2.5 (kept for old commands)")
     ap.add_argument("--config", metavar="director_work.json", help="2.2.2: with --resume, read resume.max_bytes / "
                     "resume.max_line_bytes (default: director_work.json beside the RESUME_STATE, else 20480 / 4096); "
                     "with --order, read base_ref.check / fetch / strict")
@@ -1842,16 +2138,46 @@ def main():
             ap.error("--after-verdict needs --repo DIR, the checkout the commits are in")
         if a.orders and not pathlib.Path(a.orders).is_dir():
             ap.error(f"--orders: folder not found: {a.orders}")
-        lines, late, late_missing = after_verdict(a.after_verdict, a.repo, a.orders, a.strict)
+        lines, late, late_missing = after_verdict(a.after_verdict, a.repo, a.orders, not a.warn)
         print("\n".join(lines))
-        late_failed = len(late_missing) + (late if a.strict else 0)
-    if not jobs and (a.hash or a.brief or a.after_verdict) and not a.preflight:
+        late_failed = len(late_missing) + (0 if a.warn else late)
+    if a.sequence:  # 2.2.5 (B3)
+        if not a.dispatch_log or not pathlib.Path(a.dispatch_log).is_file():
+            ap.error("--sequence needs --dispatch-log DIRECTOR_LOG.md (an existing file)")
+        if not a.repo or not pathlib.Path(a.repo).is_dir():
+            ap.error("--sequence needs --repo DIR, the checkout the worker commits are in")
+        sequence_log = pathlib.Path(a.dispatch_log).read_text(encoding="utf-8-sig")
+        for path in a.sequence:
+            notes, text = [], read_or_none(pathlib.Path(path)) if pathlib.Path(path).is_file() else None
+            mode = re.search(r"^\s*GOVERNANCE\s*=\s*(\w+)", text or "", re.M)
+            if text is None:
+                problems = ["file not found (or not UTF-8 text)"]
+            elif not mode or mode.group(1) not in ("Standard", "Strict"):
+                print(f"SKIP sequence {path} (GOVERNANCE {mode.group(1) if mode else 'not set'}: only Standard / Strict)")
+                continue
+            else:
+                problems = sequence_problems(text, path, sequence_log, a.dispatch_log, a.repo, notes)
+            late_failed += bool(problems) and not a.warn
+            print(f"{('WARN' if a.warn else 'FAIL') if problems else 'OK  '} sequence {path}"
+                  + (f" (GOVERNANCE {mode.group(1)})" if mode else ""))
+            for line in [f"  - {p}" for p in problems] + [f"  ~ {n}" for n in notes]:
+                print(line)
+    if a.final:  # 2.2.5 (B5)
+        if not pathlib.Path(a.final).is_dir():
+            ap.error(f"--final: folder not found: {a.final}")
+        notes = []
+        problems = final_problems(a.final, notes)
+        late_failed += bool(problems) and not a.warn
+        print(f"{('WARN' if a.warn else 'FAIL') if problems else 'OK  '} final {a.final}")
+        for line in [f"  - {p}" for p in problems] + [f"  ~ {n}" for n in notes]:
+            print(line)
+    if not jobs and (a.hash or a.brief or a.after_verdict or a.sequence or a.final) and not a.preflight:
         return 1 if missing or brief_failed or late_failed else 0
     if not jobs and not a.preflight:
         ap.error("give at least one of --resume / --order / --report / --verdict / --test-request / --po-acceptance / "
-                 "--match / --preflight / --hash / --brief / --after-verdict")
-    if a.repo and not (a.preflight or a.order or a.after_verdict):
-        ap.error("--repo works with --preflight, --order or --after-verdict")
+                 "--match / --preflight / --hash / --brief / --after-verdict / --sequence / --final")
+    if a.repo and not (a.preflight or a.order or a.after_verdict or a.sequence):
+        ap.error("--repo works with --preflight, --order, --after-verdict or --sequence")
     if a.strict and not (a.resume or a.after_verdict):
         ap.error("--strict works with --resume or --after-verdict")
     if a.config and not (a.resume or a.order):
@@ -1868,8 +2194,8 @@ def main():
         ap.error("--evidence-dir works with --match or --preflight")
     if a.evidence_dir and not pathlib.Path(a.evidence_dir).is_dir():
         ap.error(f"--evidence-dir: folder not found: {a.evidence_dir}")
-    if a.dispatch_log and not (a.match or a.preflight or a.brief):
-        ap.error("--dispatch-log works with --match, --preflight or --brief")
+    if a.dispatch_log and not (a.match or a.preflight or a.brief or a.sequence):
+        ap.error("--dispatch-log works with --match, --preflight, --brief or --sequence")
     if a.dispatch_log and not pathlib.Path(a.dispatch_log).is_file():
         ap.error(f"--dispatch-log: file not found: {a.dispatch_log}")
     if a.candidate and not (a.match or a.verdict or a.po_acceptance):
@@ -1991,4 +2317,7 @@ if __name__ == "__main__":
         sys.exit(main())
     except UnicodeDecodeError as error:  # 2.2: one line and NOT_RUN (exit 2), never a traceback
         print(f"GATE_CHECK: NOT_RUN {not_utf8(error)}")
+        sys.exit(2)
+    except (OSError, RuntimeError, ValueError) as error:  # 2.2.5: one line, never a traceback
+        print(f"GATE_CHECK: NOT_RUN {type(error).__name__}: {str(error)[:200]}")
         sys.exit(2)

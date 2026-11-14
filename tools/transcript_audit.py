@@ -1,4 +1,4 @@
-"""Rebuild an action log from Claude Code transcripts (DIRECTOR-WORK 2.2.1), for a project that ran without the hook.
+"""Rebuild an action log from Claude Code transcripts (DIRECTOR-WORK 2.2.1, 2.2.5), for a project that ran without the hook.
 
   python -I -X utf8 transcript_audit.py build --out FILE [--force] --transcript FILE.jsonl [--transcript ...]
   python -I -X utf8 transcript_audit.py build --out FILE [--force] --session ID [--project-dir DIR] [--root DIR]
@@ -9,7 +9,9 @@ summary, output_record, digest and canonical), so `audit_log.py verify` and `rep
 hook log. One line per tool call that has a result in the transcript:
   session_id / agent_id    the transcript line's sessionId / agentId (agentId only in subagent transcripts)
   tool / tool_use_id       the assistant message's tool_use name / id
-  input                    audit_log.summary(tool_use input): masked, at most 500 characters, as the hook writes it
+  input                    audit_log.summary(tool_use input): masked; 2.2.5: whole (no 500-character cut). With
+                           --input-limit N it is cut at N characters like the hook's, and a cut line gets
+                           "input_cut": true (已截斷) so report_vs_audit.py matches that call on its first part only
   kind / result.status     the user message's tool_result: is_error -> failure / error (interrupted when it is the
                            user's interrupt message); else result / ok (interrupted when toolUseResult says so)
   result.sha256 / length   audit_log.output_record of toolUseResult (when the line holds one tool_result) or of the
@@ -46,7 +48,7 @@ import pathlib
 import re
 import sys
 
-VERSION = "2.2.1"
+VERSION = "2.2.5"
 INTERRUPT = "[Request interrupted by user"
 
 
@@ -174,6 +176,19 @@ def take(line, order, calls, results, counts):
     return order
 
 
+class CutAudit:
+    """2.2.5: audit_log whose summary() keeps the whole input (limit None) or cuts it at limit characters."""
+
+    def __init__(self, audit, limit):
+        self.audit, self.limit = audit, limit
+
+    def summary(self, tool_input):
+        return self.audit.summary(tool_input, self.limit)
+
+    def __getattr__(self, name):
+        return getattr(self.audit, name)
+
+
 def entry_of(audit, call, result):
     if result["is_error"]:
         text = content_text(result["content"])
@@ -190,7 +205,9 @@ def entry_of(audit, call, result):
 
 
 def build(a):
-    audit = load_audit()
+    plain = load_audit()
+    limit = getattr(a, "input_limit", 0) or None  # 2.2.5: 0 / None = keep each input whole
+    audit = CutAudit(plain, limit)
     files = find_transcripts(a)
     out = pathlib.Path(a.out)
     if out.exists() and not a.force:
@@ -209,12 +226,14 @@ def build(a):
             no_time += 1
             continue
         entry = entry_of(audit, call, result)
+        if limit is not None and entry["input"] != plain.summary(call["input"], None):
+            entry["input_cut"] = True  # 2.2.5: marked, so the reader matches this call on its first part (已截斷)
         entry["tool_use_id"] = key
         rows.append((entry["ts"], result["order"], entry))
     rows.sort(key=lambda row: (row[0], row[1]))
     source = {"by": "transcript_audit.py", "version": VERSION, "transcripts": sources, "lines": len(rows),
               "no_result": no_result, "duplicates": counts["duplicates"], "no_time": no_time,
-              "bad_lines": counts["bad_lines"]}
+              "bad_lines": counts["bad_lines"], "input_limit": limit}
     now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds")
     first = {"ts": now, "session_id": None, "agent_id": None, "tool": None, "tool_use_id": None, "input": "",
              "kind": "rebuild", "result": {"status": "rebuilt"}, "duration_ms": None, "source": source}
@@ -258,8 +277,14 @@ def main(argv=None):
     p.add_argument("--root", default=str(pathlib.Path.home() / ".claude" / "projects"),
                    help="with --session: the projects root (default ~/.claude/projects)")
     p.add_argument("--no-subagents", action="store_true", help="do not read <stem>/subagents/*.jsonl")
+    p.add_argument("--input-limit", type=int, default=0,
+                   help="2.2.5: cut each input at this many characters (default 0: keep it whole); a cut line is "
+                        "marked input_cut")
     a = ap.parse_args(argv)
     sys.stdout.reconfigure(encoding="utf-8")
+    if a.input_limit < 0:
+        print("NOT_RUN --input-limit must be 0 (no cut) or more")
+        return 2
     try:
         return build(a)
     except CannotRun as error:

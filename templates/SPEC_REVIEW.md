@@ -1,6 +1,6 @@
 # 規格審查（派工前，subagent 用）
 
-Strict 工單必做，Standard 選用，Direct 不做（`docs/02`）。總監用 Agent 工具開一個只讀的 subagent（只給 Read / Glob / Grep），模型照 `docs/05` 選，預設用便宜的那一級。把下面的提示填好貼給它。結果只給總監參考，怎麼改工單由總監決定。時機：工單寫好、放上 PO 待決頁之前，在同一輪跑完（Claude Desktop 見 `docs/11`「開 worker 的限制」）；審完工單又改版，就重審。
+Strict 和 Standard 工單必做（2.2.5 起 Standard 也必做：`gate_check.py --sequence` 找不到就 FAIL），Direct 不做（`docs/02`）。審查要來自和寫工單的人不同的 session（subagent 有自己的 agent id）。總監用 Agent 工具開一個只讀的 subagent（只給 Read / Glob / Grep），模型照 `docs/05` 選，預設用便宜的那一級。把下面的提示填好貼給它。結果只給總監參考，怎麼改工單由總監決定。時機：工單寫好、放上 PO 待決頁之前，在同一輪跑完（Claude Desktop 見 `docs/11`「開 worker 的限制」）；審完工單又改版，就重審。
 
 ```text
 你是規格審查員，只讀不寫。審這張工單能不能直接開工：<工單路徑>
@@ -21,6 +21,13 @@ Strict 工單必做，Standard 選用，Direct 不做（`docs/02`）。總監用
    測試名｜期望值｜怎麼算的｜相符 / 不符 / 算不出。
 9. B 節的「不做」有沒有寫（可以是「無」，留空算 P1）；交付物是函式庫或工具時，「可呼叫的入口」有沒有寫一個
    測試可直接呼叫的公開函式（輸入路徑或資料 → 輸出結果），只能從命令列用算 P1。
+10. 上限（2.2.5）：工單或程式新增的任何上限（大小、筆數、深度）有沒有寫理由？會不會擋到真實資料（拿真實資料的
+    最大值比）？沒寫理由算 P1。
+11. 例外（2.2.5）：程式最上層有沒有攔下所有例外，使用者看不到 Traceback？沒有一條 AC 驗這件事算 P1。
+12. 錯誤訊息（2.2.5）：有沒有清理：不回顯控制字元、不顯示原始 Python 例外文字，但該報的問題照報？
+13. 行數上限（2.2.5）：工單有沒有寫行數上限（每個檔或函式），並要 worker 自檢時自己量？
+14. 測試期望值（2.2.5）：期望值是不是由獨立的 oracle 或手算表產生，而不是寫程式的人邊寫邊抄程式的輸出？
+    讀檔的工具有沒有用 `templates/weird_inputs.py` 的怪檔案（空檔、BOM、控制字元、超長行、深層巢狀、錯誤編碼）測過？
 
 輸出，總長不超過 40 行（第 8 項的重算表另計）：
 - 每個問題一行：AC-x 或「整體」｜問題｜建議改法｜嚴重度 P0 / P1 / P2
@@ -32,6 +39,6 @@ Strict 工單必做，Standard 選用，Direct 不做（`docs/02`）。總監用
 ## 總監收到結果後
 
 1. 決定改或不改工單，改了就 `REVISION` 加 1、記變更紀錄。
-2. 在 `DIRECTOR_LOG` 記一行：`SPEC_REVIEW WO-<編號> tokens=<subagent 回報的 token 數> issues=<P0/P1/P2 各幾個> adopted=<採用幾個>`。
+2. 在 `DIRECTOR_LOG` 記一行：`SPEC_REVIEW WO-<編號> tokens=<subagent 回報的 token 數> issues=<P0/P1/P2 各幾個> adopted=<採用幾個> session=<審查者的 session id 或 agent id>`（2.2.5 加 `session=`；時間用 `ran_line.py --stamp` 印）。審查檔放 `reviews/` 時寫 `SESSION_ID:` 一行。`gate_check.py --sequence` 拿它和寫工單那一方（DISPATCH 行的 `session=` 或工單的 `SESSION_ID:`）比：相同就 FAIL，缺一邊就 WARN。
 3. 鎖定測試之前（2.2.3，L-049）：第 8 項每個字面期望值都要重算過（subagent 手算，或總監另寫一支不呼叫被測程式的獨立程式），重算表寫進審查紀錄（DIRECTOR_LOG 那一行旁邊的審查檔）。有「不符」或「算不出」就不鎖，先修測試或工單。
-4. 之後這張工單如果返工，查一下規格審查有沒有提過；用這些紀錄決定 Standard 要不要繼續做（`docs/02`）。
+4. 之後這張工單如果返工，查一下規格審查有沒有提過；這些紀錄是檢討這份清單的依據（2.2.5 起 Standard 必做，不再依花費降回選用；要改由 PO 決定）。
