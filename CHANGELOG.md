@@ -6,6 +6,50 @@
 - **MINOR**：新增規則、文件、工具或選項，舊檔案照樣通過。
 - **PATCH**：修正文字、修 bug，規則不變。
 
+## 2.2.3 — 2026-11-14
+
+PATCH（版本號照 PO 指定；PO 2026-11-14：把試跑學到、對原版 DW 有用的放進來，不加 OpenSpec／SDD）：WO-DS-004 雙方試跑的教訓（LESSONS_INTAKE L-048～L-055）。report_vs_audit 比對修正和兩種 shadow WARN、`verify --rerun` 的唯讀 git、兩份範本的清單、暫存檔位置規則。新檢查全部 shadow（只印 WARN，exit code 不變）。舊檔案、舊指令照樣能用。
+
+### report_vs_audit 比對修正（L-052、L-054）
+
+- 問題：兩份試跑報告重跑，多數 FAIL 是比對器誤判（多行腳本、`...` 省略、`at=13:17（備註）`、`AC-1..AC-5` 這類寫法），總監只好逐筆人工判。
+- 指令依換行、`;`、`&&`、`||` 切段比對（heredoc、跨行 `python -c`、PowerShell here-string）；`RAN:` 下 ``` 包起來的一段算一個主張。
+- `at=` 只取時間，後面的全形備註不算；主張裡的全形（備註）不比。`AC-1/AC-2/AC-4`、`AC-1/2/4`、`AC-1..AC-5` 每個編號各要一筆。
+- 省略的主張（`...`、`同上`）可跳過紀錄裡的選項和值；`427fcef...` 對到以它開頭的 commit；被截的長紀錄行，最後一個詞被截短也對得到。
+- 一筆紀錄跑了好幾段、狀態是後面那段的：印 `exit=N not checkable`，算 OK，不再判 FAIL。
+- 新 shadow WARN：`RAN:` 一行沒有 `` `指令` ``；報告寫 `SCOPE_CHECK: … PASS`，但做事的 agent 最後一次 commit 之後沒有成功跑過 `scope_check.py`。
+- 重跑兩份 WO-DS-004 audit（輸出留在工作資料夾）：Claude 側 FAIL 5 → 2（剩下兩筆紀錄裡確實沒有），多印 scope_check 時序 WARN；DSH 側 FAIL 6 → 0（PASS 11/11）。
+
+### evidence_record verify --rerun：唯讀 git（L-055）
+
+- 問題：工單 CHECK 寫 `git diff --exit-code <sha> -- <鎖定檔>`，`--rerun` 一律拒跑（只寫程式名、要靠 PATH 找的程式都擋，而且暫存資料夾沒有 `.git`），總監只好手動跑。
+- 改法：git 只允許第一個參數就是 `diff`、`show`、`log`、`status`、`rev-parse`、`ls-files`、`cat-file`；子指令前有選項（`-c`、`-C`、`--git-dir`…）、其他子指令（push、commit、reset、checkout…）、會寫檔或執行程式的選項（`--output`、`--ext-diff`、`--textconv`、`--filters`、`--no-index`，縮寫也算）照樣 `NOT_RUN`、exit 2。
+- 在 `--repo` 頂層跑（要歷史），關掉 replace 物件、fsmonitor、pager、optional locks、外部 diff、textconv，不跑 lazy fetch、不問密碼；跑完照舊重讀 repo 狀態。另一種做法（鎖定檔用 TESTS_LOCKED sha256）寫在 `docs/02`。
+
+### 範本與文件
+
+- `templates/WORK_ORDER.md` E 節：邊界與壓力清單（L-048，9 行）：深度、長度、重複符號、極大數字、非字串、Unicode／全形、錯誤訊息不漏原生或英文訊息；需求寫「不當掉」至少一條極端輸入的 AC。
+- `templates/SPEC_REVIEW.md`：第 7 項（同一份清單，缺極端輸入 AC 算 P1）、第 8 項與總監第 3 步（L-049：鎖定前把每個字面期望值重算一次，寫進審查紀錄，有「不符」或「算不出」就不鎖）。
+- `docs/02`：暫存檔放 WORK_DIR，不放 scratchpad 或系統暫存資料夾（L-053，算工作區外，總監重跑不到）；AC 用 git 的兩種做法。`templates/TASK_REPORT.md` 的 RAN 段提醒一句。
+- 都只在寫工單、審規格、交件時讀，不是每輪必讀。
+
+### 遷移
+
+- 不用遷移。新 WARN 都是 shadow。
+- 以前因為 git 被拒跑、改成手動驗的 CHECK，現在可以直接 `verify --rerun`；寫了子指令前選項或其他子指令的照樣被擋。
+
+### 數字
+
+- 每輪必讀（`docs/01`、`03`、`06`、`08`）：9,548 → 9,548 bytes（沒變）。本版沒有改這四份，也沒有新增每輪必讀的檔案或步驟；清單在範本裡，只在寫工單和審規格時讀。
+- `selftest.py`：2.2.2 的 2,499 項 → 本版 2,551 項（+52：report_vs_audit 2.2.3 比對案例與 mutation、verify --rerun 唯讀 git 允許與拒跑案例、本段 CHANGELOG 的對齊初衷檢查），全過。
+
+對齊初衷：
+1. 幫到誰：審查交件的總監（誤判少了，不必逐筆人工判；鎖定檔用 git CHECK 可以直接重跑）、寫工單和審規格的總監（邊界清單、重算期望值）、worker（暫存檔放哪裡寫清楚）。依據：PO 2026-11-14 指示、WO-DW-223、LESSONS_INTAKE L-048～L-055。
+2. Desktop：都是本機命令列工具和範本，Desktop Code 分頁的 session 照常用。
+3. 服務：初衷 5（成品要真的對）：scope_check 時序、鎖定測試重算、極端輸入 AC；初衷 7（零成本）：只用標準庫，沒有新相依。
+4. 核心：每輪必讀沒有變長；新檢查先 shadow；git 只開唯讀，寫入類照擋。
+5. 舊檔案和舊指令：照樣能用；以前比得到的主張仍比得到。
+
 ## 2.2.2 — 2026-11-14
 
 PATCH（版本號照 PO 指定；PO 2026-11-14：要改的一次在 2.2.2 改完）：RESUME_STATE 太大的問題（量測、shadow 檢查、原文搬移工具），從 DeepSeek 版 ds.3 移植的 `release.py` 和工單 BASE_REF 新鮮度檢查。新工具和選項照定義算 MINOR，PO 指定版本號，所以標 PATCH。新檢查全部先 shadow（只印 `~` 提示，exit code 不變），加 `--strict` / `--strict-base` 才判不過。舊檔案、舊指令照樣能用。

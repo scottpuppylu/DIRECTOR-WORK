@@ -2882,7 +2882,7 @@ def test_trusted_isolation(tmp):
     git("replace", first, second)
     case("a replace ref refuses (R03)", 2, "has refs/replace/ refs")
     git("replace", "-d", first)
-    case("a bare program name refuses (R04)", 2, "a bare name the PATH would resolve", command=["git", "--version"])
+    case("a bare program name refuses (R04)", 2, "a bare name the PATH would resolve", command=["hostname"])
     case("a relative program outside the tree refuses", 2, "which is not a file inside the candidate",
          command=["./missing.exe"])
     case("the artifact is hashed in the rerun folder (R05)", 0, "artifacts=1 missing=0",
@@ -2903,6 +2903,31 @@ def test_trusted_isolation(tmp):
     total += 1
     if (repo / "build.txt").read_text(encoding="utf-8") != "stale\n":
         failures.append("isolation: the rerun wrote build.txt in REPO instead of the copy")
+    # 2.2.3 (L-055): git is allowed for read-only subcommands only; it runs in REPO, which is read again afterwards
+    for name, command in [("diff --exit-code", ["git", "diff", "--exit-code", first, "--", "payload.txt"]),
+                          ("status", ["git", "status", "--porcelain"]), ("rev-parse", ["git", "rev-parse", "HEAD"]),
+                          ("ls-files", ["git", "ls-files"]), ("log", ["git", "log", "--oneline", "-1"]),
+                          ("show", ["git", "show", "--stat", "HEAD"]), ("cat-file", ["git", "cat-file", "-e", "HEAD"])]:
+        case(f"read-only git {name} runs in REPO (L-055)", 0, ["as a read-only git check in", "test=passed"],
+             command=command)
+    case("read-only git diff that finds a change fails", 1, ["exit code 0 -> 1", "MISMATCH"],
+         command=["git", "diff", "--exit-code", "--quiet", second, "--", "payload.txt"])
+    for name, command, says in [
+            ("push", ["git", "push", "origin", "main"], "'push', which is not a read-only git subcommand"),
+            ("commit", ["git", "commit", "--allow-empty", "-m", "x"], "'commit', which is not a read-only git subcommand"),
+            ("reset", ["git", "reset", "--hard", second], "'reset', which is not a read-only git subcommand"),
+            ("checkout", ["git", "checkout", "other"], "'checkout', which is not a read-only git subcommand"),
+            ("no subcommand", ["git"], "which is not a read-only git subcommand"),
+            ("an option before the subcommand", ["git", "-c", "diff.external=x", "diff"], "before the subcommand"),
+            ("diff --output", ["git", "diff", "--output=out.txt"], "'--output=out.txt', which writes a file"),
+            ("diff --ext-d cut short", ["git", "diff", "--ext-d"], "which writes a file or runs a program"),
+            ("cat-file --textconv", ["git", "cat-file", "--textconv", "HEAD:payload.txt"], "which writes a file"),
+            ("an absolute git path", [GIT or "/usr/bin/git", "commit", "-m", "x"], "which is not a read-only git")]:
+        case(f"read-only git {name} refuses (L-055)", 2, ["EVIDENCE_VERIFY: NOT_RUN", says], command=command)
+    total += 1
+    state = git("status", "--porcelain"), git("rev-parse", "HEAD"), git("rev-parse", "other")
+    if state != ("", first, second):
+        failures.append(f"isolation: a read-only git case changed the repo: {state}")
 
 
 def test_pause(tmp):
@@ -3523,6 +3548,171 @@ def test_report_vs_audit_221(tmp):
                                       "    if False:\n")])]:
         module = mutant(TOOLS / "report_vs_audit.py", swaps, "report_vs_audit_mutant")
         killed(f"report_vs_audit 2.2.1 {name}", module is None or rva_wrong(module, audit))
+
+
+RVA_MULTI = "python -m unittest tests.test_calc -v\ngit status --short"
+RVA_EVIDENCE = "python tools/evidence_record.py run --order D:/w/orders/wo-9.md --label {} -- python -m unittest tests.test_a"
+RVA_GATE = "python tools/gate_check.py --hash D:/w/orders/wo-003-expression.md"
+RVA_SCOPE = "python tools/scope_check.py --candidate 427fcef0123456789abcdef --base main"
+RVA_CUT = "python tools/build_all.py --mode full --target alpha " + "--x " * 140
+# (name, tool, command in the log, claimed command, should match) for matches() in process
+RVA_223_CASES = [
+    ("statements in order", "Bash", RVA_MULTI, "python -m unittest tests.test_calc -v; git status --short", True),
+    ("statements out of order", "Bash", RVA_MULTI, "git status --short; python -m unittest tests.test_calc -v", False),
+    ("&& ends a statement like a new line", "Bash", "git status --short && python -m unittest tests.test_calc -v",
+     "git status --short\npython -m unittest tests.test_calc -v", True),
+    ("words do not run across a statement end", "Bash", RVA_MULTI, "tests.test_calc -v git status", False),
+    ("a claim with ... skips log options", "Bash", RVA_EVIDENCE.format("AC-1"), "evidence_record.py run --label AC-1 ...",
+     True),
+    ("a full claim does not skip log options", "Bash", RVA_EVIDENCE.format("AC-1"), "evidence_record.py run --label AC-1",
+     False),
+    ("x... matches a word that starts with x", "Bash", RVA_SCOPE, "scope_check.py --candidate 427fcef...", True),
+    ("x... with another start", "Bash", RVA_SCOPE, "scope_check.py --candidate 9999abc...", False),
+    ("a bare name matches a file name that starts with it", "Bash", RVA_GATE, "gate_check.py --hash wo-003 ...", True),
+    ("a bare name must end at - _ or .", "Bash", RVA_GATE, "gate_check.py --hash wo-00 ...", False),
+    ("a CJK-only word (同上) skips words", "Bash", RVA_GATE, "gate_check.py --hash 同上", True),
+    ("同上 with one real word proves nothing", "Bash", RVA_GATE, "gate_check.py 同上", False),
+    ("3 claim words reach the end of a cut line", "Bash", RVA_CUT, "build_all.py --mode full ... out.txt", True),
+    ("2 claim words at the end of a cut line are not enough", "Bash", RVA_CUT, "build_all.py --mode ... out.txt", False),
+    ("a line that is not cut does not match past its end", "Bash", "python tools/build_all.py --mode full --target alpha",
+     "build_all.py --mode full ... out.txt", False)]
+# log rows: (minute, agent, command, kind, status); session S1, 2026-11-14 03:MM UTC
+RVA_223_ROWS = [
+    (1, "w1", RVA_MULTI, "result", "ok"),
+    (5, "w1", RVA_EVIDENCE.format("AC-1"), "result", "ok"),
+    (6, "w1", RVA_EVIDENCE.format("AC-2"), "result", "ok"),
+    (10, "w1", RVA_GATE, "failure", "error"),
+    (20, "w1", RVA_GATE, "result", "ok"),
+    (30, "w1", RVA_SCOPE, "result", "ok"),
+    (40, "w1", "git -C D:/w commit -m fix", "result", "ok")]
+RVA_223_LOGS = {
+    "late_commit": RVA_223_ROWS + [(50, "w2", "git commit -m other", "result", "ok")],
+    "checked": RVA_223_ROWS + [(45, "w1", RVA_SCOPE, "result", "ok"), (50, "w2", "git commit -m other", "result", "ok")]}
+# (name, report body after SESSION_ID: S1, log, exit, says, lacks); run by the CLI and, for mutants, in process
+RVA_223_RUNS = [
+    ("two statements in one claim", "RAN: `python -m unittest tests.test_calc -v; git status --short` exit=0\n",
+     "late_commit", 0, ["seq 1 at", "PASS claims=1 ok=1"], []),
+    ("a ``` block under RAN is one claim", "RAN:\n```\npython -m unittest tests.test_calc -v\ngit status --short\n```"
+     " exit=0\n", "late_commit", 0, ["PASS claims=1 ok=1"], []),
+    ("an unclosed ``` block is no claim", "RAN:\n```\ngit status --short\n", "late_commit", 0,
+     ["REPORT_VS_AUDIT: NONE claims=0"], []),
+    ("exit of a statement that is not the last: not checkable", "RAN: `python -m unittest tests.test_calc` exit=1\n",
+     "late_commit", 0, ["not checkable: seq 1 goes on with other statements", "PASS claims=1 ok=1"], []),
+    ("exit of the last statement is still checked", "RAN: `git status --short` exit=1\n", "late_commit", 1,
+     ["exit=1, but the log says ok (seq 1)"], ["not checkable"]),
+    ("at= ends at the time; the nearest run is shown", "RAN: `tools/gate_check.py --hash wo-003 ...` at=03:12（重跑）\n",
+     "late_commit", 0, ["`: seq 4 at", "PASS claims=1 ok=1"], []),
+    ("a full-width note in the claim is left out", "RAN: `python -m unittest tests.test_calc -v（第二次）` exit=0\n",
+     "late_commit", 0, ["PASS claims=1 ok=1"], []),
+    ("AC-1/AC-2 needs one run per ID", "RAN: `evidence_record.py run ... --label AC-1/AC-2` exit=0\n", "late_commit", 0,
+     ["seq 2, 3 at", "PASS claims=1 ok=1"], []),
+    ("AC-1/2 is the same list", "RAN: `evidence_record.py run ... --label AC-1/2` exit=0\n", "late_commit", 0,
+     ["seq 2, 3 at"], []),
+    ("AC-1..AC-3 names the missing ID", "RAN: `evidence_record.py run ... --label AC-1..AC-3` exit=0\n", "late_commit",
+     1, ["`evidence_record.py run ... --label AC-3`: not run in session S1"], ["AC-1`: not run", "AC-2`: not run"]),
+    ("a RAN line with no `command` is a shadow WARN", "RAN:\n- 三支鎖定測試 sha256 比對\n", "late_commit", 0,
+     ["WARN ran: a RAN line with no `command`", "三支鎖定測試", "REPORT_VS_AUDIT: NONE"], []),
+    ("SCOPE_CHECK PASS before the agent's last commit: shadow WARN",
+     "SCOPE_CHECK: PASS\nRAN: `scope_check.py --candidate 427fcef...` exit=0\n", "late_commit", 0,
+     ["WARN scope_check:", "agent w1 committed last at seq 7", "its last scope_check.py run is seq 6",
+      "(shadow, exit code unchanged)", "PASS claims=1 ok=1"], []),
+    ("scope_check after the agent's last commit: no WARN (another agent's commit does not count)",
+     "SCOPE_CHECK: PASS\nRAN: `scope_check.py --candidate 427fcef...` exit=0\n", "checked", 0, ["PASS claims=1 ok=1"],
+     ["WARN scope_check"]),
+    ("no SCOPE_CHECK PASS line: no WARN", "RAN: `scope_check.py --candidate 427fcef...` exit=0\n", "late_commit", 0,
+     ["PASS claims=1 ok=1"], ["WARN scope_check"])]
+
+
+def rva223_matches_wrong(module, audit):
+    return [name for name, tool, command, claim, want in RVA_223_CASES
+            if bool(module.matches({"command": claim}, {"tool": tool, "input": audit.summary({"command": command})})) != want]
+
+
+def rva223_runs_wrong(module, reports, logs):
+    wrong = []
+    for (name, _, log, code, says, lacks), report in zip(RVA_223_RUNS, reports):
+        try:
+            got, out = call_main(module, "--report", report, "--log", logs[log], "--utc-offset", "+00:00")
+        except Exception as error:  # a mutant that crashes is a wrong answer
+            wrong.append(f"{name}: crashed {type(error).__name__}")
+            continue
+        if got != code or any(s not in out for s in says) or any(s in out for s in lacks):
+            wrong.append(name)
+    return wrong
+
+
+def test_report_vs_audit_223(tmp):
+    """2.2.3 (L-052, L-054): report_vs_audit splits statements (new line, ;, &&, ||) so a claim of several statements
+    matches a multi-line script, reads a ``` block under RAN as one claim, ends at= at the time, leaves a full-width note
+    out, needs one run per listed ID, lets an abbreviated claim skip options and match short words (x..., a bare name,
+    同上), matches 3 words that reach the end of a cut line, calls an exit "not checkable" when the run goes on with
+    other statements, shows the nearest run, and prints shadow WARNs for a RAN line with no command and for SCOPE_CHECK
+    PASS with no scope_check.py after the agent's last commit. De-identified synthetic logs; mutation tested."""
+    global total
+    folder = tmp / "rva223"
+    folder.mkdir()
+    spec = importlib.util.spec_from_file_location("audit_log_for_rva223", TOOLS / "audit_log.py")
+    audit = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(audit)
+    total += 1
+    if not audit.summary({"command": RVA_CUT}).endswith("…"):
+        failures.append("report_vs_audit 2.2.3: the RVA_CUT log line is not cut, so it tests nothing")
+    logs = {}
+    for log_name, rows in RVA_223_LOGS.items():
+        prev, out = audit.GENESIS, []
+        for seq, (minute, agent, command, kind, status) in enumerate(rows, 1):
+            entry = {"seq": seq, "ts": f"2026-11-14T03:{minute:02d}:00.000+00:00", "session_id": "S1",
+                     "agent_id": agent, "tool": "Bash", "tool_use_id": f"t{seq}",
+                     "input": audit.summary({"command": command}), "kind": kind, "result": {"status": status},
+                     "duration_ms": None, "prev": prev}
+            entry["hash"] = audit.digest(entry)
+            prev = entry["hash"]
+            out.append(entry)
+        logs[log_name] = folder / f"{log_name}.jsonl"
+        logs[log_name].write_text("".join(audit.canonical(e) + "\n" for e in out), encoding="utf-8")
+    reports = [_write_text(folder / f"r{n}.md", f"SESSION_ID: S1\n{body}") for n, (_, body, *_) in enumerate(RVA_223_RUNS)]
+    for (name, _, log, code, says, lacks), report in zip(RVA_223_RUNS, reports):
+        expect(f"report_vs_audit 2.2.3 CLI: {name}", "report_vs_audit.py", code, "--report", report, "--log", logs[log],
+               "--utc-offset", "+00:00", says=says, lacks=lacks)
+    real = mutant(TOOLS / "report_vs_audit.py", [], "report_vs_audit_223_real")
+    total += 1
+    if real is None or rva223_matches_wrong(real, audit):
+        failures.append(f"report_vs_audit 2.2.3 in process gets cases wrong: {real and rva223_matches_wrong(real, audit)}")
+    total += 1
+    if real is None or rva223_runs_wrong(real, reports, logs):
+        failures.append(f"report_vs_audit 2.2.3 in process gets runs wrong: {real and rva223_runs_wrong(real, reports, logs)}")
+    for name, swaps, by_runs in [
+            ("no statement split", [('SEPARATOR = re.compile(r"\\r?\\n|\\r|;|&&|\\|\\|")', 'SEPARATOR = re.compile(r"(?!)")')],
+             False),
+            ("no option skip", [('            if not found and short and log[li].startswith("-"):\n',
+                                 "            if False:\n")], False),
+            ("no x... prefix", [("        return log_word.startswith(found.group(1)) or base.startswith(found.group(1))\n",
+                                 "        return False\n")], False),
+            ("no bare-name prefix", [('    return base.startswith(claim_word) and len(base) > len(claim_word) and '
+                                      'base[len(claim_word)] in "-_."\n', "    return False\n")], False),
+            ("no CJK placeholder", [('PLACEHOLDER = re.compile(r"^[\\u2e80', 'PLACEHOLDER = re.compile(r"^(?!)[\\u2e80')],
+             False),
+            ("no cut-end match", [("            found = cut and long_enough and n >= CUT_WORDS  #",
+                                   "            found = False  #")], False),
+            ("cut-end match from 2 words", [("CUT_WORDS = 3  #", "CUT_WORDS = 2  #")], False),
+            ("no ``` block", [('        if field == "RAN" and FENCE.match(line) and not FIELD.match(line):\n',
+                               "        if False:\n")], True),
+            ("no not-checkable exit", [('    return not hits or ";" in have[hits[-1] + 1:]\n', "    return False\n")],
+             True),
+            ("at= takes the note too", [('AT = re.compile(r"\\bat=([^\\s（(，,；;]+)")', 'AT = re.compile(r"\\bat=(\\S+)")')],
+             True),
+            ("the last run, not the nearest", [("reverse=True)  # nearest last", "reverse=False)  # nearest last")], True),
+            ("no note strip", [('    words = re.split(r"(\\s+)", ANNOTATION.sub(" ", command).strip())\n',
+                                '    words = re.split(r"(\\s+)", command.strip())\n')], True),
+            ("no ID list", [("        if ids:\n", "        if False:\n")], True),
+            ("no RAN WARN", [("                loose.append(rest.strip())\n", "                pass\n")], True),
+            ("scope WARN for any agent", [('        pool = [e for e in mine if e.get("agent_id") == agent]\n',
+                                           "        pool = mine\n")], True),
+            ("scope WARN never", [("    if later:\n", "    if True:\n")], True)]:
+        module = mutant(TOOLS / "report_vs_audit.py", swaps, "report_vs_audit_223_mutant")
+        wrong = module is None or (rva223_runs_wrong(module, reports, logs) if by_runs
+                                   else rva223_matches_wrong(module, audit))
+        killed(f"report_vs_audit 2.2.3 {name}", wrong)
 
 
 def _write_text(path, text):
@@ -8328,6 +8518,7 @@ def main():
         guarded(test_resume_archive_222, tmp)
         guarded(test_release_222, tmp)
         guarded(test_base_ref_222, tmp)
+        guarded(test_report_vs_audit_223, tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     for failure in failures:
