@@ -17,6 +17,7 @@ Python 3.9 以上，只用標準函式庫。一律用 `python -I -X utf8 <tool> 
 | `round_check.py`（1.3.0） | 修正輪數：RESUME_STATE 的 `FIX_ROUNDS:` 到第 4 輪（之後每組）沒有根因研究就 FAIL | 不寫 | 不花 |
 | `report_vs_audit.py`（1.3.0） | 用動作紀錄核對 TASK REPORT：報告說跑過的指令（`RAN:` 和 TESTS / EVIDENCE / DONE 裡的 selftest、Unity、Blender、雜湊檢查）紀錄裡有沒有、exit 和時間對不對；2.2.1 修截斷的長指令（引號、反斜線）比不到；2.2.3 比對多行腳本、省略寫法、多個 AC 編號，印 scope_check 時序 WARN；2.2.4 展開變數、`git -C`、字中 `...`、短 hex、HH:MM:SS、截斷覆蓋 | 不寫 | 不花 |
 | `transcript_audit.py`（2.2.1） | 沒裝 hook 時，從本機 Claude Code transcript（含 subagents）重建一份 hook 格式的動作紀錄，第 1 行標明是重建的 | 只寫 `--out`（已存在要 `--force`） | 不花 |
+| `ran_line.py`（2.2.5） | 從時鐘和指令本身的 exit code 產生 RAN 行（代跑或補記）和 `YYYY-MM-DD HH:MM` 時間戳，不手打 | 只寫 `--to` 指定的檔 | 不花 |
 | `trace_report.py` | 從工單、報告、裁決產生追溯表：需求 → 工單 → AC → 證據 → 裁決 | 不寫 | 不花 |
 | `metrics_report.py` | 從總監的檔案數出 `PURPOSE.md` 的成效數字：返工、中斷後重做、PO 介入、導入卡住，以及規格審查的花費；`--run` 另數接手演練的決策、重問、PO 操作和第一個可用預覽的時間 | 不寫 | 不花 |
 | `vocabulary.json` | 判定、下一步、RESULT、治理模式、證據等級等固定用詞的唯一來源；`gate_check.py` 讀它 | — | — |
@@ -335,13 +336,23 @@ python -I -X utf8 gate_check.py --test-request <申請.md>       # TEST REQUEST 
 python -I -X utf8 gate_check.py --hash <WO.md>                # 印工單 SHA-256（CRLF 當 LF 算）和要記進 LOG 的 DISPATCH 行
 python -I -X utf8 gate_check.py --preflight <報告.md> <WO.md> --evidence-dir <證據資料夾> --dispatch-log <DIRECTOR_LOG.md> --repo <受信任的 checkout>   # 舊審查升到新 Strict 前缺什麼
 python -I -X utf8 gate_check.py --order <WO.md> --repo <專案 checkout> [--strict-base] [--config director_work.json]   # 2.2.2：BASE_REF 新鮮度
-python -I -X utf8 gate_check.py --after-verdict <裁決.md> [<裁決.md> ...] --repo <專案 checkout> [--orders <工單資料夾>] [--strict]   # 2.2.4：裁決之後的未審 commit
+python -I -X utf8 gate_check.py --after-verdict <裁決.md> [<裁決.md> ...] --repo <專案 checkout> [--orders <工單資料夾>] [--warn]   # 2.2.4，2.2.5 起預設 FAIL
+python -I -X utf8 gate_check.py --sequence <WO.md> [<WO.md> ...] --dispatch-log <DIRECTOR_LOG.md> --repo <專案 checkout>   # 2.2.5：閘門順序
+python -I -X utf8 gate_check.py --final <DIRECTOR 資料夾>   # 2.2.5：最終驗收的端到端證據
 ```
 
 - 每個檔案印一行 `OK` / `FAIL`，有問題逐條列出；任何一個失敗就 exit 1。
 - `--resume`（2.2.2）：檔案超過 `resume.max_bytes`（20480）或任一行超過 `resume.max_line_bytes`（4096）時印 `~ shadow: RESUME_SIZE <bytes> ... ~<token> tokens, longest line <行號>: <bytes>`，exit code 不變；加 `--strict` 才判不過。上限從 `--config`、檔案旁邊的 `director_work.json`、預設值依序取。瘦身用 `resume_archive.py`。
 - `--order` 的 BASE_REF 新鮮度（2.2.2，從 DW-DS ds.3 移植）：在 `--repo`（預設是工單所在資料夾）先 `git fetch <remote>`（同一 repo 和 remote 一次執行只 fetch 一次），再拿 BASE_REF 的 commit 比遠端分支：一樣印 `~ BASE_REF <commit> = origin/main (fetched now)`；commit 不存在或落後印 `~ WARN BASE_REF: ...`（落後幾個 commit、該從哪裡開工），加 `--strict-base` 判不過。fetch 失敗、資料夾不是 git checkout、沒有 remote，都印 `not compared with the remote: ...`，不當作通過。BASE_REF 沒寫 commit（7–40 位十六進位）就不檢查、不印。開關：`director_work.json` 的 `"base_ref": {"check": true, "fetch": true, "strict": false}`，讀 `--config`，否則工單資料夾或上一層的 `director_work.json`。
 - `--after-verdict`（2.2.4，shadow）：在 `--repo` 解出每份裁決的 `CANDIDATE_HEAD:`，取其他候選都在它之前的那個（分不出就取 commit 時間最新的）當最後一份裁決。從它到 HEAD 的每個 commit，只要改到裁決 `ORDER:` 那張工單 SCOPE 以外、又不是文件的檔，就印 `~ WARN LATE_COMMIT <sha> <標題>: <檔案>`，exit code 不變；加 `--strict` 印 FAIL、exit 1。文件指 `DIRECTOR/` 資料夾底下的檔，和 `.md`、`.rst`、`.txt`。工單依序在 `--orders`、裁決所在資料夾、`../orders` 找；找不到就把每個非文件的檔都算進去，並在標題寫明。候選解不出、HEAD 不含候選，印 `NOT_CHECKED`，不當作通過。只讀（`git rev-parse`、`rev-list`、`diff`、`log`）。
+- `--after-verdict` 2.2.5 起（WO-DW-225 B4）：預設 FAIL（`~ FAIL LATE_COMMIT`，exit 1），工單 SCOPE 裡的程式碼也算；文件多了頂層 `docs/` 資料夾。裁決的 `CANDIDATE_HEAD` 已不在 HEAD 的歷史裡（分支被改寫）印 `~ FAIL REWRITTEN`。`--warn` 回到 WARN、exit 0（導入舊專案用）；`--strict` 照收，等於預設。**這是有意改變的行為**：2.2.4 會過的「裁決後只改 SCOPE 內程式碼」現在不過，要再審、寫指向新 commit 的裁決。
+- `--sequence`（2.2.5，B3，Standard / Strict；Direct 印 SKIP）：
+  - 核准要早於 worker 的第一個動作。核准是 LOG 裡最早一行整行的 `PLAN_APPROVED <WO-ID> ...`，沒有就用最早的 DISPATCH 行；時間取那一行的 `<日期 時間 [時區]> |` 欄，沒有就取上方最近的有日期的標題或行。LOG 只往下加，所以比上面的行（標題除外）還早的時間，當作上面那行的時間。第一個動作是 `git log --all` 裡標題以工單編號開頭的最早 commit（author 時間）。核准晚於它、或完全沒有核准，FAIL；沒有 commit 或核准沒有時間，印 NOT_CHECKED 提示。
+  - 每張工單要有自己的規格審查：LOG 裡整行 `SPEC_REVIEW <WO-ID> tokens=.. issues=.. adopted=..`，或 `reviews/` 下檔名含工單編號的 `*SPEC_REVIEW*` 檔（照 DW-DS ds.4 B4 的做法搬回）。都沒有就 FAIL。
+  - 審查要來自別的 session：規格審查的 `session=`（或審查檔的 `SESSION_ID:`）要和寫工單的（DISPATCH 行 `| session=`，或工單的 `SESSION_ID:`）不同；裁決（檔名含 VERDICT 和工單編號）的 `SESSION_ID:` 要和 TASK REPORT 的不同。相同 FAIL，缺一邊印 `~ WARN SESSION`。
+  - 每張工單印一行 `OK` / `FAIL` / `WARN` / `SKIP sequence <工單> (GOVERNANCE x)`。只讀（`git log`）。
+- `--final <資料夾>`（2.2.5，B5）：DIRECTOR 資料夾（或含 `DIRECTOR/` 的資料夾）的 `evidence/E2E/` 沒有非空的檔就 FAIL。提示（不會 FAIL）：E2E 紀錄沒有 `ENTRY_POINT:` 行；DECISION_REGISTER.md 的 DD 表沒有「驗收案例」欄，或某條 DD（SUPERSEDED 除外）的驗收案例是空的，印 `~ WARN DD_CASE`。
+- 長路徑（2.2.5，B11）：git 報 `Filename too long` 時，`gate_check` 和 `scope_check` 印一行 `path too long for git on Windows: <路徑> (<n> characters, <m> over the 259 Windows allows)`，再附處理方式（換短一點的 origin／worktree 資料夾），不只轉出 git 原本的 fatal。
 - 沒填的範本一定不過（`<...>` 算沒填）。工單的 SCOPE / FORBIDDEN 不能寫 `**` 或「相關檔案」這類話。
 - RESULT 寫 PASS 但有 `NOT_RUN` 的測試、越界或沒查範圍，都不過。
 - 只查格式和用詞，內容對不對要看證據。
@@ -498,6 +509,11 @@ python -I -X utf8 scope_check.py --order <WO.md> --base <ref>        # 取代工
 - 工單有 `REQUIRED_CHANGES:` 清單時，每一條 glob 都要對到至少一個改動的檔案；沒對到的印 `MISSING   <glob>`，結果是 VIOLATION，最後一行多一個 ` missing=n`。沒有這個清單，輸出和以前一樣。`gate_check.py --order` 另外查每一條都在 SCOPE 裡、不在 FORBIDDEN 裡，否則這張工單做不到。
 - REQUIRED_CHANGES 看最後結果（2.2，F14）：比的是 merge base 和最後狀態（工作樹現在的檔案加未追蹤檔）的差，不是三段 diff 的聯集。暫存後又改回、或兩次 commit 改了又改回的檔，現在是 `MISSING`。加 `--candidate <commit>` 時改比 merge base 和那個 commit 的 tree，總監審查用這個。多印一行 `REQUIRED_BASIS: worktree-final|candidate=<12 位> final=<n>`。越界檢查（SCOPE / FORBIDDEN）照舊看聯集。
 - 最後一行貼進 TASK REPORT。exit 0 通過、1 越界或缺必要改動、2 沒辦法檢查（`NOT_RUN`，包括 SCOPE / FORBIDDEN 下一行不是 `- 項目`）。
+- 2.2.5（WO-DW-225 B10，`--shared` 從 DW-DS ds.4 B2 搬回，沒有搬大小上限和保護測試）：
+  - `--shared`（工單 `WORKTREE` 寫「共用」或 shared 時自動開）：共用 checkout 裡別的工作線也在 commit，不再把 BASE_REF 以來所有 commit 加總。只算這張工單自己的 commit（標題以工單編號開頭），一次一個 commit 比 SCOPE / FORBIDDEN；沒 commit 的改動照舊比。別人改的檔印 `OTHER  <檔>`，不算越界。最後一行多 ` shared=1 others=n`，STATES 改成 `own_commits` / `own_uncommitted`。
+  - 印一行 `WORKTREE: 隔離 worktree <路徑>` 或 `WORKTREE: 共用 checkout（主 checkout） <路徑>`，由 `git worktree list --porcelain` 判斷（第一筆是主 checkout），報告照抄這一行，不由模型手寫。
+  - 工單的 `BASE_REF = origin/main @ abc123（v2.2.4）`：全形或半形括號裡的字當註解。
+  - 最上層攔下所有例外，印 `NOT_RUN` 一行，不印 Traceback。
 
 ## evidence_record.py
 
@@ -722,6 +738,30 @@ python -I -X utf8 report_vs_audit.py --report <報告.md> --log <動作紀錄.js
   - 沒有人跑的指令照樣 FAIL（selftest 有對照組）。
 - 2.2.1：被截在 500 字的紀錄行照 JSON 規則解回（`\"`、`\\` 還原；2.2.0 沒還原，含引號或反斜線路徑的長指令比不到）。比對前去掉 `&`、`cmd /c`、啟動程式（python、py、pwsh、powershell、node、bash 等）和它的啟動旗標；`...`、`…`、`<名稱>` 當萬用字；單一檔名可以對到以它結尾的較長路徑；靠詞比對時至少要 2 個實詞（只寫啟動程式不算）。只比 Bash / PowerShell 的紀錄。紀錄有 `kind=rebuild` 行時多印 `~ note: a log was rebuilt from a transcript ...`。
 
+- 2.2.5（WO-DW-225 B2，WO-DS-008 r2 的誤報與時間錯）：
+  - `at=` 收全形 `～`／`〜` 區間；`--tolerance-min` 預設 10。
+  - 比對前兩邊都拿掉只設 TEMP / TMP / TMPDIR / PYTHONIOENCODING / PYTHONUTF8 的句子，和指令前面的這類指定（`TEMP=x python ...`、`env TEMP=x ...`）。
+  - 紀錄裡的相對路徑另外照那筆呼叫的資料夾（輸入的 `workdir` / `cwd`、同一呼叫較早的 `cd`、`Set-Location`、`pushd`）解成絕對路徑再比；Git Bash 的 `/d/x` 等於 `d:/x`。shell 函式定義（`name(){ ...; }`）先拿掉，呼叫處展開。
+  - 一句的主張可以少寫紀錄裡的選項（OK，附註少了哪些），但會削弱執行的選項（`-f`、`-n`、`-k`、`--force`、`--warn`、`--dry-run`、`--no-...`、`--skip...`、`--allow...`、`--ignore...`、`--quick`、`--only` 之類）少寫照樣 FAIL。
+  - 每條 FAIL 標類別：`沒跑 / 時間不符 / 結束碼不符 / 格式`；最後一行多 `time_mismatch=n not_run=n`。沒跑的主張，`at=` 附近開頭兩個詞相同的呼叫列為提示。
+  - `--lead 檔`（可重複）：查 lead 自己寫的檔（GATE_VERDICT、DIRECTOR_LOG）。RAN 行照樣當主張；每一行以 `YYYY-MM-DD HH:MM` 開頭的時間戳，拿最早把這一行寫進去的那筆呼叫比：比呼叫晚 1 分鐘以上、或早超過 `--tolerance-min`，FAIL（時間不符）。加 `--repo` 時，寫了 COMMIT 和 7 位以上 hex 的行另外和那個 commit 的時間比。找不到寫入呼叫的行另計 `stamps_unfound=n`。
+  - 最上層攔下所有例外，exit 2 一行，不印 Traceback。
+  - 時間不要手打：RAN 行和時間戳用 `ran_line.py` 產生。
+
+## ran_line.py（2.2.5）
+
+```text
+python -I -X utf8 ran_line.py --to <報告.md> -- <指令> [參數 ...]       # 代跑，寫一行 RAN；exit code 是指令的
+python -I -X utf8 ran_line.py --to <報告.md> --exit <N> --cmd "<指令>"  # 剛在別處跑完，馬上補記（at= 是現在）
+python -I -X utf8 ran_line.py --stamp [--to <檔>] [--text "| <事件> | <依據>"]   # 印或加一行 YYYY-MM-DD HH:MM
+```
+
+- 時間取時鐘、exit code 取指令本身，不靠模型記憶（WO-DS-008 r2：報告差一小時、裁決時間晚 15 分鐘）。RAN 行接在報告 `RAN:` 區塊最後一行後面；沒有 `RAN:` 就在檔尾加。跨分鐘寫 `at=HH:MM-HH:MM`。
+- `--print` 只印不寫；`--utc-offset +08:00` 指定時區。只寫 `--to` 指定的檔。指令起不來或寫不了檔：一行訊息、exit 2，不印 Traceback。
+- 設了環境變數 `WORK_DIR` 時，`ran_line`、`evidence_record`、`release`、`browser_check` 把暫存檔（`tempfile` 和子行程的 TMPDIR / TEMP / TMP）放到 `WORK_DIR/tmp`（2.2.5，B9）。原因：Git Bash 自己匯出 TMPDIR，Python 的 tempfile 先讀 TMPDIR 才讀 TEMP，所以 `export TEMP=...` 對 Windows Python 沒用；agent 每次 Bash 呼叫又是新的 shell。
+- 不是每輪必讀：寫報告、裁決、LOG 時才用。
+- 怪檔案自測（2.2.5，B7）：`python -I -X utf8 <RULES>/templates/weird_inputs.py <資料夾>` 寫出空檔、BOM、控制字元、超長行、深層巢狀、錯誤編碼、UTF-16、混合換行、全形字元各一個檔，讀檔的工具逐一餵過，要給清楚的訊息或正確結果，不能出 Traceback。
+
 ## transcript_audit.py（2.2.1）
 
 ```text
@@ -733,6 +773,7 @@ python -I -X utf8 transcript_audit.py build --out <新紀錄.jsonl> [--force] --
 - `--transcript` 也讀旁邊的 `<檔名>/subagents/*.jsonl`（`--no-subagents` 不讀）。`--session` 找 `<root>/<專案資料夾換成 - 的名字>/<ID>.jsonl`。
 - 第 1 行是 `kind=rebuild`，`source` 記來源 transcript 的名稱、sha256、大小，和 `no_result`（還沒有結果，不寫）、`duplicates`（同一個 id 又出現，留第一筆）、`no_time`、`bad_lines` 的數目。
 - 印 `TRANSCRIPT_AUDIT file= lines= sessions= no_result= duplicates= no_time=` 和新紀錄的 `AUDIT_HEAD`。exit 0 寫好；1 拒絕（`--out` 已存在）或沒寫成；2 不能跑（沒有 transcript、找不到工具呼叫、參數不對）。
+- 2.2.5：`input` 預設整段保留，不再截在 500 字；`--input-limit N` 才照 hook 截，截過的行加 `"input_cut": true`，`report_vs_audit` 只比那筆的前段。
 - 限制：`result.sha256` 算的是 transcript 裡的結果，和 hook 紀錄的不能互比；`duration_ms` 是 null；hook_guard 的 decision 行無法重建。transcript 格式是 Claude Code 自己的、沒有文件，格式改了會找不到工具呼叫並 exit 2。重建的紀錄只表示 transcript 裡有什麼，不能證明沒做別的事；有 hook 紀錄和 AUDIT_HEAD 錨點時，以那份為準。
 
 ## browser_check.py（2.2.0）

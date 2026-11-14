@@ -6,6 +6,83 @@
 - **MINOR**：新增規則、文件、工具或選項，舊檔案照樣通過。
 - **PATCH**：修正文字、修 bug，規則不變。
 
+## 2.2.5 — 2026-11-15
+
+PATCH（版本號照 PO 指定；WO-DW-225：WO-DS-008 r2 試跑學到的修進原版 DW，不加 OpenSpec／SDD、不加每輪必讀）：report_vs_audit 的 H1 誤報修掉、時間錯照樣抓並標類別；新工具 `ran_line.py` 讓 RAN 行和時間戳從時鐘來；gate_check 新增閘門順序（`--sequence`）和最終驗收（`--final`），`--after-verdict` 改成預設 FAIL；scope_check 共用 checkout 逐 commit 檢查；暫存檔在設了 WORK_DIR 時由工具自己放進 `WORK_DIR/tmp`；範本補 worker 輪數上限與交接、規格審查清單、點子清單。照定義，`--after-verdict` 改預設 FAIL 會讓 2.2.4 通過的情況變不通過（MAJOR 性質），新選項是 MINOR；PO 指定版本號，所以標 PATCH，遷移段寫明怎麼回到舊行為。
+
+### report_vs_audit：H1 誤報與時間錯（B2）
+
+- 問題：WO-DS-008 r2 三組報告重跑，claude 2 條、dsh-nosdd 4 條（6～9）是指令確實有跑的誤報；同時 nosdd 1～4、10 和 sdd 的裁決／LOG 時間是真的寫錯，卻沒有被歸類。
+- 誤報修正：`at=` 收全形 `～`／`〜` 區間；比對前兩邊都拿掉只設 TEMP／TMP／TMPDIR／PYTHONIOENCODING／PYTHONUTF8 的句子和指令前的這類指定；紀錄裡的相對路徑照那筆呼叫的資料夾（`workdir`／`cwd`、同一呼叫較早的 `cd`）解開；Git Bash 的 `/d/x` 等於 `d:/x`；shell 函式呼叫展開成函式本體；一句的主張可以少寫紀錄裡無害的選項（附註），會削弱執行的選項（`--force`、`--warn`、`--skip…` 之類）少寫照樣 FAIL。`transcript_audit.py build` 預設不再截 500 字，`--input-limit` 截過的行標 `input_cut`。
+- 時間錯照抓，而且分類：每條 FAIL 標 `類別：沒跑 / 時間不符 / 結束碼不符 / 格式`，最後一行多 `time_mismatch=n not_run=n`；`--tolerance-min` 預設 10。`--lead 檔` 查 lead 自己寫的 GATE_VERDICT、DIRECTOR_LOG：每個時間戳拿最早寫進這行的那筆呼叫比，加 `--repo` 時 COMMIT 行另外和 commit 時間比。
+- 最上層攔下所有例外，exit 2 一行，不印 Traceback。
+- H1 每一類各做一筆去識別 fixture（假路徑、假 session），寫進 selftest 並做 13 個 mutation。nosdd 5（commit 訊息和紀錄不同）判 FAIL（沒跑）：紀錄裡沒有那則訊息的 commit，報告的主張證明不了，寧可要人看。
+
+### ran_line.py（B1，新工具）
+
+- `ran_line.py --to 報告 -- 指令` 代跑並寫一行 RAN（exit code 照傳）；`--exit N --cmd "指令"` 剛跑完補記；`--stamp [--to 檔 --text ...]` 印或加一行 `YYYY-MM-DD HH:MM`。時間取時鐘，不靠模型記憶（r2：報告差一小時、裁決時間晚 15 分鐘）。只寫 `--to` 的檔；指令起不來一行訊息 exit 2。
+
+### gate_check：閘門順序、裁決後鎖程式碼、最終驗收（B3、B4、B5、B11）
+
+- `--sequence 工單… --dispatch-log DIRECTOR_LOG.md --repo <checkout>`（Standard／Strict；Direct 印 SKIP）：PLAN_APPROVED（沒有就用 DISPATCH）晚於 worker 在這張工單的第一個 commit，或完全沒有核准，FAIL；LOG 只往下加，比上面的行還早的時間當成上面那行的時間。每張工單要有自己的 SPEC_REVIEW（LOG 行或 `reviews/*SPEC_REVIEW*` 檔，檔案查法照 DW-DS ds.4 B4 搬回），沒有就 FAIL。規格審查和裁決要來自別的 session：和作者同一個 session id FAIL，缺 id WARN。
+- `--after-verdict` 改成預設 FAIL：裁決之後的 commit 只改文件（`DIRECTOR/`、`docs/`、`.md`／`.rst`／`.txt`）放行；改到程式碼（SCOPE 裡也算）FAIL，要再審、寫指向新 commit 的裁決；裁決的 commit 已不在 HEAD 的歷史裡印 `~ FAIL REWRITTEN`。`--warn` 回到 WARN、exit 0。
+- `--final <DIRECTOR 資料夾>`：`evidence/E2E/` 沒有非空的檔就 FAIL（lead 照規格情境從公開入口實際跑一次）；紀錄沒有 `ENTRY_POINT:`、DECISION_REGISTER 的 DD 沒有「驗收案例」，印 WARN。
+- 長路徑：git 報 `Filename too long` 時印一行，寫明是哪個路徑、幾個字、超過 Windows 上限多少，`gate_check` 和 `scope_check` 都是。
+- 對 r2 兩組試驗 repo 唯讀跑（A4）：nosdd `--sequence` WO-101～105 FAIL、WO-106 OK、WO-107 SKIP（Direct）；sdd WO-01～08 全 FAIL（事後補寫的核准、缺規格審查）；`--after-verdict` sdd FAIL（裁決後兩個程式碼 commit）、nosdd OK；`--final` 兩組都 FAIL（沒有 `evidence/E2E/`），DD_CASE WARN 16／25 條。
+
+### scope_check（B10）
+
+- `--shared`（工單 `WORKTREE` 寫共用或 shared 時自動開；從 DW-DS ds.4 B2 搬回，大小上限和保護測試不搬）：共用 checkout 只算這張工單自己的 commit，一次一個 commit 比 SCOPE／FORBIDDEN，不再把別人的 commit 加總；別人改的檔印 `OTHER`。
+- `WORKTREE:` 行由 `git worktree list --porcelain` 產生（隔離 worktree／共用 checkout），報告照抄，不由模型手寫。
+- `BASE_REF = origin/main @ abc123（v2.2.4）`：括號裡的字當註解。最上層攔下所有例外，印 `NOT_RUN`。
+
+### TEMP（B9）
+
+- 查清楚的原因：Git Bash 自己匯出 TMPDIR（指向系統暫存資料夾），Python 的 `tempfile` 先讀 TMPDIR 才讀 TEMP／TMP，所以 `export TEMP=...` 對 Windows Python 沒用；agent 每次 Bash 呼叫又是新的 shell，上一次的 export 也不留。
+- 設了環境變數 `WORK_DIR` 時，`ran_line`、`evidence_record`、`release`、`browser_check` 自己把 `tempfile.tempdir` 和子行程的 TMPDIR／TEMP／TMP 指到 `WORK_DIR/tmp`。`docs/02`、`BOOTSTRAP` 第 12 步照實更正。
+
+### 範本與文件（B3、B5～B8）
+
+- `templates/SPEC_REVIEW.md`、`docs/02`：Standard 工單的規格審查改成必做；LOG 行加 `session=`；清單只補不改，加第 10～14 項（上限要寫理由、最上層攔例外、錯誤訊息清理、行數上限、期望值由獨立 oracle 產生）。
+- 新增 `templates/weird_inputs.py`：寫出空檔、BOM、控制字元、超長行、深層巢狀、錯誤編碼、UTF-16、混合換行、全形字元各一個檔，worker 自檢時直接餵給自己的工具。
+- `templates/WORK_ORDER.md`：`WORKER_LIMIT`（預設 80 輪或 context 60%，可改）、行數上限、上限和例外的寫法、怪檔案；到上限寫 `HANDOFF.md`（新範本 `templates/HANDOFF.md`）回報 lead，lead 開新 worker 接續。lead 只讀 TASK REPORT 的摘要段（首行到 RESULT）和 HANDOFF.md。
+- `templates/GATE_VERDICT.md`：`SESSION_ID:`、表頭時間用 `ran_line.py --stamp`、G 節最終驗收清單（ENTRY_POINT、`evidence/E2E/`、`gate_check --final`、DD 驗收案例）。`templates/TASK_REPORT.md`：RAN 行用 `ran_line.py`、`WORKTREE:` 照抄 scope_check。`templates/DECISION_REGISTER.md` B 段加「驗收案例」欄。`templates/DIRECTOR_FILES.md`：DIRECTOR_LOG 的時間戳和閘門順序格式，新增 IDEAS.md（點子清單，有「理由」「估計成本」兩欄）。
+- 都只在寫工單、審規格、寫報告和裁決、派工時讀，不是每輪必讀。
+
+### 查過的現成做法
+
+- DW-DS 2.2.4-ds.4：B2（scope_check `--shared`）、B4（spec review 檔案查法）搬回；ds.4 的大小上限和保護測試、SDD 相關的部分不搬（原版不加 SDD）。
+- GitHub／標準庫：命令包裝記錄 exit code 和時間的工具（Bitvise `log`、golang-devops/exec-logger、`logsave`）格式和 RAN 行不同、要另外安裝或不在 Windows 上，不採用，`ran_line.py` 只用標準庫。GitHub 的「有新 commit 就撤銷舊核准」（dismiss stale reviews）是 PR 伺服器端設定，DW 的裁決在本機檔案裡，用不到，`--after-verdict` 照同樣的想法在本機查。
+
+### 已知限制
+
+- `--sequence` 的「第一個動作」看 commit 標題以工單編號開頭；worker 不照 commit 慣例寫標題時是 NOT_CHECKED，不當作通過。session id 要有人寫進 LOG、報告和裁決才比得到，沒寫只是 WARN。
+- worker 輪數上限是規則和範本，工具不數輪數。
+- `--lead` 只能比到有動作紀錄的寫入呼叫；找不到的行另計 `stamps_unfound`。
+- git 把 UTC 時間印成 `...Z`，Python 3.9 的 `fromisoformat` 不收；`--lead` 的 COMMIT 比對和 `--sequence` 的第一個 commit 都先換成 `+00:00` 再解析（selftest 在 3.9 抓到，已有 UTC commit 的案例）。
+
+### 遷移
+
+- `gate_check --after-verdict` 預設 FAIL：要 2.2.4 的行為（只警告）加 `--warn`；`--strict` 照收，等於預設。這是有意改的：2.2.4 會過的「裁決後改 SCOPE 內程式碼」現在不過。
+- report_vs_audit 最後一行在 `unverified=` 後面多 `time_mismatch=n not_run=n`（`--lead` 再多 `stamps= stamps_unfound=`），原有欄位位置不變；`--tolerance-min` 預設從 15 改成 10。
+- Standard 工單要補 SPEC_REVIEW 和 PLAN_APPROVED 才過得了 `--sequence`；這是新選項，不跑它就和以前一樣。
+- 舊工單、舊報告、舊裁決照樣通過 `gate_check --order / --match / --verdict`（新欄位都是範本和規則，不是這些模式的檢查項）。
+
+### 數字
+
+- 每輪必讀（`docs/01`、`03`、`06`、`08`）：9,548 → 9,548 bytes（沒變）。本版沒有改這四份，也沒有新增每輪必讀的檔案或步驟（B13）。
+- `selftest.py`：2.2.4 的 2,622 項 → 本版 2,741 項（+119：report_vs_audit 2.2.5 的 H1 案例與 mutation、ran_line 與 TEMP、`--sequence`／`--after-verdict` 2.2.5／`--final`、scope_check `--shared`、怪檔案、本段 CHANGELOG 的對齊初衷檢查）。Python 3.11 與 3.9 各跑一次，全過（skipped=2 是這台機器的環境：8.3 短檔名關閉、不能建 symlink）。2.2.4 的 63 條誤判案例和其他既有測試一條沒壞；`test_after_verdict_224` 的預期照 B4 改成預設 FAIL。
+- H1 fixture（18 筆）用 2.2.4 和 2.2.5 各跑：應該通過的 11 筆，2.2.4 誤報 FAIL 5 筆、2 筆不能跑（沒有 `--lead`），2.2.5 全過；應該 FAIL 的 7 筆，2.2.4 只抓到 2 筆（`--lead` 的 4 筆不能跑），2.2.5 7 筆全 FAIL 且類別正確（時間不符 6、沒跑 1）。結束碼符合預期：2.2.4 6／18 → 2.2.5 18／18。
+- WO-DS-008 r2 原樣重跑（A3）：claude FAIL 2 → 0（UNVERIFIED 6 → 0）；dsh-nosdd FAIL 10 → 6（剩下的 5 條時間不符、1 條是 nosdd 5 沒跑），UNVERIFIED 3 → 0；dsh-sdd FAIL 0 → 0；`--lead` 查 lead 自己寫的檔：sdd 105 個時間戳 54 個時間不符、nosdd 29 個 14 個。
+- worker 輪數上限（A1）的用量估算：依據是 r2 三組的動作紀錄，每組最長的 session 當 lead 不算，剩下 29 個 worker session，17 個超過 80 次工具呼叫。假設每次呼叫讀入整段上下文，固定成本 2 萬 token、每輪增加 g token，接手的 worker 多讀 3.3 萬（交接檔和重讀的檔）。g = 1,000／1,500／2,500 時，worker 讀入總量各減少約 25%／33%／39%。這是估算（ESTIMATED）：工具呼叫數不等於輪數，快取讓實際額度的差距更小；沒到 80 輪的 worker 不受影響。
+
+對齊初衷：
+1. 幫到誰：審查交件的總監（H1 誤報不必逐筆人工判，時間錯直接標類別；事後補寫的核准、裁決後的程式碼、缺少的端到端證據都會被點名）、worker（RAN 行和時間戳不用自己打、暫存檔自動進 WORK_DIR、長輪數有交接規則）。依據：PO 2026-11-15 指示、WO-DW-225、WO-DS-008 r2 試跑結果。
+2. Desktop：都是本機命令列工具和範本，Desktop Code 分頁的 session 照常用；worker 交接用一般的新 session。
+3. 服務：初衷 5（成品要真的對）：最終驗收要從公開入口實際跑、裁決後的程式碼要再審；初衷 7（零成本）：只用標準庫，沒有新相依，worker 輪數上限估計減少讀入量。
+4. 核心：每輪必讀沒有變長；git 只讀；`--after-verdict` 改預設 FAIL 是工單明訂，`--warn` 可回到舊行為。
+5. 舊檔案和舊指令：照樣能用；新檢查都是新選項，只有 `--after-verdict` 的預設變了（遷移段寫明）。
+
 ## 2.2.4 — 2026-11-14
 
 PATCH（版本號照 PO 指定；PO 2026-11-14：WO-DS-006 試跑學到的修進原版 DW，不加 OpenSpec／SDD、不加每輪必讀）：report_vs_audit 的誤判一次修好、gate_check 新增「最後一份裁決之後的未審程式碼」shadow 檢查、暫存檔指到 WORK_DIR、工單和規格審查範本加兩個欄位、派工規劃加三行。新選項照定義算 MINOR，PO 指定版本號，所以標 PATCH。新檢查是 shadow（只印 WARN，exit code 不變），加 `--strict` 才判不過。舊檔案、舊指令照樣能用。

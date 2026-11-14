@@ -169,7 +169,7 @@ DIRECTOR/
 
 在 `ACTIVE_WORKSTREAMS.md` 寫草案：要幾條 worker 線、各做什麼、要不要總管和清理員、各線的模型和 effort（`docs/05`）。第 2 步記下沒有產品方向時，草案寫成假設，等第 14 步初衷卡鎖定後再定。**開新 session 會花額度，第一批由 PO 同意後才開。** 小白模式由總監照 `docs/05` 定第一批並登記 DD；開線的同意併進第 14 步那一則回覆（卡片對，請開助手），不另外問第二次。
 
-開 worker 的提示加一句：開工時把 TEMP、TMP（及 TMPDIR）設成工單的 `WORK_DIR/tmp`；harness 的 scratchpad 和系統暫存資料夾算工作區外（2.2.4，`docs/02`）。
+開 worker 的提示加一句：開工時把 TEMP、TMP（及 TMPDIR）設成工單的 `WORK_DIR/tmp`；harness 的 scratchpad 和系統暫存資料夾算工作區外（2.2.4，`docs/02`）。更正（2.2.5）：在 Git Bash 裡 `export TEMP=...` 對 Windows 的 Python 沒用：Git Bash 自己匯出 TMPDIR，Python 先讀 TMPDIR；agent 每次 Bash 呼叫又是新的 shell，export 不會留到下一次。所以提示改成「設環境變數 `WORK_DIR`，自寫的指令在同一個呼叫裡加 `TMPDIR=<WORK_DIR>/tmp`」；DW 工具看到 `WORK_DIR` 會自己把暫存檔放到 `WORK_DIR/tmp`。
 
 ## 13. 第一份回報給 PO
 

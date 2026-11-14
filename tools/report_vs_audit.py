@@ -1,7 +1,8 @@
 """Check the commands a TASK REPORT says were run against the action log (audit_log.py) of the same session: was each
 one run, did it end the way the report says, and at the time it says. Only reads. For the Director's gate review.
 
-  report_vs_audit.py --report REPORT.md --log AUDIT.jsonl [--log ...] [--session ID] [--tolerance-min 15]
+  report_vs_audit.py --report REPORT.md --log AUDIT.jsonl [--log ...] [--session ID] [--tolerance-min 10]
+  report_vs_audit.py --lead GATE_VERDICT.md --lead DIRECTOR_LOG.md --log AUDIT.jsonl [--repo DIR] [--session ID]
 
 Claims come from two places in the report:
   RAN: lines, one claim each (also as a list under a RAN: field):
@@ -54,8 +55,26 @@ the log can neither show it ran nor show it did not. UNVERIFIED is its own statu
 call of a harness tool the log maps (tool_raw) whose status in this session is never error does not carry the exit
 code, so a claimed exit other than 0 is "not checkable" there.
 
+2.2.5: at= also takes a span with a full-width ～ / 〜 (at=00:30～00:31). --tolerance-min defaults to 10. Before the
+match a statement that only sets TEMP / TMP / TMPDIR / PYTHONIOENCODING / PYTHONUTF8 (TEMP=x, export / set TEMP=x,
+$env:TEMP = 'x') is left out on both sides, and so are those assignments in front of a command (TEMP=x python ...,
+env TEMP=x ...). A log call's relative paths are also read against its folder: the input's "workdir" / "cwd" field and
+a cd / Set-Location / pushd earlier in the same call (tools/x.py run in D:/w/DIRECTOR is D:/w/DIRECTOR/tools/x.py, so
+the claim DIRECTOR/tools/x.py matches); a word counts as a path when it holds a /, ends with a file extension, or is
+the value of an option named ...dir / path / file / repo / cwd / out / root / folder / log / report / order. A claim
+of one statement may leave out options the log statement has (OK with a note naming them), unless a left-out option
+can weaken the run (-f -n -k --force --warn --dry-run --no-... --skip... --allow... --ignore... --quick --only and the
+like). A log line rebuilt with "input_cut": true (transcript_audit.py build --input-limit) is a cut line. Each FAIL
+names its class (類別：沒跑 / 時間不符 / 結束碼不符 / 格式); a claim not run whose at= has a call starting with the same
+two words gets that call as a hint. --lead FILE (repeatable) checks files the lead writes itself (GATE_VERDICT,
+DIRECTOR_LOG): their RAN lines as claims, and every line that starts with a stamp YYYY-MM-DD HH:MM against the earliest
+logged call whose input holds that line (the time it was written): a stamp more than 1 minute after that call, or more
+than --tolerance-min before it, is a FAIL (時間不符); with --repo a stamped line that names a commit (a word with COMMIT
+and a 7+ hex word) is also compared with that commit's time. Lines found in no call are counted (stamps_unfound=n).
+
 Prints OK / UNVERIFIED / FAIL per claim, WARN lines, and a last line
-  REPORT_VS_AUDIT: PASS|FAIL|NONE claims=n ok=n failed=n session=ID logs=n unverified=n
+  REPORT_VS_AUDIT: PASS|FAIL|NONE claims=n ok=n failed=n session=ID logs=n unverified=n time_mismatch=n not_run=n
+  (2.2.5: --lead adds stamps=n stamps_unfound=n)
 exit 1 on any FAIL or a broken hash chain, 0 on PASS or NONE (no claims found), 2 when it cannot run. UNVERIFIED
 claims never fail the run.
 """
@@ -67,6 +86,7 @@ import importlib.util
 import json
 import pathlib
 import re
+import subprocess
 import sys
 
 SHELL_TOOLS = frozenset(("bash", "powershell", "pwsh"))  # compared lower-case
@@ -104,6 +124,12 @@ MARK = "\x00"  # 2.2.4: a variable with no value found, inside a word: any text
 VAR_REF = re.compile(r"\$\{(\w+)\}|\$env:(\w+)|\$(\w+)|%(\w+)%", re.I)
 HERE_STRING = re.compile(r"\$(\w+)[ \t]*=[ \t]*@(['\"])[ \t]*\r?\n(.*?)\r?\n[ \t]*\2@", re.S)
 STATEMENT_END = re.compile(r"(\r?\n|\r|;|&&|\|\|)")
+# 2.2.5: a shell function, name(){ body; } or function name { body; } (the } after ; or a new line)
+FUNCTION_DEF = re.compile(r"(?:^|(?<=[\n;&|]))[ \t]*(?:function[ \t]+([A-Za-z_][\w-]*)(?:[ \t]*\(\))?|([A-Za-z_][\w-]*)[ \t]*\(\))[ \t]*\{(.*?)(?:;|\n)[ \t]*\}", re.S)
+CALL_LEAD = re.compile(r"^([ \t]*(?:(?:do|then|else|\{|\()[ \t]+)?)([A-Za-z_][\w-]*)(?=[ \t]|$)(.*)$", re.S)
+POSITIONAL = re.compile(r"\"\$[@*]\"|\$[@*]|\$\{(\d+)\}|\$(\d)|\$#")
+SHELL_WORD = re.compile(r"\"[^\"]*\"|'[^']*'|\S+")
+FUNCTION_KEY = "()"  # 2.2.5: env key prefix of a shell function (never a variable name)
 BASH_SET = re.compile(r"^(?:export\s+)?([A-Za-z_]\w*)=(\"[^\"]*\"|'[^']*'|\S*)$")
 PS_SET = re.compile(r"^\$(?:env:)?(\w+)\s*=(?!=)\s*(.+)$", re.I | re.S)
 CMD_SET = re.compile(r'^set\s+"?(\w+)=(.*?)"?$', re.I)
@@ -112,7 +138,20 @@ HEX = re.compile(r"[0-9a-f]{7,64}")
 INNER_GAP = re.compile(r"\.{3,}|…|\x00")  # 2.2.4: inside a word, any text
 ID_SPACED = re.compile(r"\b([A-Z][A-Z0-9]*-\d+)[ \t]+\.\.[ \t]+((?:[A-Z][A-Z0-9]*-)?\d+)\b")  # AC-1 .. AC-6
 CLOCK = r"\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?"
-AT_SPAN = re.compile(rf"({CLOCK})\s*[–—~-]\s*({CLOCK})")
+AT_SPAN = re.compile(rf"({CLOCK})\s*[–—~～〜-]\s*({CLOCK})")  # 2.2.5: full-width ～ / 〜
+NEUTRAL_ENV = frozenset(("temp", "tmp", "tmpdir", "pythonioencoding", "pythonutf8"))  # 2.2.5: left out before the match
+ENV_WORD = re.compile(r"^([a-z_]\w*)=\S*$")
+MSYS_DRIVE = re.compile(r"(^|=)/([a-z])/")  # 2.2.5: Git Bash /d/x is d:/x (after norm(): lower case)
+PS_ENV = re.compile(r"^\$env:(\w+)\s*=")
+PATH_OPTION = re.compile(r"^--?[\w-]*(?:dir|path|file|repo|cwd|out|root|folder|log|report|order)$")
+CD_WORDS = frozenset(("cd", "chdir", "pushd", "set-location", "sl"))
+RISKY_OPTION = re.compile(r"^--?(?:f|n|k|force|warn|dry-run|no-[\w-]+|skip[\w-]*|allow[\w-]*|ignore[\w-]*|unsafe|lenient|"
+                          r"lax|loose|shadow|bypass[\w-]*|override[\w-]*|keep-going|continue[\w-]*|only|select|exclude|"
+                          r"filter|quick|fast|partial|sample|limit|max[\w-]*|tolerance[\w-]*)$")
+STAMP = re.compile(r"^[ \t]*(?:[-*][ \t]+)?(\d{4}-\d{2}-\d{2})[ T](\d{1,2}:\d{2})(?::\d{2})?(?![\d:])")
+STAMP_AHEAD_MIN = 1  # 2.2.5: a stamp may be this many minutes after the call that wrote it (minute rounding)
+STAMP_COMMIT = re.compile(r"[A-Z_]*COMMIT")
+STAMP_HEX = re.compile(r"\b[0-9a-f]{7,40}\b")
 
 
 def load_audit():
@@ -245,7 +284,7 @@ def shell_command(entry):
     raw = entry.get("input") or ""
     try:
         value = json.loads(raw)
-        return str(value.get("command", "")) if isinstance(value, dict) else raw, False
+        return str(value.get("command", "")) if isinstance(value, dict) else raw, entry.get("input_cut") is True
     except ValueError:
         body = raw[:-1] if raw.endswith("…") else raw
         found = re.match(r'\{"command":\s*"', body)
@@ -290,11 +329,56 @@ def ps_value(expression, refs):
     return "".join(out) if out else MARK
 
 
+def functions(command, env):
+    """2.2.5: the command with its shell function definitions taken out (kept in env under FUNCTION_KEY + name) and
+    each call of a known function (a statement starting with its name, also after do / then / else) replaced by the
+    function body with $1.., ${N}, $@, $* and $# filled in from the call's words (shift drops the first); one level,
+    the words after a | or > of the call stay after the body."""
+    def keep(found):
+        env[FUNCTION_KEY + (found.group(1) or found.group(2))] = found.group(3)
+        return ""
+
+    command = FUNCTION_DEF.sub(keep, command)
+    if not any(key.startswith(FUNCTION_KEY) for key in env):
+        return command
+    out = []
+    for part in STATEMENT_END.split(command):
+        found = CALL_LEAD.match(part) if part and not STATEMENT_END.fullmatch(part) else None
+        body = found and env.get(FUNCTION_KEY + found.group(2))
+        if body is None or found is None:
+            out.append(part)
+            continue
+        words = SHELL_WORD.findall(found.group(3))
+        cut = next((k for k, word in enumerate(words) if word[0] in "|><" or word[:2] in ("1>", "2>", "&>")),
+                   len(words))
+        args, rest = [unquote(word) for word in words[:cut]], words[cut:]
+        lines = []
+        for statement in STATEMENT_END.split(body):
+            if not statement.strip() or STATEMENT_END.fullmatch(statement):
+                continue
+            shift = re.fullmatch(r"\s*shift(?:\s+(\d+))?\s*", statement)
+            if shift:
+                args = args[int(shift.group(1) or 1):]
+                continue
+
+            def fill(ref):
+                if ref.group(0) == "$#":
+                    return str(len(args))
+                number = ref.group(1) or ref.group(2)
+                if number is None:
+                    return " ".join(args)
+                return args[int(number) - 1] if 0 < int(number) <= len(args) else ""
+            lines.append(POSITIONAL.sub(fill, statement).strip())
+        out.append(found.group(1) + " ; ".join(lines) + (" " + " ".join(rest) if rest else ""))
+    return "".join(out)
+
+
 def expand(command, env=None):
     """2.2.4: (command with its variables put back, the variables after it). env holds earlier assignments; the
     command's own assignments (X=v, export X=v, $x = ..., $env:X = ..., set X=v, a here-string $x = @'...'@) count
     from the statement after them. $X, ${X}, $env:X and %X% with no value found become MARK (any text in the word)."""
     env = dict(env or {})
+    command = functions(command, env)  # 2.2.5
 
     def refs(text):
         def one(found):
@@ -318,7 +402,12 @@ def expand(command, env=None):
                 out.append(part)
                 continue
             statement = part.strip()
-            out.append(refs(part))
+            name = next((found.group(1) for found in (BASH_SET.match(statement), CMD_SET.match(statement),
+                                                      PS_SET.match(statement)) if found), None)
+            if name and name.lower() in NEUTRAL_ENV:
+                out.append(part)  # 2.2.5: kept as written, to be left out before the match
+            else:
+                out.append(refs(part))
             found = BASH_SET.match(statement)
             if found:
                 env[found.group(1)] = unquote(refs(found.group(2)))
@@ -368,12 +457,15 @@ def prepare(mine):
 
 def canonical_command(command):
     """norm() with a leading & / ; / cmd /c and a python / node / pwsh launcher with its startup flags dropped; 2.2.3: in
-    each statement, joined again by " ; ". 2.2.4: "git -C DIR x" is "cd DIR ; git x"."""
+    each statement, joined again by " ; ". 2.2.4: "git -C DIR x" is "cd DIR ; git x". 2.2.5: TEMP=x in front left out (drop_env), a
+    Git Bash drive path /d/x read as d:/x."""
     statements = []
     for statement in norm(GIT_C.sub(lambda found: f"cd {found.group(1)} ; git ", command)).split(" ; "):
         parts = [part for part in statement.split(" ") if part]
         while parts and parts[0] in ("&", ";", "&&", "||"):
             parts.pop(0)
+        parts = drop_env(parts)
+        parts = [MSYS_DRIVE.sub(r"\1\2:/", part) for part in parts]
         if parts and (parts[0] == "cmd" or parts[0].endswith("/cmd.exe")):
             parts.pop(0)
             while parts and parts[0] in ("/c", "/k"):
@@ -385,6 +477,95 @@ def canonical_command(command):
         if parts:
             statements.append(" ".join(parts))
     return " ; ".join(statements)
+
+
+def drop_env(parts):
+    """2.2.5: the words of one statement without TEMP=x / env TEMP=x in front; [] for a statement that only sets
+    TEMP / TMP / TMPDIR / PYTHONIOENCODING / PYTHONUTF8 (TEMP=x, export TEMP=x, set TEMP=x, $env:TEMP = x)."""
+    found = PS_ENV.match(" ".join(parts))
+    if found and found.group(1) in NEUTRAL_ENV:
+        return []
+    start = 1 if parts and parts[0] in ("export", "set", "env") else 0
+    end = start
+    while end < len(parts) and ENV_WORD.match(parts[end]) and ENV_WORD.match(parts[end]).group(1) in NEUTRAL_ENV:
+        end += 1
+    if end == start:
+        return parts
+    if end == len(parts):
+        return []
+    return parts if parts[0] in ("export", "set") else parts[end:]
+
+
+def cwd_of(entry):
+    """2.2.5: the folder a log call ran in when its input names one ("workdir" / "cwd"), else None."""
+    raw = entry.get("input") or ""
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        found = re.search(r'"(?:workdir|cwd)":\s*"', raw)
+        if not found:
+            return None
+        text, closed = json_string_prefix(raw[found.end():])
+        return text if closed and text.strip() else None
+    if isinstance(value, dict):
+        return next((value[key] for key in ("workdir", "cwd") if isinstance(value.get(key), str)
+                     and value[key].strip()), None)
+    return None
+
+
+def absolute(word):
+    return word.startswith(("/", "~")) or re.match(r"^[a-z]:/", word) is not None
+
+
+def join_path(base, word):
+    """2.2.5: base/word with . and .. read (both already norm()ed)."""
+    out = []
+    for i, piece in enumerate((base.rstrip("/") + "/" + word).split("/")):
+        if piece == "." or (piece == "" and i):
+            continue
+        if piece == ".." and out and out[-1] not in ("..", "") and not out[-1].endswith(":"):
+            out.pop()
+            continue
+        out.append(piece)
+    return "/".join(out)
+
+
+def path_like(word, previous):
+    """2.2.5: True for a relative word that names a path: it holds a /, ends with a file extension, or is the value of
+    a path option (--repo bills, --evidence-dir evidence)."""
+    if (not word or word == ";" or word.startswith(("-", "$", MARK)) or "://" in word or "=" in word
+            or INNER_GAP.search(word) or skips(word) or absolute(word)):
+        return False
+    if "/" in word or word in (".", ".."):
+        return True
+    if re.search(r"[^./]\.[a-z0-9]{1,5}$", word) and not re.fullmatch(r"[\d.]+", word):
+        return True
+    return bool(previous and PATH_OPTION.match(previous))
+
+
+def resolve(have, cwd):
+    """2.2.5: a canonical log command with its relative paths read against the call's folder (cwd, norm()ed or None)
+    and the cd / Set-Location / pushd statements before them; the same text when nothing changes."""
+    base, out = cwd, []
+    for statement in have.split(" ; "):
+        words = statement.split(" ")
+        if words[0] in CD_WORDS and len(words) > 1 and not words[1].startswith("-"):
+            base = words[1] if absolute(words[1]) else (join_path(base, words[1]) if base else None)
+            out.append(statement)
+            continue
+        if base:
+            words = [join_path(base, word) if path_like(word, words[k - 1] if k else None) else word
+                     for k, word in enumerate(words)]
+        out.append(" ".join(words))
+    return " ; ".join(out)
+
+
+def log_forms(entry, command, have=None):
+    """2.2.5: the canonical log command (have), then (when it differs) the same with its relative paths resolved."""
+    have = canonical_command(command) if have is None else have
+    cwd = cwd_of(entry)
+    resolved = resolve(have, norm(cwd) if cwd else None)
+    return [have] if resolved == have else [have, resolved]
 
 
 @functools.lru_cache(maxsize=4096)
@@ -490,7 +671,9 @@ def word_match(claim, log, cut=False, short=None, least=MIN_WORDS):
     return any(walk(0, start, 0) for start in range(len(log)))
 
 
-def matches(claim, entry, short=None):
+def matches(claim, entry, short=None, subset=True):
+    """2.2.5: also against the log command with its relative paths resolved (log_forms), and (subset=True) a claim
+    that leaves out options the log statement has that cannot weaken the run (left_out)."""
     if claim["command"].startswith("mcp__"):
         return entry.get("tool") == claim["command"].split()[0]
     if str(entry.get("tool") or "").lower() not in SHELL_TOOLS:
@@ -499,6 +682,13 @@ def matches(claim, entry, short=None):
     want, have = canonical_command(claim["command"]), canonical_command(command)
     if not want:
         return False
+    if any(matches_form(claim, want, form, command, cut, short) for form in log_forms(entry, command, have)):
+        return True
+    return subset and left_out(claim, entry, short) is not None
+
+
+def matches_form(claim, want, have, command, cut, short):
+    """The 2.2.4 match of the canonical claim (want) against one form of the canonical log command (have)."""
     if want in have or (cut and len(have) >= 40 and want.startswith(have)):
         return True
     words = fold(want.split(" "))
@@ -508,6 +698,56 @@ def matches(claim, entry, short=None):
         return word_match(fold(launched), norm(command).split(" "), cut, short)
     return (word_match(words, have.split(" "), cut, short)
             or any_order(words, have.split(" "), leaves_out(words) if short is None else short))
+
+
+def left_out(claim, entry, short=None):
+    """2.2.5: [options of the log statement the claim leaves out] when that is the only difference and none of them
+    can weaken the run, else None (shell calls only). Only for a whole claim (one that leaves parts out with "..."
+    already skips log options, 2.2.3) whose options are in the log's order (a claim in another order names every
+    option, 2.2.4)."""
+    if claim["command"].startswith("mcp__") or str(entry.get("tool") or "").lower() not in SHELL_TOOLS:
+        return None
+    command = command_of(entry)[0]
+    words = fold(canonical_command(claim["command"]).split(" "))
+    if leaves_out(words) if short is None else short:
+        return None
+    short = False
+    for have in log_forms(entry, command):
+        found = omitted_options(words, have.split(" "), short)
+        if found:
+            return found
+    return None
+
+
+def omitted_options(claim, log, short):
+    """2.2.5: [left-out option names] when a one-statement claim's head, tail (after --) and options sit on one log
+    statement (options in any order) and the log statement has more options, none of them RISKY_OPTION; else None."""
+    if ";" in claim or sum(1 for word in claim if not skips(word)) < MIN_WORDS:
+        return None
+    head, options, tail = groups(claim)
+    statement = []
+    for word in log + [";"]:
+        if word != ";":
+            statement.append(word)
+            continue
+        log_head, log_options, log_tail = groups(statement)
+        statement = []
+        if not head or not same_run(head, log_head, short) or not same_run(tail, log_tail, short):
+            continue
+        used = []
+        for option in options:
+            hit = next((k for k, other in enumerate(log_options) if k not in used and same_run(option, other, short)),
+                       None)
+            if hit is None:
+                break
+            used.append(hit)
+        else:
+            if used != sorted(used):
+                continue
+            left = [log_options[k][0] for k in range(len(log_options)) if k not in used]
+            if left and not any(RISKY_OPTION.match(name) for name in left):
+                return left
+    return None
 
 
 def groups(words):
@@ -680,8 +920,11 @@ def check(claim, mine, offset, tolerance, session):
             return [], parts[-1], ("its statements were run in separate calls, seq "
                                    + ", ".join(str(e.get("seq")) for e in parts))
         denied = [e for e in mine if e.get("kind") == "decision" and matches(claim, e)]
+        hint = similar(claim, mine, offset, tolerance)
         return [f"not run in session {session}"
-                + (f" (the hook denied it, seq {denied[-1].get('seq')})" if denied else "")], None, None
+                + (f" (the hook denied it, seq {denied[-1].get('seq')})" if denied else "")
+                + (f"; near at= a call starts the same: seq {hint.get('seq')} at {hint.get('ts')} "
+                   f"`{shorten(command_of(hint)[0])}`" if hint is not None else "")], None, None
     problems, note = [], None
     if claim["at"]:
         try:
@@ -711,7 +954,43 @@ def check(claim, mine, offset, tolerance, session):
         else:
             got = ", ".join(sorted({str((e.get("result") or {}).get("status")) for e in runs}))
             problems.append(f"exit={claim['exit']}, but the log says {got} (seq {runs[-1].get('seq')})")
+    if not problems and not matches(claim, runs[-1], subset=False):
+        left = left_out(claim, runs[-1])
+        if left:
+            extra = f"seq {runs[-1].get('seq')} also has {', '.join(left)}, which the claim leaves out"
+            note = f"{note}; {extra}" if note else extra
     return problems, runs[-1], note
+
+
+def shorten(text, size=160):
+    text = re.sub(r"\s+", " ", text).strip()
+    return text if len(text) <= size else text[:size - 1] + "…"
+
+
+def similar(claim, mine, offset, tolerance):
+    """2.2.5: for a claim not run: the call nearest at= whose statement starts with the claim's first word and holds
+    its second (git commit -m x vs git -c a=b commit -m y), or None. Only when at= is given."""
+    if not claim["at"] or claim["command"].startswith("mcp__"):
+        return None
+    words = [word for word in canonical_command(claim["command"]).split(" ") if not skips(word)]
+    if len(words) < 2 or ";" in words[:2]:
+        return None
+    try:
+        at, extra = parse_at(claim["at"], offset)
+    except ValueError:
+        return None
+    pool = []
+    for e in mine:
+        if (str(e.get("tool") or "").lower() not in SHELL_TOOLS or e.get("kind") not in ("result", "failure")
+                or not near(str(e.get("ts")), at, offset, tolerance + extra)):
+            continue
+        for statement in canonical_command(command_of(e)[0]).split(" ; "):
+            have = statement.split(" ")
+            if have[0] == words[0] and words[1] in have[1:]:
+                pool.append(e)
+                break
+    pool.sort(key=lambda e: gap(str(e.get("ts")), at, offset, True), reverse=True)
+    return pool[-1] if pool else None
 
 
 def cut_cover(claim, mine, offset, tolerance, anchors):
@@ -768,15 +1047,131 @@ def scope_warning(text, mine, backing):
             f"and ran no scope_check.py after it{before} (shadow, exit code unchanged)")
 
 
+def fail_classes(problems):
+    """2.2.5: the classes of a claim's problems, in order: 沒跑 / 時間不符 / 結束碼不符 / 格式."""
+    out = []
+    for problem in problems:
+        if "not run in session" in problem:
+            name = "沒跑"
+        elif ", but the runs were at " in problem:
+            name = "時間不符"
+        elif "but the log says" in problem:
+            name = "結束碼不符"
+        else:
+            name = "格式"
+        if name not in out:
+            out.append(name)
+    return out
+
+
+def squash(text):
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def input_text(entry):
+    """2.2.5: every string of a log call's input, joined and with spaces collapsed (a cut input: its raw text with
+    the common JSON escapes put back)."""
+    if "_text" not in entry:
+        raw = entry.get("input") or ""
+        try:
+            value = json.loads(raw)
+        except ValueError:
+            text = raw.replace("\\n", "\n").replace('\\"', '"').replace("\\\\", "\\")
+        else:
+            parts, stack = [], [value]
+            while stack:
+                item = stack.pop()
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    stack.extend(reversed(list(item.values())))
+                elif isinstance(item, list):
+                    stack.extend(reversed(item))
+            text = "\n".join(parts)
+        entry["_text"] = squash(text)
+    return entry["_text"]
+
+
+def commit_time(repo, word):
+    """2.2.5: the committer time of a commit in repo, or None (not found, git missing)."""
+    try:
+        done = subprocess.run(["git", "-C", str(repo), "show", "-s", "--format=%cI", word + "^{commit}"],
+                              capture_output=True, encoding="utf-8", errors="replace", timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    try:
+        # git writes a UTC time as ...Z; fromisoformat takes Z only from Python 3.11 on
+        return (datetime.datetime.fromisoformat(re.sub(r"Z$", "+00:00", done.stdout.strip()))
+                if done.returncode == 0 else None)
+    except ValueError:
+        return None
+
+
+def stamp_checks(text, pool, offset, tolerance, repo):
+    """2.2.5: [(line number, stamp, [problem], written)] for each line of a lead file that starts with a stamp
+    YYYY-MM-DD HH:MM. The line was written by the earliest call of pool (time order) whose input holds it; the stamp
+    may not be more than STAMP_AHEAD_MIN minutes after that call nor more than tolerance minutes before it. With repo
+    a line that names a commit (COMMIT word and a hex word) is also compared with that commit's time: the stamp may not
+    be before the commit's minute nor more than tolerance minutes after it."""
+    out = []
+    for number, line in enumerate(text.splitlines(), 1):
+        found = STAMP.match(line)
+        if not found:
+            continue
+        hour, minute = found.group(2).split(":")
+        try:
+            stamp = datetime.datetime.fromisoformat(f"{found.group(1)}T{int(hour):02d}:{minute}").replace(tzinfo=offset)
+        except ValueError:
+            out.append((number, found.group(0).strip(), [f"{found.group(0).strip()} is not a date and time"], False))
+            continue
+        body = squash(line)
+        writer = next((e for e in pool if body in input_text(e)), None)
+        problems = []
+        if writer is not None:
+            written = when(writer)
+            ahead = (stamp - written).total_seconds() / 60
+            late = (written - stamp).total_seconds() / 60 - 1  # the stamp names a whole minute
+            if ahead > STAMP_AHEAD_MIN:
+                problems.append(f"seq {writer.get('seq')} wrote it at {writer.get('ts')}, {ahead:.0f} min before the "
+                                f"time it states")
+            elif late > tolerance:
+                problems.append(f"seq {writer.get('seq')} wrote it at {writer.get('ts')}, {late + 1:.0f} min after the "
+                                f"time it states (tolerance {tolerance})")
+        if repo and STAMP_COMMIT.search(line[found.end():]):
+            for word in STAMP_HEX.findall(line[found.end():]):
+                committed = commit_time(repo, word)
+                if committed is None:
+                    continue
+                after = (stamp - committed.replace(second=0, microsecond=0)).total_seconds() / 60
+                if after < 0:
+                    problems.append(f"commit {word} is at {committed.isoformat()}, after the time it states (a commit "
+                                    f"is logged once it is made)")
+                elif after > tolerance:
+                    problems.append(f"commit {word} is at {committed.isoformat()}, {after:.0f} min before the time it "
+                                    f"states (tolerance {tolerance})")
+                break
+        out.append((number, found.group(0).strip(), problems, writer is not None))
+    return out
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--report", required=True)
+    ap.add_argument("--report", help="the worker's TASK REPORT")
+    ap.add_argument("--lead", action="append", default=[],
+                    help="2.2.5: a file the lead writes (GATE_VERDICT, DIRECTOR_LOG): RAN lines and stamps (repeatable)")
     ap.add_argument("--log", action="append", required=True, help="action log (repeatable)")
     ap.add_argument("--session", help="session_id (default: the report's SESSION_ID: line, else the logs' only one)")
-    ap.add_argument("--tolerance-min", type=int, default=15, help="at= may differ this many minutes (default 15)")
+    ap.add_argument("--tolerance-min", type=int, default=10, help="at= may differ this many minutes (default 10)")
     ap.add_argument("--utc-offset", help="offset for at= without one and for HH:MM, e.g. +08:00 (default: local)")
+    ap.add_argument("--repo", help="2.2.5, with --lead: the repo whose commit times a stamped COMMIT line is compared with")
     a = ap.parse_args(argv)
     sys.stdout.reconfigure(encoding="utf-8")
+    if not a.report and not a.lead:
+        print("report_vs_audit: give --report and / or --lead", file=sys.stderr)
+        return 2
+    if a.tolerance_min < 0:
+        print("report_vs_audit: --tolerance-min must be 0 or more", file=sys.stderr)
+        return 2
     audit = load_audit()
     if a.utc_offset:
         found = re.fullmatch(r"([+-])(\d{2}):?(\d{2})", a.utc_offset)
@@ -787,11 +1182,15 @@ def main(argv=None):
         offset = datetime.timezone(sign * datetime.timedelta(hours=int(found.group(2)), minutes=int(found.group(3))))
     else:
         offset = datetime.datetime.now().astimezone().tzinfo
-    try:
-        text = pathlib.Path(a.report).read_text(encoding="utf-8-sig")
-    except OSError as error:
-        print(f"report_vs_audit: {error}", file=sys.stderr)
-        return 2
+    texts = []
+    for path, lead in [(a.report, False)] * bool(a.report) + [(path, True) for path in a.lead]:
+        try:
+            texts.append((path, pathlib.Path(path).read_text(encoding="utf-8-sig"), lead))
+        except (OSError, UnicodeDecodeError) as error:
+            print(f"report_vs_audit: {path}: {type(error).__name__}: {getattr(error, 'strerror', None) or error}",
+                  file=sys.stderr)
+            return 2
+    text = "\n".join(body for _, body, _ in texts)
     entries, broken = [], []
     for log in a.log:
         try:
@@ -803,23 +1202,24 @@ def main(argv=None):
         if problem:
             broken.append(f"{log}: {problem}")
         entries += [e for _, e in lines]
+    found_claims, loose = parse(text)
     session = a.session
     if not session:
         found = re.search(r"^[ \t]*SESSION_ID[ \t]*:[ \t]*(\S+)", text, re.M)
         session = found.group(1) if found else None
     if not session:
         ids = sorted({e.get("session_id") for e in entries if e.get("session_id")})
-        if len(ids) != 1:
+        if len(ids) == 1:
+            session = ids[0]
+        elif a.report or found_claims:
             print(f"report_vs_audit: the logs hold {len(ids)} sessions; pass --session or write SESSION_ID: in the report",
                   file=sys.stderr)
             return 2
-        session = ids[0]
-    mine = [e for e in entries if e.get("session_id") == session]
+    mine = [e for e in entries if session and e.get("session_id") == session]
     if any(e.get("kind") == "rebuild" for e in entries):
         print("  ~ note: a log was rebuilt from a transcript after the fact (transcript_audit.py), not written by the hook "
               "while the agent worked; it shows what the transcript holds, not that nothing else was done")
-    found_claims, loose = parse(text)
-    failed, backing = 0, []
+    failed, backing, classes = 0, [], collections.Counter()
     for problem in broken:
         print(f"FAIL log: hash chain {problem} (audit_log.py verify)")
     prepare(mine)
@@ -844,7 +1244,8 @@ def main(argv=None):
         label = f"{claim['kind']}: `{claim['command']}`".replace("\n", "; ")
         if not mine:
             failed += 1
-            print(f"FAIL {label}: the logs hold no line of session {session}")
+            classes["沒跑"] += 1
+            print(f"FAIL {label}: the logs hold no line of session {session} (類別：沒跑)")
             continue
         problems, shown, notes = [], [], []
         for form, wrong, last, note in rows:
@@ -856,7 +1257,9 @@ def main(argv=None):
                 notes.append(prefix + note)
         if problems:
             failed += 1
-            print(f"FAIL {label}: " + "; ".join(problems))
+            names = fail_classes(problems)
+            classes.update(names)
+            print(f"FAIL {label}: " + "; ".join(problems) + f" (類別：{'、'.join(names)})")
             continue
         if index in in_cut:
             unverified += 1
@@ -870,15 +1273,50 @@ def main(argv=None):
               + "".join(f" (~ {note})" for note in notes))
     for line in loose:
         print(f"WARN ran: a RAN line with no `command`, so nothing to check: {line} (shadow, exit code unchanged)")
-    warning = scope_warning(text, mine, backing) if mine else None
+    report_text = texts[0][1] if a.report else ""
+    warning = scope_warning(report_text, mine, backing) if mine and a.report else None
     if warning:
         print(f"WARN scope_check: {warning}")
+    stamps = unfound = stamp_failed = 0
+    if a.lead:
+        pool = sorted((e for e in (mine if a.session else entries) if e.get("kind") in ("result", "failure")
+                       and when(e) is not None), key=when)
+        for path, body, lead in texts:
+            if not lead:
+                continue
+            name = pathlib.Path(path).name
+            rows = stamp_checks(body, pool, offset, a.tolerance_min, a.repo)
+            missing = [str(number) for number, _, _, written in rows if not written]
+            stamps += len(rows)
+            unfound += len(missing)
+            for number, stamp, problems, _ in rows:
+                if problems:
+                    stamp_failed += 1
+                    classes["時間不符"] += 1
+                    print(f"FAIL stamp: {name}:{number} `{stamp}`: " + "; ".join(problems) + " (類別：時間不符)")
+            print(f"  ~ stamps: {name}: {len(rows)} stamped lines, {len(rows) - len(missing)} found in a logged call"
+                  + (f"; not found (written by a program, or the log is cut): lines {', '.join(missing[:12])}"
+                     + (" ..." if len(missing) > 12 else "") if missing else ""))
     ok = len(found_claims) - failed - unverified
-    result = "FAIL" if failed or broken else ("NONE" if not found_claims else "PASS")
+    bad = failed or broken or stamp_failed
+    result = "FAIL" if bad else ("NONE" if not found_claims and not stamps else "PASS")
     print(f"REPORT_VS_AUDIT: {result} claims={len(found_claims)} ok={ok} failed={failed} session={session} logs={len(a.log)} "
-          f"unverified={unverified}")
+          f"unverified={unverified} time_mismatch={classes['時間不符']} not_run={classes['沒跑']}"
+          + (f" stamps={stamps} stamps_unfound={unfound}" if a.lead else ""))
     return 1 if result == "FAIL" else 0
 
 
+def entry_point(argv=None):
+    """2.2.5: main() with every unexpected error turned into one line and exit 2 (no Traceback)."""
+    try:
+        return main(argv)
+    except KeyboardInterrupt:
+        print("report_vs_audit: interrupted", file=sys.stderr)
+        return 2
+    except Exception as error:  # noqa: BLE001 - the top level reports, never a Traceback
+        print(f"report_vs_audit: cannot run: {type(error).__name__}", file=sys.stderr)
+        return 2
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(entry_point())

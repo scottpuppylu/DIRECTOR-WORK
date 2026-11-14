@@ -31,12 +31,12 @@
 - 總監改工單時 `REVISION` 加 1，在 H 節記一列（誰改、原因、影響的 AC）。派工時用 `gate_check.py --hash` 印出工單雜湊，把它印的 `DISPATCH <WO-ID> rev=<n> sha=<雜湊>` 那行原樣寫進 `DIRECTOR_LOG`（同一工單以最新一行為準）；worker 在報告填 `ORDER_SHA256`。審查時 `--match ... --dispatch-log DIRECTOR_LOG.md` 拿派工紀錄比對：工單被改過再重算雜湊也會被查出；DISPATCH 必須獨占一行，引用、縮排或圍欄裡的不算；沒有紀錄時各模式都失敗。這是事後查出，不是事前防止：誰都還是改得動工單。
 - 發工單前想清楚需求、現有結構、相依、邊界條件、測試方法，一次給完整。
 - 製作類工單的第一步固定是「既有資產盤點」：未合併的分支（`git log --all -- <路徑>`）、需求方提供過的檔案、舊報告。盤點結果寫進 gate 報告。
-- 規格審查：Strict 工單放上待決頁前必做（Desktop 的做法見 `docs/11`），Standard 選用，Direct 不做。總監開一個短上下文、只讀的 subagent，照 `templates/SPEC_REVIEW.md` 審工單；結果只給總監參考，不增加 PO 的工作。每次在 `DIRECTOR_LOG` 記下花費（subagent 回報的 token）和抓到的問題；花費高過它省下的返工，就降回選用。
+- 規格審查：Strict 和 Standard 工單放上待決頁前必做（Desktop 的做法見 `docs/11`；2.2.5 起 Standard 也必做），Direct 不做。總監開一個短上下文、只讀的 subagent，照 `templates/SPEC_REVIEW.md` 審工單；結果只給總監參考，不增加 PO 的工作。每次在 `DIRECTOR_LOG` 記下花費（subagent 回報的 token）、抓到的問題和審查者的 `session=`；花費高過它省下的返工時報 PO，要不要降回選用由 PO 決定。
 
 ### Gate 與回報
 
 - Worker 在 gate 完成、卡住、需要裁決、要偏離工單時回報，一個 gate 只送**一則完整**的 TASK REPORT（`templates/TASK_REPORT.md`）。
-- 暫存檔位置（2.2.3，L-053）：harness 給的 scratchpad 和系統暫存資料夾（`%TEMP%`、`/tmp`）算工作區外：不在工單範圍內，總監看不到也重跑不到，session 結束可能就沒了。自寫的腳本、暫存輸出一律放工單的 `WORK_DIR`，RAN 寫的也是 WORK_DIR 裡的路徑。開工時先把 TEMP、TMP（及 TMPDIR）設成 `WORK_DIR/tmp`（2.2.4），工具和測試自己開的暫存檔也落在 WORK_DIR。
+- 暫存檔位置（2.2.3，L-053）：harness 給的 scratchpad 和系統暫存資料夾（`%TEMP%`、`/tmp`）算工作區外：不在工單範圍內，總監看不到也重跑不到，session 結束可能就沒了。自寫的腳本、暫存輸出一律放工單的 `WORK_DIR`，RAN 寫的也是 WORK_DIR 裡的路徑。開工時先把 TEMP、TMP（及 TMPDIR）設成 `WORK_DIR/tmp`（2.2.4），工具和測試自己開的暫存檔也落在 WORK_DIR。2.2.5：Git Bash 裡 `export TEMP=...` 管不到 Windows 的 Python：Git Bash 自己匯出 TMPDIR（指向系統暫存資料夾），Python 的 tempfile 先讀 TMPDIR 才讀 TEMP；agent 每次 Bash 呼叫是新的 shell，上一次的 export 也不留。所以設了環境變數 `WORK_DIR` 時，DW 工具自己把暫存檔指到 `WORK_DIR/tmp`；自寫的腳本要在同一個呼叫裡設 `TMPDIR=<WORK_DIR>/tmp`。
 - 交件前 worker 跑三支工具，把結論行貼進 TASK REPORT：`tools/scope_check.py`（改動有沒有超出工單）、`tools/gate_check.py`（欄位和用詞）、`tools/evidence_record.py`（驗收指令留下重跑指令和產物雜湊）。AUTO 條件在最後一次 commit 之後記錄，ACCEPTANCE 表的證據欄寫紀錄的 `.json` 檔名；總監用 `gate_check.py --match 報告 工單 --evidence-dir 證據資料夾` 核對紀錄真的 exit 0、HEAD 相同。
 - 總監審查時自己重跑 `scope_check.py`、`evidence_record.py verify 紀錄 --rerun --order 工單 --dispatch-log DIRECTOR_LOG.md --repo <候選 commit 的乾淨 worktree> --candidate <40 位>` 和 `gate_check.py --match 報告 工單 --dispatch-log DIRECTOR_LOG.md`，不只看報告怎麼寫。`--rerun` 跑的是工單 `CHECKS:` 裡核准的指令，不是 worker 寫在紀錄裡的；紀錄的指令不同或不是在候選 commit 記的，都算不符。它在候選 commit 的 tree 複製出來的暫存資料夾裡跑，仍會執行候選 commit 的測試碼，不是沙箱；`--repo` 用 `git worktree add --detach` 開的乾淨目錄。worker 記證據時加 `--order 工單`，紀錄就綁住工單版次；工單改版後要沿用舊證據，總監在 DIRECTOR_LOG 寫整行 `EVIDENCE_EQUIVALENT <WO-ID> rev=<舊> sha=<舊雜湊> to rev=<新>`，否則 Strict 失敗。Strict 工單再加 `--evidence-dir 證據資料夾 --candidate <git rev-parse worker 分支>`，少一個就失敗：報告、證據紀錄和裁決的 `CANDIDATE_HEAD` 都要指向同一個 commit。只有 `verify --rerun` 才算重跑驗證；`--match --evidence-dir` 和不加 `--rerun` 的 `verify` 只是讀 worker 自己寫的紀錄，`--rerun-recorded` 跑的也是紀錄裡寫的指令。`--match` 檢查每條驗收條件都有結果、狀態符合類型、PASS 附證據、工單雜湊和派工紀錄相符；不給 `--dispatch-log` 就只能和工單現在的樣子比。工具通過只代表格式、範圍和檔案對得上，不代表做對了；下面四階段照做。
 - AC 用 git（2.2.3，L-055）：`CHECKS:` 的程式寫裸名稱會被 `--rerun` 擋下（PATH 會選到哪支程式說不準），git 是例外，只限唯讀子指令 `diff`、`show`、`log`、`status`、`rev-parse`、`ls-files`、`cat-file`，例如 `["git", "diff", "--exit-code", "<BASE_REF commit>", "--", "tests/"]`。子指令前不能有選項（`-c`、`-C`），其他子指令（push、commit、reset、checkout…）和會寫檔或執行程式的選項（`--output`、`--ext-diff`、`--textconv`、`--filters`、`--no-index`）都擋。git 檢查要用歷史，所以在 `--repo` 裡跑（不是複製出來的資料夾），跑完照樣重讀 repo，有變就不符。只要確認鎖定的測試檔沒被改，也可以不用 git：工單寫 `TESTS_LOCKED: <路徑> sha256=<64 位>`，CHECKS 用 python 算雜湊比對，不需要歷史。
@@ -51,6 +51,11 @@
 - 跳過的測試不算 PASS；既有失敗維持原樣寫 `NO_NEW_REGRESSION`，不是 ALL PASS。
 - 交接時用 `RESUME_STATE.md`（`docs/06`）；原 worker 先停在安全狀態，接手者先核對 repo 和交接資料一致，不重做已通過的工作。
 - TASK REPORT 可以加 `SESSION_ID:` 和 `RAN:`（一行一個實際跑過的指令，寫 exit 和時間）。總監用 `tools/report_vs_audit.py --report 報告 --log <動作紀錄>` 核對：報告說跑過的 selftest、Unity、Blender、雜湊檢查，動作紀錄裡有沒有、結果和時間對不對得上。它只核對有沒有跑，不代表跑的內容對。
+- RAN 行和時間戳（2.2.5）：RAN 行用 `tools/ran_line.py` 產生（代跑指令或剛跑完補記），裁決表頭和 DIRECTOR_LOG 的時間用 `ran_line.py --stamp`，不手打。報告的 `WORKTREE:` 行照抄 `scope_check.py` 印的那一行（依 `git worktree list` 判斷隔離 worktree 或共用 checkout）。共用 checkout 裡用 `scope_check.py --shared` 只算這張工單自己的 commit。
+- 閘門順序（2.2.5，Standard / Strict）：先 DISPATCH、SPEC_REVIEW，再 PLAN_APPROVED，然後 worker 才開工（格式見 `templates/DIRECTOR_FILES.md` 的 DIRECTOR_LOG）。`gate_check.py --sequence 工單 --dispatch-log DIRECTOR_LOG.md --repo <repo>`：核准晚於 worker 的第一個 commit、沒有核准、沒有規格審查、審查和作者同一個 session，都 FAIL；缺 session id 是 WARN。
+- 裁決之後鎖程式碼（2.2.5）：`gate_check.py --after-verdict` 預設 FAIL。裁決之後的 commit 只改文件（`DIRECTOR/`、`docs/`、`.md` / `.rst` / `.txt`）照樣放行；改到程式碼（SCOPE 內也算）要再審、寫指向新 commit 的裁決；裁決的 commit 已不在分支上（歷史被改寫）也 FAIL。導入舊專案時加 `--warn`。
+- 最終驗收（2.2.5）：最終裁決前，lead 照規格的情境，從交付物唯一的公開入口（CLI 或可呼叫的函式）實際跑一次，證據放 `evidence/E2E/`，每份紀錄寫 `ENTRY_POINT:`。`gate_check.py --final <DIRECTOR 資料夾>` 找不到證據就 FAIL；DECISION_REGISTER 的 DD 沒有「驗收案例」印 WARN。清單在 `templates/GATE_VERDICT.md` G 節。
+- worker 輪數上限與交接（2.2.5）：worker 預設到 80 輪或 context 60% 就停（工單 `WORKER_LIMIT` 可改），寫 `HANDOFF.md`（`templates/HANDOFF.md`）回報 lead；lead 開新的 worker 接續，不讓原 worker 繼續長下去。lead 只讀 TASK REPORT 的摘要段（首行到 RESULT）和 HANDOFF.md，不讀 worker 的完整過程。
 - 要看「哪個需求做到哪裡」時，用 `tools/trace_report.py` 從工單、報告和裁決產生追溯表（需求 → 工單 → AC → 證據 → 裁決），不另外人工維護。
   - 加 `--brief BRIEF.md` 時，每條 B 多一列三欄：有人負責／這版有驗證紀錄／你看過這個成品嗎。
   - `--director-log` 讀 PO 看過哪個成品，`--acceptance PO_ACCEPTANCE.json` 讀 PO 的驗收紀錄。

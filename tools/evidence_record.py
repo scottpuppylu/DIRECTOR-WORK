@@ -677,7 +677,22 @@ def report(a, artifacts, lines, test, extra, root=None, base=None):
     return 0 if ok else 1
 
 
+def use_work_temp():
+    """2.2.5 (B9): with WORK_DIR set, temp files go to WORK_DIR/tmp (tempfile.tempdir and TMPDIR / TEMP / TMP for child
+    processes). Git Bash exports TMPDIR, which Python reads before TEMP / TMP, so `export TEMP=...` alone did nothing."""
+    work = os.environ.get("WORK_DIR", "").strip()
+    if not work:
+        return None
+    folder = os.path.join(work, "tmp")
+    os.makedirs(folder, exist_ok=True)
+    tempfile.tempdir = folder
+    for name in ("TMPDIR", "TEMP", "TMP"):
+        os.environ[name] = folder
+    return folder
+
+
 def main():
+    use_work_temp()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="action", required=True)
     run = sub.add_parser("run", help="run a command and write a record")

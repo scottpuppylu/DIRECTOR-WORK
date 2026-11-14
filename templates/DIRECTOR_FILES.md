@@ -43,6 +43,24 @@ PO_PAGE_PINNED: <yes；置頂失敗寫 no reason=<原因>>
 <YYYY-MM-DD HH:MM ±TZ> | <決定 / 事件> | <依據或 DD-xx / PO-xx>
 ```
 
+時間用 `ran_line.py --stamp --to DIRECTOR_LOG.md --text "| <事件> | <依據>"` 從時鐘取，不手打（2.2.5）。只往下加：
+`gate_check.py --sequence` 把比上面的行還早的時間當成上面那行的時間。Standard / Strict 工單的閘門順序（2.2.5）：
+
+```text
+<時間> | DISPATCH WO-12 rev=1 sha=<64 位> | session=<寫工單的 session id>
+<時間> | SPEC_REVIEW WO-12 tokens=<n> issues=<P0/P1/P2> adopted=<n> session=<審查者的 id>
+<時間> | PLAN_APPROVED WO-12 session=<核准者的 id>
+```
+
+PLAN_APPROVED 要早於 worker 在這張工單的第一個 commit（標題以 `WO-12` 開頭）；`gate_check.py --sequence 工單 --dispatch-log DIRECTOR_LOG.md --repo <repo>` 查。
+
+## IDEAS.md（點子清單，2.2.5）
+
+```text
+# IDEAS（還沒變成工單的點子；採用時開工單，在狀態欄寫工單編號）
+| ID | 點子 | 理由（要解決什麼、依據） | 估計成本（輪數、額度、重資源分鐘；寫依據） | 提出者 / 時間 | 狀態（待議 / 採用 WO-xx / 不做：原因） |
+```
+
 ## GUARDS.md
 
 ```text

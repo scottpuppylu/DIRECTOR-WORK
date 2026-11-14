@@ -1,9 +1,10 @@
 # GATE VERDICT — <TASK_ID> <gate 名稱>
-<YYYY-MM-DD HH:MM，讀 date> 總監
+<YYYY-MM-DD HH:MM，用 ran_line.py --stamp 印，不手打（2.2.5）> 總監
 ORDER: <WO-檔名.md> REVISION <n>
 CANDIDATE_HEAD: <審查的 commit，40 位，git rev-parse worker 分支>
 ORDER_SHA256: <選用：gate_check.py --hash 工單>
 REPORT_SHA256: <選用：gate_check.py --hash 報告；寫了之後報告再被改，--match 會印 ~ VERDICT_RECORD>
+SESSION_ID: <寫這份裁決的 session id；要和 TASK REPORT 的不同，相同 gate_check.py --sequence 判 FAIL（2.2.5）>
 
 ## A. 判定
 <PASS | PASS_WITH_WARNINGS | CONDITIONAL_PASS | PARTIAL | HOLD | BLOCKED | FAIL | NOT_RUN>
@@ -33,3 +34,10 @@ EVIDENCE_RERUN <WO-ID> <AC> candidate=<40 位> result=ok record=<檔名>
 
 ## F. 停止狀態
 NO MERGE / NO PUSH / NO FINAL ACCEPTANCE（除非 PO 另行核准，寫明核准來源）
+這份裁決之後再改程式碼（不只文件），要再審、寫一份指向新 commit 的裁決；`gate_check.py --after-verdict` 預設判 FAIL（2.2.5）。
+
+## G. 最終驗收清單（只有最終裁決填，2.2.5）
+- 公開入口（ENTRY_POINT）：<交付物唯一的公開入口：CLI 指令或可呼叫的函式>
+- 端到端證據：`evidence/E2E/<檔名>`：lead 照規格的情境，從上面的入口實際跑一次；每份紀錄寫一行 `ENTRY_POINT: <入口>`
+- `gate_check.py --final <DIRECTOR 資料夾>` 的結論行：<原樣貼上；FAIL 不能給最終 PASS>
+- DD 驗收案例：DECISION_REGISTER 每條 DD 的「驗收案例」都有對應的端到端案例和精確期望數字；`~ WARN DD_CASE` 的逐條寫原因

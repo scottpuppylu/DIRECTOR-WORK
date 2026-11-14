@@ -17,6 +17,7 @@ WORKTREE       = <路徑>
 WORK_DIR       = <放報告、RESUME_STATE.md、輸出的資料夾>   # 開工時 TEMP、TMP（及 TMPDIR）設成 WORK_DIR/tmp；scratchpad 和系統暫存資料夾算工作區外（docs/02）
 BUDGET         = <US$0 | PO 核准的金額>
 HEAVY_RESOURCE = <無 | 需先 TEST REQUEST：類型、預估分鐘>
+WORKER_LIMIT   = <80 輪或 context 60%，先到先停（預設，可改）>   # 到上限就停：寫 HANDOFF.md、回報 lead，lead 開新的 worker 接續（docs/02，2.2.5）
 ```
 
 兩個 `BRIEF_` 欄位是選用的：寫了以後，工單依據的初衷卡列被改掉時，`gate_check.py --order / --match --brief BRIEF.md` 印 `~ BRIEF_STALE`（舊條件驗過，新條件待重驗）；只是提示，不改結果。不寫照樣通過。
@@ -56,6 +57,10 @@ repo 與分支、工作樹乾淨、未提交修改、相關規範、相依、實
 ## D. 實作要求
 沿用現有架構；最小但完整；處理例外；必要的向後相容；補上直接相關的測試；不做無關重構。每項修改做成開關，方便批次驗證（docs/02）。
 
+- 行數上限（2.2.5）：<每個檔或函式的行數上限，或「無」>；worker 自檢時自己量，結果寫進 TASK REPORT。
+- 新增任何上限（大小、筆數、深度）都寫理由，並拿真實資料的最大值確認擋不到（2.2.5）。
+- 程式最上層攔下所有例外，使用者看不到 Traceback；錯誤訊息不回顯控制字元、不顯示原始 Python 例外文字，該報的問題照報（2.2.5）。
+
 ## E. 驗收條件
 | ID | 類型 | 要求 | 驗證方法 | 預期 |
 |---|---|---|---|---|
@@ -80,6 +85,8 @@ CHECKS:
   - Unicode 與全形字元（全形數字、全形運算子）
   - 錯誤訊息不漏出程式語言的原生訊息（traceback、RecursionError）或英文訊息，照工單規定的語言與格式
   - 需求寫「不當掉／不崩潰」時，至少一條 AC 用極端輸入驗證（例如上面的深度或長度）
+  - 怪檔案（2.2.5）：讀檔的工具拿 `templates/weird_inputs.py <資料夾>` 產生的空檔、BOM、控制字元、超長行、深層巢狀、錯誤編碼逐一餵過
+  - 期望值由獨立的 oracle 或手算表產生，不由寫程式的人邊寫邊抄（2.2.5）
 - 選用的 `追溯` 欄（加在表的最後一欄）：這條 AC 驗證 TRACES_TO 的哪些編號，例如 `DD-03`；沒有寫 `—`。不加這欄也照樣通過；加了之後 `trace_report.py` 每個編號一列，不必猜哪條 AC 服務哪個需求。
 
 結果不寫在這裡，寫在 TASK REPORT 的 ACCEPTANCE 表。成品類交件另附常識閘門表（docs/07）。
@@ -91,6 +98,7 @@ CHECKS:
 - DELIVERABLES：<檔案、commit / tag、審查包>
 - 完成：一則 TASK REPORT 給總監（templates/TASK_REPORT.md）。
 - STOP_RULES：同一根因 2 輪沒進展就停；超出 SCOPE 先問；超過測試上限 10 分鐘先停下回報。
+- 到 WORKER_LIMIT 就停（2.2.5）：寫 `HANDOFF.md`（`templates/HANDOFF.md`：做完什麼、還剩什麼、下一步、檔案路徑），回報 lead；lead 開新的 worker 從 HANDOFF.md 接續。
 
 ## H. 變更紀錄
 只有總監能改本工單。REVISION 1 不用寫；之後每改一次加一列，再把新的雜湊告訴 worker。

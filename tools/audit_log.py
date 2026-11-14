@@ -142,11 +142,12 @@ def text_of(value):
     return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
-def summary(tool_input):
+def summary(tool_input, limit=INPUT_LIMIT):
     # mask each string first, then serialize (F12): masking the JSON text missed a quoted secret whose quotes JSON
-    # escapes. No second pass over the JSON: it would turn `"secret_mode": false` into text that is not JSON
+    # escapes. No second pass over the JSON: it would turn `"secret_mode": false` into text that is not JSON.
+    # 2.2.5: limit=None keeps the whole input (transcript_audit.py build); the hook still cuts at INPUT_LIMIT
     text = text_of(MASK_TREE({} if tool_input is None else tool_input))
-    return text if len(text) <= INPUT_LIMIT else text[:INPUT_LIMIT - 1] + "…"
+    return text if limit is None or len(text) <= limit else text[:max(limit, 2) - 1] + "…"
 
 
 def output_record(status, output):
