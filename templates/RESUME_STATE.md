@@ -18,3 +18,4 @@ KEEP_AS_EVIDENCE: <要保留的證據路徑>（同一路徑不得同時出現在
 FIX_ROUNDS: <每個修過的缺陷一行：`- <缺陷>: round=<累計輪次> set=<組> study=<ROOT_CAUSE_STUDY.md 或 NONE>`> 或 NONE
 OPEN_DECISIONS: <等總監 / PO 的決定> 或 NONE
 DO_NOT_REPEAT: <已失敗的方法，不要重試> 或 NONE
+<!-- 整份 ≤ 20 KiB、單行 ≤ 4 KiB；超過用 tools/resume_archive.py 把舊段落原文搬到 RESUME_HISTORY_<YYYYMMDD>.md（docs/06）。Before: 舊紀錄用 (MM-DD HH:MM) 開頭。 -->

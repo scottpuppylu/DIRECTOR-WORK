@@ -9,9 +9,11 @@ Python 3.9 以上，只用標準函式庫。一律用 `python -I -X utf8 <tool> 
 | `context_probe.py` | 免費探測每輪固定成本：類別 token、`autoCompactThreshold`、記憶檔、skill | 不寫（`--json-out` 除外） | **不花**：只送 control request，不呼叫模型 |
 | `usage_report.py` | 從本機對話紀錄只彙總 usage 數字：呼叫數、上下文分佈、模型、快取重建、工具輸出量、圖片數 | 不寫（`--json-out` 除外） | 不花 |
 | `usage_mix.py`（1.3.0） | 額度花在哪：每次呼叫依它選的動作歸成五大類（讀和查、協調、看圖與審查、實際動手、等待），對照門檻，各 session 的比例，以及開新 session 划不划算（RESTART 行） | 不寫 | 不花；只印比例，不印訊息內容 |
-| `memory_size_check.py` | 檢查記憶索引大小，超過門檻 exit 1 | 不寫 | 不花 |
-| `gate_check.py` | 檢查 RESUME_STATE、工單、TASK REPORT、裁決的欄位和用詞；`--match` 逐條對照報告和工單的驗收條件，加 `--evidence-dir` 再核對證據紀錄；`--hash` 印工單雜湊 | 不寫 | 不花 |
-| `setup_check.py`（2.2.0） | 建置完成的檢查：`DIRECTOR_STATE.md` 的 `PO_PAGE_URL` 和 `PO_PAGE_PINNED` 兩行是不是三種合法寫法之一；2.2.1 起另查旁邊的 `PO_PENDING.md`、`RESUME_STATE.md` 表頭、`director_work.json`（shadow，`--strict` 才失敗） | 不寫 | 不花 |
+| `memory_size_check.py` | 檢查記憶索引大小，超過門檻 exit 1；2.2.2 起 `--kind resume` 一次量多份 RESUME_STATE（`--file` 多次、`--glob`、`--workstreams`），每檔一行並印可搬 bytes | 不寫 | 不花 |
+| `resume_archive.py`（2.2.2） | RESUME_STATE 瘦身：把很多輪以前的段落和表頭 `Before:` 舊紀錄原文搬到同資料夾 `RESUME_HISTORY_<YYYYMMDD>.md`；近期、現況、未結不動；預設 dry-run | 只有 `--execute` 才寫：先寫 `.bak`，再改 RESUME_STATE 和歷史檔；驗證不過就還原 | 不花 |
+| `gate_check.py` | 檢查 RESUME_STATE（2.2.2 起含大小，shadow）、工單（2.2.2 起含 BASE_REF 新鮮度，會 `git fetch`）、TASK REPORT、裁決的欄位和用詞；`--match` 逐條對照報告和工單的驗收條件，加 `--evidence-dir` 再核對證據紀錄；`--hash` 印工單雜湊 | 不寫 | 不花 |
+| `release.py`（2.2.2） | 發版一次到位：fetch → 工作樹乾淨 → 比對遠端主線（落後停、分岔停或 `--merge`）→ HEAD 的 VERSION 與 CHANGELOG 最上段一致、tag 排序高於遠端所有 tag → selftest → 公開掃描 → push → annotated tag → `gh release create --latest`，每步用 ls-remote／`gh release view` 驗。預設 dry run | 只有 `--execute` 動遠端；`--merge --execute` 開本機分支 | 不花 |
+| `setup_check.py`（2.2.0） | 建置完成的檢查：`DIRECTOR_STATE.md` 的 `PO_PAGE_URL` 和 `PO_PAGE_PINNED` 兩行是不是三種合法寫法之一；2.2.1 起另查旁邊的 `PO_PENDING.md`、`RESUME_STATE.md` 表頭（2.2.2 加大小）、`director_work.json`（shadow，`--strict` 才失敗） | 不寫 | 不花 |
 | `round_check.py`（1.3.0） | 修正輪數：RESUME_STATE 的 `FIX_ROUNDS:` 到第 4 輪（之後每組）沒有根因研究就 FAIL | 不寫 | 不花 |
 | `report_vs_audit.py`（1.3.0） | 用動作紀錄核對 TASK REPORT：報告說跑過的指令（`RAN:` 和 TESTS / EVIDENCE / DONE 裡的 selftest、Unity、Blender、雜湊檢查）紀錄裡有沒有、exit 和時間對不對；2.2.1 修截斷的長指令（引號、反斜線）比不到 | 不寫 | 不花 |
 | `transcript_audit.py`（2.2.1） | 沒裝 hook 時，從本機 Claude Code transcript（含 subagents）重建一份 hook 格式的動作紀錄，第 1 行標明是重建的 | 只寫 `--out`（已存在要 `--force`） | 不花 |
@@ -294,12 +296,35 @@ python -I -X utf8 usage_report.py --all --json-out <file>
 
 ```text
 python -I -X utf8 memory_size_check.py --file <memory-index> [--max-bytes 6144]
+python -I -X utf8 memory_size_check.py --kind resume --workstreams <DIRECTOR>/ACTIVE_WORKSTREAMS.md   # 2.2.2：巡查量所有工作線
+python -I -X utf8 memory_size_check.py --kind resume --glob "D:/X/**/RESUME_STATE*.md" [--config director_work.json]
+python -I -X utf8 memory_size_check.py --kind resume --file A.md --file B.md
 ```
+
+- 只給一個 `--file`、不加 `--kind` / `--glob` / `--workstreams`：和 2.2.1 一樣的單檔報告。
+- 2.2.2 多檔模式：每檔一行 `OK  ` / `OVER <路徑>: <bytes> (limit), ~<token>, longest line <行號>: <bytes>`，`--kind resume` 另印 `movable <bytes>`（`resume_archive.py` 會搬走的量）；最後一行 `SIZE: PASS|OVER|MISSING files=n over=n [missing=n]`。超過或找不到 exit 1。只讀。
+- `--kind resume` 上限 20480 bytes、單行 4096 bytes（`--config` 讀 `resume.max_bytes`、`resume.max_line_bytes`；`--max-bytes`、`--max-line-bytes` 優先）。`--kind memory` 上限 6144、不查單行。token 是 bytes / 2 的估計。
+- `--workstreams` 讀 ACTIVE_WORKSTREAMS.md 表格裡表頭含 RESUME 的那一欄（沒有就找文字裡的 `...RESUME_STATE*.md`）；相對路徑從那份檔案的資料夾算；NONE、`-`、`<...>` 略過。glob 找不到檔、登記的路徑不存在都算 missing。
+
+## resume_archive.py（2.2.2）
+
+```text
+python -I -X utf8 resume_archive.py <RESUME_STATE.md>             # dry-run：列出可搬 / 保護的部分和搬後 bytes / token，不寫檔
+python -I -X utf8 resume_archive.py <RESUME_STATE.md> --execute   # 先寫 .bak，搬移，驗證；不過就還原，exit 1
+```
+
+- 「壓縮」只代表原文搬移：搬走的內容一字不改附加到同資料夾 `RESUME_HISTORY_<YYYYMMDD>.md`，原處留索引（段落：一行 `> RESUME_ARCHIVED: <開頭> | <日期> | <歷史檔> | sha256=<16 位>`；表頭 `Before:` 鏈：行尾 `[RESUME_ARCHIVED: n older entries | <日期或 ?> | <歷史檔> | sha256=<16 位>]`）。
+- 永遠不動：四行表頭（仍是四行，只搬 `Before:` 鏈較舊的尾段）、有 `UPDATED:` 的段落、標題 / 空行 / 舊索引、標題或開頭含 `resume.protect_headings` 的段落、最新 `resume.keep_recent`（10）筆。近期只用筆數算，不看幾天前。
+- 段落：空行或標題之間的一塊；整塊是清單時每個項目一段。段落用裡面最晚的完整日期（YYYY-MM-DD、YYYY/MM/DD、YYYYMMDD）排先後，日期只用來排順序；和第 10 筆同一天的也留下。沒有完整日期的段落排不出先後，留下並印 `~ shadow: RESUME_ORDER`。
+- `Before:` 鏈：順序就是鏈本身（新到舊），保留現況文字和前 10 筆，更舊的搬走。有一筆是空的，或開頭的 `(YYYY-MM-DD HH:MM)` / `(MM-DD HH:MM)` 顯示後面的比前面的新，整行不動並印 `~ shadow: RESUME_HEADER ...`。索引的日期是搬走的最新一筆的日期，讀不到寫 `?`。
+- `--execute` 驗證三項：(a) 歷史檔逐字、依序含所有搬走的內容，舊內容沒變 (b) 留下的部分 sha256 不變、依序、表頭仍是同樣四行 (c) 把搬走的內容放回索引處＝原檔（逐 byte）。任一項不過：從 `.bak` 還原 RESUME_STATE、歷史檔還原成原樣，印 `ARCHIVE: FAIL restored=yes` 並 exit 1。`.bak` 不刪；同名 `.bak` 已存在就不做（exit 2）。其他檔不動。
+- 全部可搬的搬完仍超過上限，印 `~ shadow: RESUME_SIZE protected part over limit`，保護部分不動，交總監人工判斷。
+- 設定：`--config director_work.json`（預設讀檔案旁邊那份），`--keep-recent` 優先；`--today YYYY-MM-DD`（歷史檔名的日期）給測試用。不是 UTF-8 就不讀（exit 2）。
 
 ## gate_check.py
 
 ```text
-python -I -X utf8 gate_check.py --resume <RESUME_STATE.md>
+python -I -X utf8 gate_check.py --resume <RESUME_STATE.md> [--strict] [--config director_work.json]   # 2.2.2 起含大小（shadow）
 python -I -X utf8 gate_check.py --order <WO.md> --report <報告.md> --verdict <裁決.md>
 python -I -X utf8 gate_check.py --verdict <裁決.md> --match <報告.md> <WO.md> --candidate <40 位>   # 裁決要指向這張工單的這個版次和這個 commit
 python -I -X utf8 gate_check.py --match <報告.md> <WO.md>     # 逐條對照驗收條件
@@ -309,9 +334,12 @@ python -I -X utf8 gate_check.py --match <報告.md> <WO.md> --evidence-dir <證�
 python -I -X utf8 gate_check.py --test-request <申請.md>       # TEST REQUEST 欄位齊、單位 GiB、寫入量涵蓋 build + 擷取 + 快取（1.3.0）
 python -I -X utf8 gate_check.py --hash <WO.md>                # 印工單 SHA-256（CRLF 當 LF 算）和要記進 LOG 的 DISPATCH 行
 python -I -X utf8 gate_check.py --preflight <報告.md> <WO.md> --evidence-dir <證據資料夾> --dispatch-log <DIRECTOR_LOG.md> --repo <受信任的 checkout>   # 舊審查升到新 Strict 前缺什麼
+python -I -X utf8 gate_check.py --order <WO.md> --repo <專案 checkout> [--strict-base] [--config director_work.json]   # 2.2.2：BASE_REF 新鮮度
 ```
 
 - 每個檔案印一行 `OK` / `FAIL`，有問題逐條列出；任何一個失敗就 exit 1。
+- `--resume`（2.2.2）：檔案超過 `resume.max_bytes`（20480）或任一行超過 `resume.max_line_bytes`（4096）時印 `~ shadow: RESUME_SIZE <bytes> ... ~<token> tokens, longest line <行號>: <bytes>`，exit code 不變；加 `--strict` 才判不過。上限從 `--config`、檔案旁邊的 `director_work.json`、預設值依序取。瘦身用 `resume_archive.py`。
+- `--order` 的 BASE_REF 新鮮度（2.2.2，從 DW-DS ds.3 移植）：在 `--repo`（預設是工單所在資料夾）先 `git fetch <remote>`（同一 repo 和 remote 一次執行只 fetch 一次），再拿 BASE_REF 的 commit 比遠端分支：一樣印 `~ BASE_REF <commit> = origin/main (fetched now)`；commit 不存在或落後印 `~ WARN BASE_REF: ...`（落後幾個 commit、該從哪裡開工），加 `--strict-base` 判不過。fetch 失敗、資料夾不是 git checkout、沒有 remote，都印 `not compared with the remote: ...`，不當作通過。BASE_REF 沒寫 commit（7–40 位十六進位）就不檢查、不印。開關：`director_work.json` 的 `"base_ref": {"check": true, "fetch": true, "strict": false}`，讀 `--config`，否則工單資料夾或上一層的 `director_work.json`。
 - 沒填的範本一定不過（`<...>` 算沒填）。工單的 SCOPE / FORBIDDEN 不能寫 `**` 或「相關檔案」這類話。
 - RESULT 寫 PASS 但有 `NOT_RUN` 的測試、越界或沒查範圍，都不過。
 - 只查格式和用詞，內容對不對要看證據。
@@ -342,6 +370,22 @@ python -I -X utf8 gate_check.py --preflight <報告.md> <WO.md> --evidence-dir <
 - 證據紀錄有 `log_error`（2.2，F15：`run --log` 寫到一半失敗）：Standard 印提示「its --log was not written in full」，Strict 失敗。重新記一次就好。
 - 已有舊檔案的專案導入時：`--warn` 只警告、exit 0；`--since YYYY-MM-DD` 跳過較早的檔案（工單看 ISSUED_BY、RESUME_STATE 看 UPDATED、報告和裁決看第一個日期）；找不到日期的檔案無從比較，也跳過，印 `UNDATED` 並在最後一行另計，要查它就不加 `--since`。先用 `--warn` 看全貌，新工單再用 `--since` 嚴格檢查。舊檔案不追溯修改。
 
+## release.py（2.2.2）
+
+```text
+python -I -X utf8 tools/release.py                    # dry run：fetch 和所有檢查都跑，列出會做的遠端動作，遠端不變
+python -I -X utf8 tools/release.py --execute          # push → tag → GitHub Release，每步驗證
+python -I -X utf8 tools/release.py --merge [--execute]   # 和遠端主線分岔時：開 release/<版本> 合併（dry run 只用 merge-tree 預測衝突）
+```
+
+- 從 DW-DS ds.3（`claude/ds3-tools`）移植；DSH／ds 專屬的部分拿掉，`-<label>.N` 序號規則保留（同一 label 的 N 只會變大）。
+- **從 commit 發版，不從工作樹**：VERSION 和 CHANGELOG.md 用 `git show HEAD:VERSION` 讀。有追蹤中的檔案改了沒 commit（含 staged），dry run 也一樣停在 `STEP FAIL: worktree`，印出是哪些檔（VERSION 改了會印工作樹和 HEAD 各是哪一版）和 `NEXT:` 下一步（commit 或還原）。未追蹤的檔不算。
+- 步驟：fetch（只更新 remote-tracking 和 tag）→ worktree → 比對 `<remote>/<branch>`（UP_TO_DATE／AHEAD 可發；BEHIND 停；DIVERGED 停，或 `--merge`）→ version（HEAD 的 VERSION＝CHANGELOG 第一個 `## `；tag 還不在遠端或已指向 HEAD；排序高於遠端所有 tag）→ selftest（預設 `python -I -X utf8 tools/selftest.py`）→ 公開掃描 `<remote>/<branch>..HEAD`：路徑（`DIRECTOR/`、`CLAUDE.local.md`、`.claude/settings.local.json`、Claude session 紀錄）、新增行（`secret_mask.py` 的秘密格式、像真值的 `key = value`、noreply 和 `*.invalid` 以外的 email、`<磁碟>:/Users/<名稱>` 路徑）、commit 訊息、作者／提交者 email；PATH 上有 gitleaks 也一起跑 → push（不 force）→ annotated tag → `gh release create --verify-tag --latest`，notes 取 CHANGELOG 該段。
+- 重跑時已完成的步驟印 `SKIP`（分支已是 HEAD、tag 已指向 HEAD、Release 已存在）。
+- 結尾 `RELEASE: DRY_RUN|DONE|FAIL`；失敗時 `STEP FAIL: ...` 和 `NEXT: ...`。exit 0 乾淨或完成、1 某步失敗、2 不能跑。
+- 設定：`--config director_work.json` 的 `"release"`（`remote`、`branch`、`title`、`tag_message`（`{version}` 會代入）、`selftest`、`gh_repo`）；沒寫用預設，不認得的鍵直接拒絕（exit 2）。
+- 只在發版時跑，不是每輪步驟。push、tag、Release 仍要 PO 核准（`docs/08`）。
+
 ## setup_check.py（2.2.0）
 
 ```text
@@ -355,8 +399,8 @@ python -I -X utf8 setup_check.py <WS>/DIRECTOR [更多資料夾或檔案]   # �
 - `BOOTSTRAP` 第 6、11、13 步要它 exit 0 才送第一份回報。只用在建置流程；舊專案不跑它，`status.py` 只印 shadow 提示 `PO_PAGE_MISSING`（`status_gen.py`）。
 - 2.2.1（shadow）：給資料夾、或檔名是 `DIRECTOR_STATE.md` 時，連旁邊的三個檔案一起查；檔案還沒產生只印 `~ not checked, not there yet: ...`。
   - `PO_PENDING.md`：每筆 `ID: OD-xx` / `ID: ACT-xx` 的 ID、STATUS、QUESTION、OPTIONS、RECOMMENDED、SOURCE、ANSWER 各一次（缺 CREATED 只提示）；STATUS 是 open、answered 或 closed；QUESTION、OPTIONS、RECOMMENDED 有填；SOURCE 有填或寫 NONE；answered / closed 要有真的 ANSWER；同一個 ID 只用一次。
-  - `RESUME_STATE.md`：前四行依序是 PROGRESS、DOING、NEXT_STEP、COMMS 而且有填，UPDATED 有日期（和 `gate_check.py --resume` 同一條規則）。
-  - `director_work.json`：JSON 物件；`schema_version` 是 1（或不寫）；window 在 100000–1000000；mode 是 general / beginner；`plugins_off` 是 `名稱@marketplace`；guard_profile / guard_mode 是已知的值；`*_pattern` 是合法正規式；其他已知鍵型別要對（不認得的鍵只提示）。
+  - `RESUME_STATE.md`：前四行依序是 PROGRESS、DOING、NEXT_STEP、COMMS 而且有填，UPDATED 有日期（和 `gate_check.py --resume` 同一條規則）；2.2.2 加大小（`RESUME_SIZE` shadow，上限同 gate_check）。
+  - `director_work.json`：JSON 物件；`schema_version` 是 1（或不寫）；window 在 100000–1000000；mode 是 general / beginner；`plugins_off` 是 `名稱@marketplace`；guard_profile / guard_mode 是已知的值；`*_pattern` 是合法正規式；其他已知鍵型別要對（不認得的鍵只提示）；2.2.2 的 `resume` 是物件：max_bytes / max_line_bytes / keep_recent 是大於 0 的整數、protect_headings 是非空字串清單（不認得的子鍵只提示）。
   - 問題印成 `  ~ shadow: ...`，exit code 只看待決頁兩行；加 `--strict` 改成 `  - ...` 並 exit 1。從範本複製、還沒填的資料夾會看到 shadow 提示（範本的範例條目和佔位）。
 
 ## trace_report.py

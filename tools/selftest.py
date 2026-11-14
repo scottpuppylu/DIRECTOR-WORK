@@ -122,6 +122,7 @@ GIT_GROUPS = {
     "test_pause", "test_audit", "test_audit_names", "test_review", "test_guard_modes", "test_doctor",
     "test_doctor_launch", "test_worker_clone", "test_preflight", "test_trusted_rerun", "test_rerun_binding",
     "test_trusted_isolation", "test_rerun_tree_modes_v220", "test_required_final_v220", "test_rerun_brief_v220",
+    "test_release_222", "test_base_ref_222",
 }
 
 
@@ -1160,7 +1161,7 @@ def test_vocabulary():
             failures.append(f"vocabulary: {path} no longer contains {text!r}; change tools/vocabulary.json and the docs together")
 
 
-MUST_READ_LIMIT = 9550  # bytes of the 每輪必讀 docs on 2026-11-06 (v0.13 moved pure reasons to docs/10; +33 for the IN_FLIGHT fields kept in docs/06, review D01); 2.0.1 +48: PO 2026-11-08 the choice page counts as 待決頁 for no-miss reading (docs/03, docs/06 one clause each); every round re-reads them, so growth costs quota; 2.1.0 (reports 2 and 5) 12433 -> 9532: pure reasons to docs/10, details to docs/05 and docs/06b, one dispatch-plan line added to docs/01; the limit follows the new size so growth needs a reason again; +18 for the reading-side clause naming the choice page in docs/03 (Director W4 N1: the PO said the choice page must not be missed, so the reader must not rely on docs/06 alone)
+MUST_READ_LIMIT = 9550  # bytes of the 每輪必讀 docs on 2026-11-06 (v0.13 moved pure reasons to docs/10; +33 for the IN_FLIGHT fields kept in docs/06, review D01); 2.0.1 +48: PO 2026-11-08 the choice page counts as 待決頁 for no-miss reading (docs/03, docs/06 one clause each); every round re-reads them, so growth costs quota; 2.1.0 (reports 2 and 5) 12433 -> 9532: pure reasons to docs/10, details to docs/05 and docs/06b, one dispatch-plan line added to docs/01; the limit follows the new size so growth needs a reason again; +18 for the reading-side clause naming the choice page in docs/03 (Director W4 N1: the PO said the choice page must not be missed, so the reader must not rely on docs/06 alone); 2.2.2 (9549 -> 9548, limit unchanged): PO 2026-11-14 no new per-round reading; the RESUME_STATE size rule is folded into the gate_check line of docs/06, details in docs/06b
 
 
 def test_must_read_size():
@@ -6565,7 +6566,25 @@ SETUP_CONFIG_CASES = [
     ("skip_worktrees a string", '{"skip_worktrees": "wt"}', True),
     ("hooks as text", '{"hooks": "yes"}', True),
     ("trace_id_pattern not a regex", '{"trace_id_pattern": "(B|DD"}', True),
-    ("po_open_pattern a number", '{"po_open_pattern": 1}', True)]
+    ("po_open_pattern a number", '{"po_open_pattern": 1}', True),
+    # 2.2.2: the resume block (RESUME_STATE size and resume_archive.py settings; count only, no keep_days)
+    ("resume good", '{"resume": {"max_bytes": 20480, "max_line_bytes": 4096, "keep_recent": 10, '
+                    '"protect_headings": ["OPEN"]}}', False),
+    ("resume keep_days is only a note (not a key)", '{"resume": {"keep_days": 3}}', False),
+    ("resume not an object", '{"resume": 5}', True),
+    ("resume max_bytes as text", '{"resume": {"max_bytes": "20480"}}', True),
+    ("resume keep_recent 0", '{"resume": {"keep_recent": 0}}', True),
+    ("resume keep_recent true", '{"resume": {"keep_recent": true}}', True),
+    ("resume protect_headings a string", '{"resume": {"protect_headings": "OPEN"}}', True),
+    # 2.2.2: base_ref (gate_check --order) and release (release.py)
+    ("base_ref and release good", '{"base_ref": {"check": true, "fetch": true, "strict": false}, "release": '
+                                  '{"remote": "origin", "branch": "main", "gh_repo": null}}', False),
+    ("base_ref unknown key is only a note", '{"base_ref": {"strct": true}}', False),
+    ("base_ref not an object", '{"base_ref": true}', True),
+    ("base_ref strict as text", '{"base_ref": {"strict": "yes"}}', True),
+    ("release unknown key (release.py refuses it)", '{"release": {"remot": "origin"}}', True),
+    ("release gh_repo without owner", '{"release": {"gh_repo": "director-work"}}', True),
+    ("release branch empty", '{"release": {"branch": " "}}', True)]
 
 
 def setup_221_wrong(module):
@@ -7633,6 +7652,573 @@ def test_metrics_sampling_v220(tmp):
            says=["run.json sampling（需要 version 1", "採樣：沒有完整度標記"])
 
 
+ARCHIVE_FIXTURE = (
+    "PROGRESS: 進度 1 Before: p1 Before: p2 Before: p3\n"
+    "DOING: (11-14 10:00) now Before: (11-14 09:00) e1 Before: (11-13 20:00) e2 Before: (11-12 10:00) e3 "
+    "Before: (11-10 10:00) e4 Before: (11-09 10:00) e5\n"
+    "NEXT_STEP: (11-14 10:00) next Before: (11-14 09:00) n1 Before: no time n2 Before: (11-20 10:00) n3\n"
+    "COMMS: NONE\n"
+    "\n# RESUME_STATE — T1\nUPDATED: 2026-11-14 10:00 +08:00\nORDER: x\n"
+    "\n## 現況\n- 2026-11-01 current thing\n"
+    "\n## 紀錄\n- 2026-11-01 old a\n- 2026-11-02 old b\n  continued b\n- 2026-11-05 old c\n- 2026-11-12 recent one\n"
+    "- 2026-11-13 recent two\n- no date item\n- 2026-11-01 BLOCKED: waiting on x\n")
+ARCHIVE_MARKERS = ["current thing", "old a", "old b", "old c", "recent one", "recent two", "no date item", "BLOCKED",
+                   "p1", "p2", "p3", "e1", "e2", "e3", "e4", "e5", "n1", "n2", "n3"]
+# (name, keep_recent, the markers whose text moves). Count only (PO 2026-11-14 10:13): no keep_days.
+ARCHIVE_CASES = [
+    ("newest 2 stay, older parts and chain entries move", 2,
+     ["old a", "old b", "old c", "p3", "e3", "e4", "e5"]),
+    ("newest 1", 1, ["old a", "old b", "old c", "recent one", "p2", "p3", "e2", "e3", "e4", "e5"]),
+    ("newest 4: only the oldest section and chain entry", 4, ["old a", "e5"]),
+    ("fewer parts than keep_recent: nothing moves", 10, [])]
+
+
+def archive_moved(module, keep_recent, text=ARCHIVE_FIXTURE):
+    settings = {"max_bytes": 20480, "max_line_bytes": 4096, "keep_recent": keep_recent,
+                "protect_headings": ["現況", "未結", "OPEN", "BLOCKED", "TODO", "待辦", "IN_FLIGHT", "DO_NOT_REPEAT"]}
+    result = module.plan(text.encode("utf-8"), settings, datetime.date(2026, 11, 14), [])
+    return [m for m in ARCHIVE_MARKERS if any(m in u["text"] for u in result["moved"])], result
+
+
+def archive_wrong(module):
+    """Names of the ARCHIVE_CASES a resume_archive module gets wrong (a crash is a wrong answer). Every case also
+    needs the NEXT_STEP line (its chain order is unclear) unchanged and the header still the four lines."""
+    wrong = []
+    for name, keep_recent, want in ARCHIVE_CASES:
+        try:
+            got, result = archive_moved(module, keep_recent)
+            lines = result["new_text"].splitlines()
+            if got != want or lines[2] != ARCHIVE_FIXTURE.splitlines()[2] \
+                    or [line.split(":")[0] for line in lines[:4]] != ["PROGRESS", "DOING", "NEXT_STEP", "COMMS"]:
+                wrong.append(name)
+        except Exception:
+            wrong.append(name)
+    try:  # same day as the last one kept: the order is unclear, both stay
+        _, result = archive_moved(module, 1, "A: x\n\n## log\n- 2026-11-01 t1\n- 2026-11-05 t2\n- 2026-11-05 t3\n")
+        if [u["text"] for u in result["moved"]] != ["- 2026-11-01 t1\n"]:
+            wrong.append("same day as the last one kept")
+    except Exception:
+        wrong.append("same day as the last one kept")
+    try:  # an empty Before: entry: the count is unclear, the whole line stays
+        text = "PROGRESS: a Before: b Before: Before: c\nDOING: x\nNEXT_STEP: y\nCOMMS: z\n"
+        _, result = archive_moved(module, 1, text)
+        if result["moved"] or result["new_text"] != text or not any("is empty, the count is unclear" in n
+                                                                      for n in result["notes"]):
+            wrong.append("an empty Before: entry")
+    except Exception:
+        wrong.append("an empty Before: entry")
+    return wrong
+
+
+class _Out:
+    """stdout for an in-process main(): the tools call sys.stdout.reconfigure."""
+    def __init__(self):
+        self.parts = []
+
+    def write(self, text):
+        self.parts.append(text)
+        return len(text)
+
+    def flush(self):
+        pass
+
+    def reconfigure(self, **_):
+        pass
+
+
+def call_main(module, *args):
+    import contextlib
+    out = _Out()
+    with contextlib.redirect_stdout(out):
+        code = module.main([str(a) for a in args])
+    return code, "".join(out.parts)
+
+
+def test_resume_size_222(tmp):
+    """2.2.2: RESUME_STATE size. memory_size_check multi-file mode (--file x n, --glob, --workstreams, --kind resume,
+    movable bytes, a config key of the wrong type), gate_check --resume shadow and --strict, setup_check's neighbour
+    size check (shadow), and the example config read without a note."""
+    folder = tmp / "resume_size_222"
+    (folder / "a" / "deep").mkdir(parents=True)
+    good = folder / "a" / "RESUME_STATE.md"
+    good.write_text(RESUME_OK, encoding="utf-8")
+    big = folder / "a" / "deep" / "RESUME_STATE_big.md"
+    big.write_text(RESUME_OK + "- 2026-11-01 filler line\n" * 1000, encoding="utf-8")
+    long_line = folder / "long.md"
+    long_line.write_text(RESUME_OK.replace("DOING: 2", "DOING: " + "x" * 5000), encoding="utf-8")
+    m = "memory_size_check.py"
+    expect("memory_size 2.2.2: a good RESUME_STATE", m, 0, "--kind", "resume", "--file", good,
+           says=["OK   ", "(limit 20480)", "movable 0 bytes", "SIZE: PASS files=1 over=0"], lacks="OVER")
+    expect("memory_size 2.2.2: an oversized RESUME_STATE", m, 1, "--kind", "resume", "--file", big,
+           says=["OVER ", "over: size", "resume_archive.py", "SIZE: OVER files=1 over=1"])
+    expect("memory_size 2.2.2: one line over 4096 bytes", m, 1, "--kind", "resume", "--file", long_line,
+           says=["OVER ", "longest line 2: 5007 bytes (limit 4096)", "over: line", "SIZE: OVER files=1 over=1"],
+           lacks="over: size")
+    expect("memory_size 2.2.2: two files, one over", m, 1, "--kind", "resume", "--file", good, "--file", big,
+           says=["OK   ", "OVER ", "SIZE: OVER files=2 over=1"])
+    expect("memory_size 2.2.2: --glob reaches subfolders", m, 1, "--kind", "resume", "--glob",
+           str(folder / "**" / "RESUME_STATE*.md"), says="SIZE: OVER files=2 over=1")
+    expect("memory_size 2.2.2: --glob with no match is missing", m, 1, "--kind", "resume", "--glob",
+           str(folder / "nope" / "*.md"), says=["NO_MATCH", "SIZE: MISSING files=0 over=0 missing=1"])
+    registry = folder / "ACTIVE_WORKSTREAMS.md"
+    registry.write_text("# 工作線\n\n| 工作線 | RESUME_STATE | 狀態 |\n|---|---|---|\n| A | `a/RESUME_STATE.md` | open |\n"
+                        "| B | a/deep/RESUME_STATE_big.md | open |\n| C | NONE | closed |\n| D | <path> | new |\n",
+                        encoding="utf-8")
+    expect("memory_size 2.2.2: --workstreams reads the RESUME column", m, 1, "--kind", "resume", "--workstreams",
+           registry, says=["SIZE: OVER files=2 over=1"], lacks=["missing", "NONE", "<path>"])
+    registry.write_text(registry.read_text(encoding="utf-8") + "| E | gone/RESUME_STATE.md | open |\n", encoding="utf-8")
+    expect("memory_size 2.2.2: --workstreams, a registered file that is gone", m, 1, "--kind", "resume",
+           "--workstreams", registry, says=["NOT_FOUND", "missing=1"])
+    config = folder / "cfg.json"
+    config.write_text('{"resume": {"max_bytes": "big", "max_line_bytes": 20}}', encoding="utf-8")
+    expect("memory_size 2.2.2: a config key of the wrong type is a note, the default is used", m, 1, "--kind",
+           "resume", "--config", config, "--file", good,
+           says=["resume.max_bytes: a whole number above 0, got 'big'; 20480 used", "(limit 20)", "over: line"])
+    expect("memory_size 2.2.2: --config needs --kind resume", m, 2, "--config", config, "--file", good, "--file", big)
+    expect("memory_size 2.2.2: one --file alone keeps the 2.2.1 report", m, 0, "--file", good,
+           says="OK   RESUME_STATE.md:", lacks="SIZE:")
+    g = "gate_check.py"
+    expect("gate_check 2.2.2: a small RESUME_STATE has no size note", g, 0, "--resume", good, lacks="RESUME_SIZE")
+    expect("gate_check 2.2.2: an oversized RESUME_STATE is a shadow note, exit unchanged", g, 0, "--resume", big,
+           says=["shadow: RESUME_SIZE", " tokens, longest line"])
+    expect("gate_check 2.2.2: --strict fails on it", g, 1, "--strict", "--resume", big, says="RESUME_SIZE",
+           lacks="shadow: RESUME_SIZE")
+    expect("gate_check 2.2.2: an over-long line is a shadow note", g, 0, "--resume", long_line,
+           says="longest line 2: 5007 bytes (limit 4096); over: line")
+    (folder / "a" / "director_work.json").write_text('{"resume": {"max_bytes": 100}}', encoding="utf-8")
+    expect("gate_check 2.2.2: limits from the director_work.json beside it", g, 0, "--resume", good,
+           says=f"RESUME_SIZE {len(good.read_bytes())} bytes (limit 100)")
+    expect("gate_check 2.2.2: --config wins", g, 0, "--resume", good, "--config", config, says="(limit 20); over: line")
+    expect("gate_check 2.2.2: --strict needs --resume", g, 2, "--strict", "--order", good)
+    real = mutant(TOOLS / "memory_size_check.py", [], "memory_size_222_real")
+    if real is not None:
+        notes = []
+        example = json.loads((TOOLS.parent / "director_work.example.json").read_text(encoding="utf-8"))
+        got = real.resume_settings(example, notes)
+        check("memory_size 2.2.2: the example's resume block reads without a note and holds the defaults",
+              notes == [] and got == {"max_bytes": 20480, "max_line_bytes": 4096, **real.KEEP_DEFAULTS}
+              and "keep_days" not in got and got["keep_recent"] == 10, f"{got} {notes}")
+        for value, name in (('{"resume": {"keep_recent": 0}}', "keep_recent 0"),
+                            ('{"resume": {"keep_recent": true}}', "keep_recent true"),
+                            ('{"resume": {"protect_headings": "OPEN"}}', "protect_headings a string"),
+                            ('{"resume": 5}', "resume a number")):
+            notes = []
+            got = real.resume_settings(json.loads(value), notes)
+            check(f"memory_size 2.2.2: {name} is a note and the defaults stay", len(notes) == 1 and
+                  got["keep_recent"] == 10 and got["max_bytes"] == 20480 and got["protect_headings"][0] == "現況",
+                  f"{got} {notes}")
+    for name, swaps, args in [
+            ("no line limit", [('    if max_line_bytes is not None and facts["longest_bytes"] > max_line_bytes:\n',
+                                "    if False:\n")], ("--kind", "resume", "--file", long_line)),
+            ("no size limit", [('    over = ["size"] if facts["bytes"] > max_bytes else []\n', "    over = []\n")],
+             ("--kind", "resume", "--file", big))]:
+        module = mutant(TOOLS / "memory_size_check.py", swaps, f"memory_size_222_{name}")
+        if module is not None:
+            killed(f"memory_size 2.2.2: {name}", call_main(module, *args)[0] != 1)
+    director = folder / "setup" / "DIRECTOR"
+    director.mkdir(parents=True)
+    (director / "DIRECTOR_STATE.md").write_text(SETUP_CASES[0][1], encoding="utf-8")
+    (director / "PO_PENDING.md").write_text("## 未關閉\n" + PO_ENTRY, encoding="utf-8")
+    (director / "director_work.json").write_text('{"schema_version": 1}', encoding="utf-8")
+    (director / "RESUME_STATE.md").write_text(big.read_text(encoding="utf-8"), encoding="utf-8")
+    expect("setup_check 2.2.2: an oversized RESUME_STATE is a shadow note", "setup_check.py", 0, director,
+           says=["OK   setup", "~ shadow: RESUME_STATE: RESUME_SIZE"])
+    expect("setup_check 2.2.2: --strict fails on it", "setup_check.py", 1, "--strict", director,
+           says="  - RESUME_STATE: RESUME_SIZE")
+    (director / "RESUME_STATE.md").write_text(RESUME_OK, encoding="utf-8")
+    expect("setup_check 2.2.2: a small RESUME_STATE passes --strict", "setup_check.py", 0, "--strict", director,
+           lacks="RESUME_SIZE")
+    setup = mutant(TOOLS / "setup_check.py", [], "setup_check_222_real")
+    if setup is not None:
+        notes = []
+        check("setup_check 2.2.2: keep_days is not a key (count only); an unknown resume key is only a note",
+              setup.check_config('{"resume": {"keep_days": 3}}', notes) == [] and any("keep_days" in n for n in notes),
+              str(notes))
+    module = mutant(TOOLS / "setup_check.py", [("            problems += check_resume_size(path, notes)\n",
+                                                "            pass\n")], "setup_check_222_no_size")
+    if module is not None:
+        (director / "RESUME_STATE.md").write_text(big.read_text(encoding="utf-8"), encoding="utf-8")
+        killed("setup_check 2.2.2: no size check", call_main(module, "--strict", director)[0] == 0)
+
+
+def test_resume_archive_222(tmp):
+    """2.2.2: resume_archive.py moves old parts word for word, by count only: the newest keep_recent sections and
+    Before: chain entries stay, protected and undated parts stay, an unclear chain order keeps the whole line, the
+    header stays four lines, dry-run writes nothing, --execute writes a .bak and verifies (a) (b) (c), a failed check
+    restores the file and the history and exits 1. Each keep rule mutation tested."""
+    folder = tmp / "resume_archive_222"
+    folder.mkdir(parents=True)
+    real = mutant(TOOLS / "resume_archive.py", [], "resume_archive_222_real")
+    check("resume_archive 2.2.2: the keep cases come out right", real is not None and archive_wrong(real) == [],
+          str(real and archive_wrong(real)))
+    target = folder / "RESUME_STATE.md"
+    target.write_bytes(ARCHIVE_FIXTURE.encode("utf-8"))
+    original = target.read_bytes()
+    r = "resume_archive.py"
+    common = ("--keep-recent", "2", "--today", "2026-11-14")
+    expect("resume_archive 2.2.2: dry-run lists the moves", r, 0, target, *common,
+           says=["dry-run, nothing written", "MOVE lines 14-14", "MOVE lines 15-16", "MOVE lines 17-17",
+                 "MOVE header PROGRESS Before: entries 3-3", "MOVE header DOING Before: entries 3-5",
+                 "KEEP lines 11-11", "protected heading (現況)", "no full date (order unclear, stays)",
+                 "protected word (BLOCKED)", "recent (newest 2 dated)",
+                 "shadow: RESUME_HEADER line 3 NEXT_STEP: Before: entry 3 is dated after entry 1, the order is unclear",
+                 "shadow: RESUME_ORDER 1 part(s)", "ARCHIVE: DRY_RUN movable=5"], lacks="keep_days")
+    check("resume_archive 2.2.2: dry-run does not touch the file or write a history / .bak",
+          target.read_bytes() == original and sorted(p.name for p in folder.iterdir()) == ["RESUME_STATE.md"],
+          str(sorted(p.name for p in folder.iterdir())))
+    expect("resume_archive 2.2.2: --keep-days is gone (count only)", r, 2, target, "--keep-days", "3")
+    expect("resume_archive 2.2.2: --execute moves and verifies", r, 0, target, "--execute", *common,
+           says=["VERIFY (a) OK", "VERIFY (b) OK", "the header is still the same four lines", "VERIFY (c) OK",
+                 "  SHA lines 11-11 sha256=", "ARCHIVE: DONE moved=5"])
+    new = target.read_text(encoding="utf-8")
+    history = folder / "RESUME_HISTORY_20261114.md"
+    backups = sorted(folder.glob("RESUME_STATE.md.*.bak"))
+    history_text = history.read_text(encoding="utf-8") if history.exists() else ""
+    old = ARCHIVE_FIXTURE.splitlines(keepends=True)
+    moved = [old[13], old[14] + old[15], old[16], "Before: p3",
+             "Before: (11-12 10:00) e3 Before: (11-10 10:00) e4 Before: (11-09 10:00) e5"]
+    check("resume_archive 2.2.2: the .bak is the original and stays",
+          len(backups) == 1 and backups[0].read_bytes() == original, str(backups))
+    check("resume_archive 2.2.2: the history holds every moved part word for word",
+          all(part in history_text for part in moved), history_text[:300])
+    check("resume_archive 2.2.2: moved parts left, an index for each",
+          not any(part in new for part in moved) and new.count("> RESUME_ARCHIVED:") == 3
+          and new.count("[RESUME_ARCHIVED:") == 2, new)
+    kept = [old[2], old[3], old[10], old[17], old[18], old[19], old[20], "".join(old[5:8])]
+    check("resume_archive 2.2.2: the newest 2, protected and undated parts and the unclear chain stay as they were",
+          all(part in new for part in kept), new)
+    lines = new.splitlines()
+    check("resume_archive 2.2.2: the chain keeps its current text and the newest 2 entries, index at the end",
+          lines[1].startswith("DOING: (11-14 10:00) now Before: (11-14 09:00) e1 Before: (11-13 20:00) e2 [RESUME_ARCHIVED: "
+                              "3 older entries | 11-12 | RESUME_HISTORY_20261114.md | sha256=") and lines[1].endswith("]")
+          and lines[0].startswith("PROGRESS: 進度 1 Before: p1 Before: p2 [RESUME_ARCHIVED: 1 older entries | ? | ")
+          and len([line for line in lines[:5] if line.split(":")[0] in ("PROGRESS", "DOING", "NEXT_STEP", "COMMS")]) == 4,
+          "\n".join(lines[:4]))
+    expect("resume_archive 2.2.2: the header still passes gate_check", "gate_check.py", 0, "--resume", target)
+    rebuilt = new
+    for part in re.findall(r"<!-- RESUME_ARCHIVE .*? -->\n(.*?)<!-- /RESUME_ARCHIVE -->\n", history_text, re.S):
+        found = re.search(r"\[RESUME_ARCHIVED: [^\]]*\]|^> RESUME_ARCHIVED: .*\n", rebuilt, re.M)
+        if found:
+            back = part.rstrip("\n") if found.group(0).startswith("[") else part
+            rebuilt = rebuilt[:found.start()] + back + rebuilt[found.end():]
+    check("resume_archive 2.2.2: history text put back at the indexes = the original", rebuilt == ARCHIVE_FIXTURE,
+          rebuilt[-300:])
+    expect("resume_archive 2.2.2: a second run has nothing to move", r, 0, target, "--execute", *common,
+           says="ARCHIVE: NOTHING_TO_MOVE")
+    check("resume_archive 2.2.2: the second run changed nothing", target.read_text(encoding="utf-8") == new
+          and len(list(folder.glob("*.bak"))) == 1)
+    expect("resume_archive 2.2.2: a missing file", r, 2, folder / "nope.md", says="NOT_FOUND")
+    latin = folder / "latin.md"
+    latin.write_bytes(b"PROGRESS: \xe9\n")
+    expect("resume_archive 2.2.2: not UTF-8 is not read", r, 2, latin, "--execute", says="NOT_UTF8")
+    check("resume_archive 2.2.2: not UTF-8 stays untouched", latin.read_bytes() == b"PROGRESS: \xe9\n")
+    for name, history_before in (("a new history", None), ("an existing history", "# old history\n")):
+        case = folder / f"restore_{len(name)}"
+        case.mkdir()
+        file = case / "RESUME_STATE.md"
+        file.write_bytes(original)
+        hist = case / "RESUME_HISTORY_20261114.md"
+        if history_before:
+            hist.write_text(history_before, encoding="utf-8")
+        broken = mutant(TOOLS / "resume_archive.py", [("        path.write_bytes(new_raw)\n",
+                                                       "        path.write_bytes(new_raw.replace(b'now', b'NOW'))\n")],
+                        "resume_archive_222_broken")
+        if broken is None:
+            continue
+        code, out = call_main(broken, file, "--execute", *common)
+        check(f"resume_archive 2.2.2: a failed check restores ({name})",
+              code == 1 and "ARCHIVE: FAIL restored=yes" in out and "VERIFY FAIL" in out and file.read_bytes() == original
+              and (hist.read_text(encoding="utf-8") == history_before if history_before else not hist.exists())
+              and len(list(case.glob("*.bak"))) == 1, out[-400:])
+    case = folder / "no_restore"
+    case.mkdir()
+    (case / "RESUME_STATE.md").write_bytes(original)
+    no_restore = mutant(TOOLS / "resume_archive.py", [
+        ("        path.write_bytes(new_raw)\n", "        path.write_bytes(new_raw.replace(b'now', b'NOW'))\n"),
+        ("        path.write_bytes(backup.read_bytes())\n", "        pass\n")], "resume_archive_222_no_restore")
+    if no_restore is not None:
+        killed("resume_archive 2.2.2: no restore", "restored=yes" not in call_main(no_restore, case / "RESUME_STATE.md",
+                                                                                   "--execute", *common)[1])
+    for name, swaps in [
+            ("no keep_recent for sections", [('        if cut is None or unit["date"] >= cut:\n', "        if cut is None:\n")]),
+            ("same day as the last kept moves", [('        if cut is None or unit["date"] >= cut:\n',
+                                                 '        if cut is None or unit in newest[:keep_recent]:\n')]),
+            ("no protected heading", [("        elif protect_word(heading, words):\n", "        elif False:\n")]),
+            ("no protected word", [("            if word:\n", "            if False:\n")]),
+            ("undated parts move", [("word, date = protect_word(part_text, words), latest_date(part_text)\n",
+                                     "word, date = protect_word(part_text, words), latest_date(part_text) or "
+                                     "datetime.date(2000, 1, 1)\n")]),
+            ("an empty chain entry moves", [("    if empty:\n", "    if False:\n")]),
+            ("no keep_recent for chains", [("    cut = starts[keep_recent]  #", "    cut = starts[0]  #")]),
+            ("an unclear chain order moves", [("        if why is None and later > earlier:\n", "        if False:\n")])]:
+        module = mutant(TOOLS / "resume_archive.py", swaps, f"resume_archive_222_{name}")
+        if module is not None:
+            killed(f"resume_archive 2.2.2: {name}", archive_wrong(module))
+
+
+def rel_git(repo, *args):
+    """git in a release / BASE_REF fixture; a failing fixture command raises (the test is broken, not the tool)."""
+    done = subprocess.run(["git", "-C", str(repo), *map(str, args)], capture_output=True, encoding="utf-8",
+                          errors="replace")
+    if done.returncode:
+        raise RuntimeError(f"fixture git {' '.join(map(str, args))}: {(done.stderr or done.stdout).strip()[-300:]}")
+    return done.stdout.strip()
+
+
+def rel_write(path, text):
+    """LF text for a git fixture (open() with an LF newline: Python 3.9 has no Path.write_text newline argument)."""
+    with open(path, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(text)
+
+
+def rel_clone(origin, folder, email="selftest@example.invalid"):
+    rel_git(folder.parent, "clone", "-q", "-c", "core.autocrlf=false", origin, folder.name)  # LF stays LF
+    for key, value in (("user.email", email), ("user.name", "selftest"), ("commit.gpgsign", "false"),
+                       ("tag.gpgsign", "false")):
+        rel_git(folder, "config", key, value)
+    return folder
+
+
+def rel_commit(work, version, files=None, top=None):
+    """A release commit: VERSION, a CHANGELOG with <top or version> on top, and any extra files."""
+    rel_write((work / "VERSION"), version + "\n")
+    rel_write(work / "CHANGELOG.md", f"# CHANGELOG\n\n## {top or version}（2026-11-14）\n\n- notes for {version}\n\n"
+              "## 1.0.0\n\n- first\n")
+    for name, text in (files or {}).items():
+        (work / name).parent.mkdir(parents=True, exist_ok=True)
+        rel_write((work / name), text)
+    rel_git(work, "add", "-A")
+    rel_git(work, "commit", "-q", "-m", "release " + version)
+
+
+def rel_origin(tmp, name):
+    """A bare origin with main at 1.0.0 and tag v1.0.0, and a config whose selftest is trivial."""
+    base = tmp / name
+    base.mkdir(parents=True)
+    rel_git(base, "init", "-q", "--bare", "-b", "main", "origin.git")
+    origin = base / "origin.git"
+    seed = rel_clone(origin, base / "seed")
+    rel_write((seed / "a.txt"), "base\n")
+    rel_commit(seed, "1.0.0")
+    rel_git(seed, "push", "-q", "origin", "HEAD:refs/heads/main")
+    rel_git(seed, "tag", "-a", "v1.0.0", "-m", "v1.0.0")
+    rel_git(seed, "push", "-q", "origin", "refs/tags/v1.0.0")
+    config = base / "director_work.json"
+    config.write_text(json.dumps({"release": {"selftest": "python -I -c pass"}}) + "\n", encoding="utf-8")
+    return origin, base, config
+
+
+def test_release_222(tmp):
+    """2.2.2: release.py (ported from the DeepSeek port ds.3). Remote state (BEHIND, DIVERGED, --merge conflict
+    prediction, AHEAD plan), version order and the -<label>.N serial, VERSION = CHANGELOG top, and the 2.2.2 fix:
+    VERSION and CHANGELOG are read from HEAD and a tracked change that is not committed stops even a dry run (two
+    mutations). --merge --execute on a bare origin (push and tag verified, rerun skips), the public scan's negative
+    cases (no secret printed) and a clean change."""
+    global total
+    r = "release.py"
+    module = mutant(TOOLS / r, [], "release_222_real")
+    if module is not None:
+        key = module.version_key
+        check("release 2.2.2: version order 2.2.0-x.2 < 2.2.1-x.1 < 2.2.1-x.2 < 2.2.1 < 2.10.0-x.1",
+              key("2.2.0-x.2") < key("v2.2.1-x.1") < key("2.2.1-x.2") < key("2.2.1") < key("2.10.0-x.1"))
+        check("release 2.2.2: a version of another shape has no key", not key("2.2") and not key("2.2.1-rc"))
+    origin, base, config = rel_origin(tmp, "release_222")
+    late = rel_clone(origin, base / "late")  # cloned before the remote moves on: BEHIND, then DIVERGED
+    other = rel_clone(origin, base / "other")
+    rel_write((other / "a.txt"), "theirs\n")
+    rel_git(other, "commit", "-q", "-am", "remote work")
+    rel_git(other, "push", "-q", "origin", "HEAD:refs/heads/main")
+    cfg = ("--config", config)
+    expect("release 2.2.2: BEHIND stops with the next step", r, 1, "--repo", late, *cfg,
+           says=["BEHIND 1", "NEXT: git merge --ff-only", "RELEASE: FAIL"])
+    rel_commit(late, "1.1.0", {"a.txt": "mine\n"})
+    expect("release 2.2.2: DIVERGED stops without --merge", r, 1, "--repo", late, *cfg,
+           says=["DIVERGED ahead 1 / behind 1", "--merge"])
+    expect("release 2.2.2: --merge dry run predicts the a.txt conflict", r, 0, "--repo", late, *cfg, "--merge",
+           says=["STEP state: PLAN DIVERGED", "1 conflicted file(s): a.txt", "PLAN git switch -c release/1.1.0"])
+    ahead = rel_clone(origin, base / "ahead")
+    rel_commit(ahead, "1.1.0")
+    expect("release 2.2.2: AHEAD plans push, tag and release, changes nothing", r, 0, "--repo", ahead, *cfg,
+           says=["STEP worktree: OK", "AHEAD 1", "PLAN git push origin HEAD:refs/heads/main", "PLAN git tag -a v1.1.0",
+                 "RELEASE: DRY_RUN 3 remote step(s)"])
+    check("release 2.2.2: the dry run left the remote alone",
+          rel_git(origin, "rev-parse", "main") != rel_git(ahead, "rev-parse", "HEAD")
+          and "v1.1.0" not in rel_git(origin, "tag"))
+    low = rel_clone(origin, base / "low")
+    rel_commit(low, "0.9.0-x.5")
+    expect("release 2.2.2: a version below a remote tag stops", r, 1, "--repo", low, *cfg,
+           says="does not sort above the remote tag(s) v1.0.0")
+    mismatch = rel_clone(origin, base / "mismatch")
+    rel_commit(mismatch, "1.2.0", top="1.1.0")
+    expect("release 2.2.2: VERSION different from the CHANGELOG top at HEAD stops", r, 1, "--repo", mismatch, *cfg,
+           says="VERSION is 1.2.0 but the first CHANGELOG.md heading at HEAD is 1.1.0")
+    rel_git(other, "tag", "-a", "v1.0.0-x.2", "-m", "v1.0.0-x.2")
+    rel_git(other, "push", "-q", "origin", "refs/tags/v1.0.0-x.2")
+    restart = rel_clone(origin, base / "restart")
+    rel_commit(restart, "1.1.0-x.1")
+    expect("release 2.2.2: a -<label>.N serial that restarts stops", r, 1, "--repo", restart, *cfg,
+           says=["-x.1 is not above the -x.N of the remote tag(s) v1.0.0-x.2", "use -x.3"])
+    serial = rel_clone(origin, base / "serial")
+    rel_commit(serial, "1.1.0-x.3")
+    expect("release 2.2.2: a -<label>.N above every remote one passes", r, 0, "--repo", serial, *cfg,
+           says="STEP version: OK 1.1.0-x.3")
+
+    # 2.2.2 fix: a release is made from HEAD, never from the working tree
+    work = rel_clone(origin, base / "head")
+    rel_commit(work, "1.1.0")
+    rel_write((work / "VERSION"), "1.2.0\n")
+    expect("release 2.2.2: working-tree VERSION different from HEAD stops even a dry run", r, 1, "--repo", work, *cfg,
+           says=["STEP FAIL: tracked files are modified or staged: VERSION",
+                 "VERSION in the working tree is 1.2.0, at HEAD 1.1.0",
+                 "NEXT: git add and git commit them (or git restore them)", "RELEASE: FAIL"],
+           lacks=["STEP version", "PLAN git"])
+    if module is not None:
+        job = module.Release(work, module.load_config(str(config)), False, False, None)
+        check("release 2.2.2: read_version reads HEAD (1.1.0), not the working tree (1.2.0)",
+              job.read_version() == "1.1.0", repr(job.read_version()))
+        wrong_read = mutant(TOOLS / r, [('        text = self.at_head("VERSION")\n',
+                                         '        text = (self.repo / "VERSION").read_text(encoding="utf-8")\n')],
+                            "release_222_read_worktree")
+        if wrong_read is not None:
+            got = wrong_read.Release(work, wrong_read.load_config(str(config)), False, False, None).read_version()
+            killed("release 2.2.2: VERSION read from the working tree", got != "1.1.0")
+        no_stop = mutant(TOOLS / r, [("        job.check_worktree()\n",
+                                      "        if a.execute:\n            job.check_worktree()\n")],
+                         "release_222_worktree_only_execute")
+        if no_stop is not None:
+            code, out = call_main(no_stop, "--repo", work, "--config", config)
+            killed("release 2.2.2: the working-tree check only on --execute", code != 1 or "STEP FAIL: tracked" not in out)
+    rel_git(work, "restore", "VERSION")
+    expect("release 2.2.2: restored, the same commit passes", r, 0, "--repo", work, *cfg,
+           says=["STEP worktree: OK", "STEP version: OK 1.1.0"])
+    rel_write((work / "CHANGELOG.md"), "# CHANGELOG\n\n## 1.2.0\n\n- not committed\n")
+    expect("release 2.2.2: an uncommitted CHANGELOG stops", r, 1, "--repo", work, *cfg,
+           says="tracked files are modified or staged: CHANGELOG.md", lacks="VERSION in the working tree")
+    rel_git(work, "add", "CHANGELOG.md")
+    expect("release 2.2.2: a staged change stops too", r, 1, "--repo", work, *cfg,
+           says="tracked files are modified or staged: CHANGELOG.md")
+    rel_git(work, "reset", "-q", "HEAD", "CHANGELOG.md")
+    rel_git(work, "restore", "CHANGELOG.md")
+    (work / "notes-untracked.txt").write_text("scratch\n", encoding="utf-8")
+    expect("release 2.2.2: an untracked file does not count", r, 0, "--repo", work, *cfg, says="STEP worktree: OK")
+    expect("release 2.2.2: an unknown release key is refused", r, 2, "--repo", work, "--config",
+           _json_file(base / "bad.json", {"release": {"remot": "origin"}}), says="RELEASE: NOT_RUN config")
+
+    # --merge --execute on a bare origin: merge --no-ff, push and tag verified, no GitHub there, rerun skips
+    origin, base, config = rel_origin(tmp, "release_222_exec")
+    late = rel_clone(origin, base / "late")
+    other = rel_clone(origin, base / "other")
+    rel_write((other / "b.txt"), "theirs\n")
+    rel_git(other, "add", "b.txt")
+    rel_git(other, "commit", "-q", "-m", "remote work")
+    rel_git(other, "push", "-q", "origin", "HEAD:refs/heads/main")
+    rel_commit(late, "1.1.0")
+    code, out = run(r, "--repo", late, "--config", config, "--merge", "--execute")
+    head = rel_git(late, "rev-parse", "HEAD")
+    check("release 2.2.2: --merge --execute merges --no-ff into release/1.1.0",
+          "merged into release/1.1.0" in out and rel_git(late, "rev-parse", "--abbrev-ref", "HEAD") == "release/1.1.0"
+          and len(rel_git(late, "rev-list", "--parents", "-n", "1", "HEAD").split()) == 3, out.strip()[-300:])
+    check("release 2.2.2: push and tag verified by ls-remote",
+          f"STEP push: OK ls-remote main = {head}" in out and f"STEP tag: OK v1.1.0^{{}} = {head}" in out
+          and rel_git(origin, "rev-parse", "main") == head and rel_git(origin, "rev-parse", "v1.1.0^{commit}") == head,
+          out.strip()[-300:])
+    check("release 2.2.2: no GitHub remote stops with a clear reason",
+          code == 1 and "cannot tell the GitHub repository" in out, out.strip()[-300:])
+    expect("release 2.2.2: a rerun skips what is done", r, 1, "--repo", late, "--config", config, "--execute",
+           says=["UP_TO_DATE", "STEP push: SKIP", "STEP tag: SKIP"])
+
+    # the public scan: each private kind stops, a secret value is never printed, a clean change passes
+    origin, base, config = rel_origin(tmp, "release_222_scan")
+    work = rel_clone(origin, base / "work")
+    secret, assigned = "sk-" + "A1b2" * 6, "Zx9q" * 4
+    cases = [("api key", {"conf.py": f'KEY = "{secret}"\n'}, None, "openai_key"),
+             ("key = value secret", {"conf.ini": "api_key = " + assigned + "\n"}, None, "secret_assignment"),
+             ("private email", {"README.md": "mail alice@" + "example.com\n"}, None, "email alice@" + "example.com"),
+             ("user path", {"notes.md": "see C:" + "/Users/alice/notes.txt\n"}, None, "user_path"),
+             ("DIRECTOR file", {"DIRECTOR/RESUME_STATE.md": "x\n"}, None, "a DIRECTOR/ file"),
+             ("CLAUDE.local.md", {"CLAUDE.local.md": "x\n"}, None, "CLAUDE.local.md (local instructions)"),
+             ("local settings", {".claude/settings.local.json": "{}\n"}, None, ".claude/settings.local.json (local"),
+             ("session transcript", {"logs/0a1b2c3d-1111-2222-3333-444455556666.jsonl": "{}\n"}, None,
+              "a Claude session transcript"),
+             ("author email", {"b.txt": "x\n"}, "bob@" + "example.com", "author: email bob@" + "example.com")]
+    for number, (name, files, email, said) in enumerate(cases):
+        rel_git(work, "switch", "-q", "-c", f"case-{number}", "origin/main")
+        rel_git(work, "config", "user.email", email or "selftest@example.invalid")
+        rel_commit(work, "1.1.0", files)
+        expect(f"release 2.2.2: the public scan stops {name}", r, 1, "--repo", work, "--config", config,
+               says=["STEP FAIL:", "must not go public", said], lacks=[secret, assigned])
+    rel_git(work, "switch", "-q", "-c", "clean", "origin/main")
+    rel_git(work, "config", "user.email", "selftest@example.invalid")
+    rel_commit(work, "1.1.0", {"README.md": "mail 1+me@users.noreply.github.com or me@example.invalid; "
+                                            "DIRECTOR/RESUME_STATE.md is named in docs\n"})
+    expect("release 2.2.2: a clean change passes the scan", r, 0, "--repo", work, "--config", config,
+           says="STEP scan: OK")
+
+
+def _json_file(path, data):
+    path.write_text(json.dumps(data) + "\n", encoding="utf-8")
+    return path
+
+
+def test_base_ref_222(tmp):
+    """2.2.2: gate_check --order BASE_REF freshness (ported from ds.3). It fetches in --repo (default: the order's
+    folder) and compares: = origin/main is confirmed, behind is a WARN note (exit 0) and fails with --strict-base or
+    "strict": true, a missing commit is noted, a failed fetch and a folder that is not a git checkout say they did
+    not compare (WARN, FAIL with --strict-base), a BASE_REF without a commit is not checked (no note, so the
+    older order tests keep giving no notes), "check": false skips it."""
+    base = tmp / "base_ref_222"
+    base.mkdir(parents=True)
+    rel_git(base, "init", "-q", "--bare", "-b", "main", "origin.git")
+    proj = rel_clone(base / "origin.git", base / "proj")
+    rel_write((proj / "src.txt"), "x\n")
+    rel_git(proj, "add", "-A")
+    rel_git(proj, "commit", "-q", "-m", "base")
+    rel_git(proj, "push", "-q", "origin", "HEAD:refs/heads/main")
+    sha = rel_git(proj, "rev-parse", "--short=7", "HEAD")
+    orders = base / "orders"  # outside the repo: --repo names the checkout
+    orders.mkdir()
+    order = orders / "WO.md"
+    order.write_text(ORDER.format(base=sha), encoding="utf-8")
+    g = "gate_check.py"
+    expect("BASE_REF 2.2.2: = origin/main after a fetch", g, 0, "--order", order, "--repo", proj,
+           says=f"~ BASE_REF {sha} = origin/main (fetched now)", lacks="WARN BASE_REF")
+    later = rel_clone(base / "origin.git", base / "other")
+    rel_write((later / "later.txt"), "x\n")
+    rel_git(later, "add", "later.txt")
+    rel_git(later, "commit", "-q", "-m", "later")
+    rel_git(later, "push", "-q", "origin", "HEAD:refs/heads/main")
+    expect("BASE_REF 2.2.2: 1 behind is a WARN note", g, 0, "--order", order, "--repo", proj,
+           says=[f"~ WARN BASE_REF: {sha} is 1 commit(s) behind origin/main", "start the work from origin/main"])
+    expect("BASE_REF 2.2.2: --strict-base fails it", g, 1, "--order", order, "--repo", proj, "--strict-base",
+           says=f"  - BASE_REF: {sha} is 1 commit(s) behind origin/main")
+    _json_file(orders / "director_work.json", {"base_ref": {"strict": True}})
+    expect("BASE_REF 2.2.2: \"strict\": true in the order folder's director_work.json fails it", g, 1, "--order", order,
+           "--repo", proj, says="  - BASE_REF:")
+    _json_file(orders / "director_work.json", {"base_ref": {"check": False}})
+    expect("BASE_REF 2.2.2: \"check\": false skips it", g, 0, "--order", order, "--repo", proj, lacks="BASE_REF")
+    _json_file(orders / "director_work.json", {"base_ref": {"fetch": "no"}})
+    expect("BASE_REF 2.2.2: a switch that is not true / false is a note", g, 0, "--order", order, "--repo", proj,
+           says="base_ref.fetch: true or false, got 'no'; true used")
+    (orders / "director_work.json").unlink()
+    gone = orders / "WO_gone.md"
+    gone.write_text(ORDER.format(base="deadbee"), encoding="utf-8")
+    expect("BASE_REF 2.2.2: a commit that does not exist is noted", g, 0, "--order", gone, "--repo", proj,
+           says="~ WARN BASE_REF: commit deadbee does not exist")
+    plain = orders / "WO_plain.md"
+    plain.write_text(ORDER.format(base="abc123"), encoding="utf-8")
+    expect("BASE_REF 2.2.2: no commit in BASE_REF is not checked, nothing printed", g, 0, "--order", plain, "--repo",
+           proj, lacks="BASE_REF")
+    expect("BASE_REF 2.2.2: a folder that is not a git checkout says so", g, 0, "--order", order,
+           says="WARN BASE_REF: not compared with the remote:", lacks="fetched now")
+    rel_git(proj, "remote", "set-url", "origin", base / "gone.git")
+    expect("BASE_REF 2.2.2: a failed fetch is said out loud", g, 0, "--order", order, "--repo", proj,
+           says="~ WARN BASE_REF: not compared with the remote: git fetch origin failed", lacks="fetched now")
+    expect("BASE_REF 2.2.2: --strict-base fails a failed fetch", g, 1, "--order", order, "--repo", proj,
+           "--strict-base", says="  - BASE_REF: not compared with the remote: git fetch origin failed")
+    expect("BASE_REF 2.2.2: --strict-base needs --order", g, 2, "--resume", order, "--strict-base")
+    expect("BASE_REF 2.2.2: --repo must be a folder", g, 2, "--order", order, "--repo", base / "nope")
+
+
 def guarded(test, *args):
     """Run one test group. Without git on PATH, a group that dies on a missing git program is a named skip, not a crash."""
     global total
@@ -7738,6 +8324,10 @@ def main():
         guarded(test_not_utf8_v220, tmp)
         guarded(test_po_review_whole_line_v220, tmp)
         guarded(test_review_fix_v220, tmp)
+        guarded(test_resume_size_222, tmp)
+        guarded(test_resume_archive_222, tmp)
+        guarded(test_release_222, tmp)
+        guarded(test_base_ref_222, tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     for failure in failures:

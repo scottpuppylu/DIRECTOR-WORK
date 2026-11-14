@@ -1,5 +1,5 @@
 {
-  "_comment": "Copy to DIRECTOR/director_work.json. schema_version: the config format; tools refuse a version they do not know. window: 100000-1000000. plugins_off: only user-installed plugins, as name@marketplace, after the PO ticked them. backup_dir: null = inside the repo's .git folder. skip_worktrees: path substrings to leave alone. hooks: true adds the hook_guard.py PreToolUse hook. protect_director (optional): the DIRECTOR folder; the hook then also blocks Write / Edit on its orders/ and DIRECTOR_LOG.md (implies hooks). director_worktree (optional): the Director's own worktree, which keeps the plain hook.trace_id_pattern (optional): regex for the requirement or decision IDs that orders list in TRACES_TO; trace_report.py flags IDs that do not fit. Use the project's own IDs. mode (optional): general or beginner, picked right after the starting prompt (docs/12); tools do not read it. po_pending_files / po_item_pattern / po_open_pattern (optional): where metrics_report.py counts PO entries; the defaults read PO_PENDING.md entries `ID: OD-..` / `ID: ACT-..` with `STATUS: open`.",
+  "_comment": "Copy to DIRECTOR/director_work.json. schema_version: the config format; tools refuse a version they do not know. window: 100000-1000000. plugins_off: only user-installed plugins, as name@marketplace, after the PO ticked them. backup_dir: null = inside the repo's .git folder. skip_worktrees: path substrings to leave alone. hooks: true adds the hook_guard.py PreToolUse hook. protect_director (optional): the DIRECTOR folder; the hook then also blocks Write / Edit on its orders/ and DIRECTOR_LOG.md (implies hooks). director_worktree (optional): the Director's own worktree, which keeps the plain hook.trace_id_pattern (optional): regex for the requirement or decision IDs that orders list in TRACES_TO; trace_report.py flags IDs that do not fit. Use the project's own IDs. mode (optional): general or beginner, picked right after the starting prompt (docs/12); tools do not read it. po_pending_files / po_item_pattern / po_open_pattern (optional): where metrics_report.py counts PO entries; the defaults read PO_PENDING.md entries `ID: OD-..` / `ID: ACT-..` with `STATUS: open`. resume (2.2.2, optional): RESUME_STATE size limits (max_bytes, max_line_bytes; read by gate_check --resume, setup_check and memory_size_check --kind resume) and what resume_archive.py never moves (the newest keep_recent sections and Before: chain entries, by count, never by age; sections whose heading holds a protect_headings word). base_ref (2.2.2, optional): gate_check --order fetches and compares the order's BASE_REF commit with its remote branch; missing or behind is a WARN note, strict: true (or --strict-base) fails; fetch: false compares with the local copy. release (2.2.2, optional): release.py settings; {version} is filled in; gh_repo null = read from the remote URL.",
   "schema_version": 1,
   "mode": "general",
   "window": 250000,
@@ -14,5 +14,24 @@
   "trace_id_pattern": "^(B|DD|OD)-\\d+$",
   "po_pending_files": ["PO_PENDING.md"],
   "po_item_pattern": "^\\s*ID\\s*:\\s*(OD|ACT)-\\w+",
-  "po_open_pattern": "^\\s*STATUS\\s*:\\s*open\\b"
+  "po_open_pattern": "^\\s*STATUS\\s*:\\s*open\\b",
+  "resume": {
+    "max_bytes": 20480,
+    "max_line_bytes": 4096,
+    "keep_recent": 10,
+    "protect_headings": ["現況", "未結", "OPEN", "BLOCKED", "TODO", "待辦", "IN_FLIGHT", "DO_NOT_REPEAT"]
+  },
+  "base_ref": {
+    "check": true,
+    "fetch": true,
+    "strict": false
+  },
+  "release": {
+    "remote": "origin",
+    "branch": "main",
+    "title": "DIRECTOR-WORK {version}",
+    "tag_message": "DIRECTOR-WORK {version}",
+    "selftest": "python -I -X utf8 tools/selftest.py",
+    "gh_repo": null
+  }
 }
