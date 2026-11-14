@@ -15,7 +15,7 @@ Python 3.9 以上，只用標準函式庫。一律用 `python -I -X utf8 <tool> 
 | `release.py`（2.2.2） | 發版一次到位：fetch → 工作樹乾淨 → 比對遠端主線（落後停、分岔停或 `--merge`）→ HEAD 的 VERSION 與 CHANGELOG 最上段一致、tag 排序高於遠端所有 tag → selftest → 公開掃描 → push → annotated tag → `gh release create --latest`，每步用 ls-remote／`gh release view` 驗。預設 dry run | 只有 `--execute` 動遠端；`--merge --execute` 開本機分支 | 不花 |
 | `setup_check.py`（2.2.0） | 建置完成的檢查：`DIRECTOR_STATE.md` 的 `PO_PAGE_URL` 和 `PO_PAGE_PINNED` 兩行是不是三種合法寫法之一；2.2.1 起另查旁邊的 `PO_PENDING.md`、`RESUME_STATE.md` 表頭（2.2.2 加大小）、`director_work.json`（shadow，`--strict` 才失敗） | 不寫 | 不花 |
 | `round_check.py`（1.3.0） | 修正輪數：RESUME_STATE 的 `FIX_ROUNDS:` 到第 4 輪（之後每組）沒有根因研究就 FAIL | 不寫 | 不花 |
-| `report_vs_audit.py`（1.3.0） | 用動作紀錄核對 TASK REPORT：報告說跑過的指令（`RAN:` 和 TESTS / EVIDENCE / DONE 裡的 selftest、Unity、Blender、雜湊檢查）紀錄裡有沒有、exit 和時間對不對；2.2.1 修截斷的長指令（引號、反斜線）比不到 | 不寫 | 不花 |
+| `report_vs_audit.py`（1.3.0） | 用動作紀錄核對 TASK REPORT：報告說跑過的指令（`RAN:` 和 TESTS / EVIDENCE / DONE 裡的 selftest、Unity、Blender、雜湊檢查）紀錄裡有沒有、exit 和時間對不對；2.2.1 修截斷的長指令（引號、反斜線）比不到；2.2.3 比對多行腳本、省略寫法、多個 AC 編號，印 scope_check 時序 WARN | 不寫 | 不花 |
 | `transcript_audit.py`（2.2.1） | 沒裝 hook 時，從本機 Claude Code transcript（含 subagents）重建一份 hook 格式的動作紀錄，第 1 行標明是重建的 | 只寫 `--out`（已存在要 `--force`） | 不花 |
 | `trace_report.py` | 從工單、報告、裁決產生追溯表：需求 → 工單 → AC → 證據 → 裁決 | 不寫 | 不花 |
 | `metrics_report.py` | 從總監的檔案數出 `PURPOSE.md` 的成效數字：返工、中斷後重做、PO 介入、導入卡住，以及規格審查的花費；`--run` 另數接手演練的決策、重問、PO 操作和第一個可用預覽的時間 | 不寫 | 不花 |
@@ -517,7 +517,7 @@ python -I -X utf8 evidence_record.py verify <紀錄.json> --rerun-recorded   # �
   1. 工單的雜湊和 REVISION 要等於 LOG 裡這張工單最新的 DISPATCH 行，不同就 exit 2。
   2. 用紀錄的 label 找 AC，取工單 `CHECKS:` 裡那條 AC 的指令；沒有就 exit 2。
   3. `--repo` 的 HEAD 要是 `--candidate`（40 位）；不能有修改或未追蹤檔、不能有標成 assume-unchanged 或 skip-worktree 的檔（git status 看不到它們的修改）、不能有 `refs/replace/`（它能讓別的 tree 冒用候選 commit 的名字），否則 exit 2。git 一律關掉 replace 物件來讀。
-  4. 指令的程式要是絕對路徑、候選 commit 裡的檔（`./tools/check`）或 `python` / `python3`（就是跑這支工具的 Python）；只寫程式名、要靠 PATH 找的一律 exit 2，避免 PATH 換掉程式。
+  4. 指令的程式要是絕對路徑、候選 commit 裡的檔（`./tools/check`）或 `python` / `python3`（就是跑這支工具的 Python）；只寫程式名、要靠 PATH 找的一律 exit 2，避免 PATH 換掉程式。2.2.3（L-055）git 是例外，只限唯讀：第一個參數就是子指令，而且是 `diff`、`show`、`log`、`status`、`rev-parse`、`ls-files`、`cat-file` 之一；子指令前有選項（`-c`、`-C`、`--git-dir`…）、其他子指令（push、commit、reset、checkout…）、會寫檔或執行程式的選項（`--output`、`--ext-diff`、`--textconv`、`--filters`、`--no-index`，縮寫也算）都 `NOT_RUN`、exit 2。git 檢查要用歷史，所以在 `--repo` 的頂層跑（不是暫存資料夾），關掉 replace 物件、fsmonitor、pager、optional locks、外部 diff 和 textconv；第 6 步照樣重讀 repo。只要確認鎖定檔沒改，也可以改用 sha256 比對（`docs/02`「AC 用 git」）。
   5. 從 git 物件把候選 commit 的 tree 寫進新的暫存資料夾，每個檔案都核對雜湊，在那裡跑核准的指令，不在 `--repo` 的工作樹裡跑。紀錄的 git HEAD 不是候選 commit、或紀錄的 command 和核准的不同，都是 `MISMATCH`、exit 1；紀錄的 command 只拿來比對，不會執行。產物在暫存資料夾裡、照它相對紀錄 cwd 的路徑重新算雜湊，不同就是 `MISMATCH`。
   6. 跑完再讀一次 `--repo`：HEAD、tree、狀態或旗標有變，就是 `MISMATCH`、exit 1。
   7. 紀錄的 `order` 欄（`run --order` 寫的工單 ID、REVISION、雜湊）照 `gate_check.py --match --evidence-dir` 的規則比對，LOG 裡的整行 `EVIDENCE_EQUIVALENT` 也照算：Strict 工單不符是 `MISMATCH`、exit 1，Standard 印 `~` 提示；沒綁的紀錄 REVISION 1 印 WARN。
@@ -704,6 +704,12 @@ python -I -X utf8 report_vs_audit.py --report <報告.md> --log <動作紀錄.js
 - shell 指令比對同一個 session 的 Bash / PowerShell 紀錄（空白、引號、斜線方向不計；紀錄被截在 500 字的比前段）；`mcp__` 工具比對工具名。exit 0 要有一筆 ok，其他 exit 要有一筆 error；有 `at=` 就要在誤差內。只被 hook 擋下的會寫明。紀錄的雜湊鏈斷了印 `FAIL log: hash chain`。
 - 最後一行 `REPORT_VS_AUDIT: PASS|FAIL|NONE claims= ok= failed= session= logs=`；FAIL exit 1，不能跑 exit 2。
 - 只證明「有跑、結果和報告一致」，不證明跑的內容對；動作紀錄沒有 exit code，用 ok / error 判斷。
+- 2.2.3（L-052、L-054）：
+  - 換行、`;`、`&&`、`||` 把指令切成幾段（兩邊都切，每段各自去掉啟動程式），多段的主張可以對到 heredoc、跨行 `python -c`、PowerShell here-string 這類多行腳本，順序要一樣；`RAN:` 下面用 ``` 包起來的一段算一個主張，exit / at 寫在結尾的 ``` 後面（沒收尾的不算）。
+  - `at=13:17（備註）` 只取時間；主張裡的全形（備註）不比；一個詞列了幾個編號（`AC-1/AC-2/AC-4`、`AC-1/2/4`、`AC-1..AC-5`）時每個編號都要有一筆，缺的那個會點名。
+  - 有省略的主張（`...`、`x...`、只有中日文的詞如「同上」）可以跳過紀錄裡的選項（`-x` / `--x` 加一個值）；`427fcef...` 對到以它開頭的詞；`wo-003` 對到以它開頭、接著 `-`、`_`、`.` 的檔名。被截的紀錄行，主張有 3 個詞一路對到行尾也算。
+  - 比到幾筆時，顯示最接近 `at=` 的那筆（沒寫 at 就是最後一筆）。沒有一筆結果相符、而那筆在主張之後還跑了別的指令時，狀態是後面那段的，所以印「exit=N not checkable」，算 OK。
+  - 兩種 shadow WARN（exit code 不變）：`RAN:` 清單裡沒有 `` `指令` `` 的一行（沒東西可比）；報告寫 `SCOPE_CHECK: … PASS`，但跑了報告裡多數指令的那個 agent 最後一次 commit 之後沒有成功跑過 `scope_check.py`。
 - 2.2.1：被截在 500 字的紀錄行照 JSON 規則解回（`\"`、`\\` 還原；2.2.0 沒還原，含引號或反斜線路徑的長指令比不到）。比對前去掉 `&`、`cmd /c`、啟動程式（python、py、pwsh、powershell、node、bash 等）和它的啟動旗標；`...`、`…`、`<名稱>` 當萬用字；單一檔名可以對到以它結尾的較長路徑；靠詞比對時至少要 2 個實詞（只寫啟動程式不算）。只比 Bash / PowerShell 的紀錄。紀錄有 `kind=rebuild` 行時多印 `~ note: a log was rebuilt from a transcript ...`。
 
 ## transcript_audit.py（2.2.1）

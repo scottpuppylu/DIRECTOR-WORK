@@ -17,7 +17,11 @@ verify --rerun --order ORDER --dispatch-log LOG --repo REPO --candidate SHA
              marked assume-unchanged or skip-worktree and no `refs/replace/` ref (exit 2). Git runs with replace
              objects off, so a replace ref cannot pass another tree off as the candidate's;
           4. the program is an absolute path, a path inside the candidate (`./tools/check`) or python / python3 (this
-             Python); a bare name the PATH would resolve is refused (exit 2);
+             Python); a bare name the PATH would resolve is refused (exit 2). 2.2.3 (L-055): git is the exception,
+             for read-only work only: the subcommand must come first and be one of diff, show, log, status,
+             rev-parse, ls-files, cat-file; an option before it (-c, -C, --git-dir ...), any other subcommand (push,
+             commit, reset, checkout ...) or an option that writes a file or runs a program (--output, --ext-diff,
+             --textconv, --filters, --no-index) is refused (exit 2);
           5. the candidate's tree is written from git's objects into a new temporary folder, each blob's hash checked,
              and the check runs there without a shell: never in REPO's working files. A record made at another
              commit, or whose command is not the approved one, is a MISMATCH (exit 1); the record's command is only
@@ -28,6 +32,8 @@ verify --rerun --order ORDER --dispatch-log LOG --repo REPO --candidate SHA
              to another order, or to another REVISION or hash with no `EVIDENCE_EQUIVALENT` whole line in LOG, is a
              MISMATCH for a Strict order and a `~` note for a Standard one; an unbound record is a WARN note at
              REVISION 1 and, from REVISION 2, a MISMATCH (Strict) or a note (Standard).
+          A read-only git check runs in REPO itself (it needs the history), not in the folder: with replace objects,
+          fsmonitor, pager, optional locks, external diff and textconv off; step 6 still reads REPO again after it.
           The last line adds `check=AC-n source=order candidate=<12 digits>`.
           The folder holds the committed files only: no .git, no untracked or ignored files. This proves the approved
           check ran on the candidate's tree; it still runs the candidate's own test code, so it is not a sandbox.
@@ -143,16 +149,17 @@ def decode(raw):
         return raw.decode(locale.getpreferredencoding(False), "replace")
 
 
-def execute(command, cwd, tail_lines, timeout, log_path, program=None, log_errors=None):
+def execute(command, cwd, tail_lines, timeout, log_path, program=None, log_errors=None, env=None):
     """Run a command; returns (exit code, timed out, total lines, last lines). Keeps only the tail in memory.
     program: the file to start instead of looking command[0] up in PATH. log_path: an already opened binary file
     (2.2: cmd_run opens it before the command starts) or a path. log_errors: a list that gets the first write error;
-    the output is still read to the end so the command's own exit code is kept."""
+    the output is still read to the end so the command's own exit code is kept. env: the environment (default: this one)."""
     tail, count = collections.deque(maxlen=tail_lines), [0]
     program = program or shutil.which(command[0], path=None) or command[0]
     log = open(log_path, "wb") if isinstance(log_path, (str, os.PathLike)) else log_path
     try:
-        proc = subprocess.Popen([program, *command[1:]], cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        proc = subprocess.Popen([program, *command[1:]], cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                env=env)
     except OSError as error:
         if log:
             log.close()
@@ -323,9 +330,49 @@ def repo_state(repo, commit):
     return out
 
 
+# 2.2.3 (L-055): an approved check may run git for reading only; these subcommands, none of the options below
+READ_ONLY_GIT = ("cat-file", "diff", "log", "ls-files", "rev-parse", "show", "status")
+GIT_WRITE_OPTIONS = ("--output", "--ext-diff", "--textconv", "--filters", "--no-index", "--open-files-in-pager")
+GIT_SAFE = ["-c", "core.useReplaceRefs=false", "-c", "core.fsmonitor=false", "--no-pager", "--no-optional-locks"]
+
+
+def is_git(command):
+    return pathlib.PurePath(command[0].replace("\\", "/")).name.lower() in ("git", "git.exe")
+
+
+def read_only_git(command):
+    """Refuse a git check that is not read-only (L-055): the subcommand comes first and is in READ_ONLY_GIT, and no
+    argument is an option that writes a file or starts a program."""
+    sub = command[1] if len(command) > 1 else ""
+    if sub.startswith("-"):
+        raise Refused(f"the approved check gives git the option {sub!r} before the subcommand; a read-only git check "
+                      f"starts with its subcommand ({', '.join(READ_ONLY_GIT)})")
+    if sub not in READ_ONLY_GIT:
+        raise Refused(f"the approved check runs git {sub or '(no subcommand)'!r}, which is not a read-only git subcommand "
+                      f"({', '.join(READ_ONLY_GIT)}); a check must not change the repository")
+    bad = [arg for arg in command[2:] if writes(arg.split("=", 1)[0])]
+    if bad:
+        raise Refused(f"the approved check gives git {sub} the option {bad[0]!r}, which writes a file or runs a program")
+
+
+def writes(name):
+    """True for one of GIT_WRITE_OPTIONS, also cut short (git takes --ext-d for --ext-diff)."""
+    return name.startswith("--") and len(name) > 2 and any(option.startswith(name) for option in GIT_WRITE_OPTIONS)
+
+
+def git_argv(command):
+    """The read-only git check as it runs: replace objects, fsmonitor, pager and optional locks off; external diff
+    and textconv off for diff / show / log."""
+    extra = ["--no-ext-diff", "--no-textconv"] if command[1] in ("diff", "show", "log") else []
+    return [command[0], *GIT_SAFE, command[1], *extra, *command[2:]]
+
+
 def check_program(command):
-    """Refuse a program the PATH would choose (R04): it must be absolute, a path inside the candidate or python."""
+    """Refuse a program the PATH would choose (R04): it must be absolute, a path inside the candidate or python;
+    2.2.3: or git for a read-only subcommand (read_only_git)."""
     first = command[0]
+    if is_git(command):
+        return read_only_git(command)
     if not (os.path.isabs(first) or "/" in first or "\\" in first or first.lower() in PYTHON_NAMES):
         raise Refused(f"the approved check starts {first!r}, a bare name the PATH would resolve to some program; write "
                       "an absolute path, a path inside the candidate such as ./tools/check, or python")
@@ -334,6 +381,11 @@ def check_program(command):
 def program_in(command, root):
     """The file the trusted rerun starts for command[0], inside the materialized folder when it is a relative path."""
     first = command[0]
+    if is_git(command):
+        found = first if os.path.isabs(first) else shutil.which(first)
+        if not found:
+            raise Refused(f"git not found, the read-only git check needs it: {first}")
+        return found
     if os.path.isabs(first):
         return first
     if first.lower() in PYTHON_NAMES:
@@ -537,8 +589,20 @@ def finish_rerun(a, record, ac, approved, candidate, tree, root, count, program,
     if command != approved:
         lines.append(f"record command differs from the approved check: {json.dumps(command, ensure_ascii=False)} "
                      f"!= {json.dumps(approved, ensure_ascii=False)}")
-    print(f"rerun {ac} in a new folder holding the {count} committed files of {candidate[:12]} (not {a.repo}): {approved}")
-    code = execute(approved, str(root), 1, a.timeout, None, program)[0]
+    if is_git(approved):
+        try:
+            top = git_trusted(a.repo, "rev-parse", "--show-toplevel")
+        except Refused as why:
+            print(f"EVIDENCE_VERIFY: NOT_RUN {why}")
+            return 2
+        print(f"rerun {ac} as a read-only git check in {top} at {candidate[:12]} (it needs the history; the repo is "
+              f"read again afterwards): {approved}")
+        code = execute(git_argv(approved), top, 1, a.timeout, None, program,
+                       env={**GIT_ENV, "GIT_NO_LAZY_FETCH": "1", "GIT_TERMINAL_PROMPT": "0"})[0]
+    else:
+        print(f"rerun {ac} in a new folder holding the {count} committed files of {candidate[:12]} (not {a.repo}): "
+              f"{approved}")
+        code = execute(approved, str(root), 1, a.timeout, None, program)[0]
     if code != expected:
         lines.append(f"exit code {expected} -> {code}")
     try:
