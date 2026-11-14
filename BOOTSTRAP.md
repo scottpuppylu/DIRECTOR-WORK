@@ -169,6 +169,8 @@ DIRECTOR/
 
 在 `ACTIVE_WORKSTREAMS.md` 寫草案：要幾條 worker 線、各做什麼、要不要總管和清理員、各線的模型和 effort（`docs/05`）。第 2 步記下沒有產品方向時，草案寫成假設，等第 14 步初衷卡鎖定後再定。**開新 session 會花額度，第一批由 PO 同意後才開。** 小白模式由總監照 `docs/05` 定第一批並登記 DD；開線的同意併進第 14 步那一則回覆（卡片對，請開助手），不另外問第二次。
 
+開 worker 的提示加一句：開工時把 TEMP、TMP（及 TMPDIR）設成工單的 `WORK_DIR/tmp`；harness 的 scratchpad 和系統暫存資料夾算工作區外（2.2.4，`docs/02`）。
+
 ## 13. 第一份回報給 PO
 
 回報前一定先跑 `python -I -X utf8 <RULES>/tools/setup_check.py <WS>/DIRECTOR`，要 exit 0；沒過就先修 `DIRECTOR_STATE.md` 的兩行（第 6 步），不送回報。小白模式和快速路徑也一樣。`setup_check` 只驗格式，回報裡要貼出第 6 步發布和置頂時工具回傳的結果原文（網址、置頂成功或失敗的訊息）。
