@@ -12,7 +12,7 @@
 
 | 流程需要 | Desktop 的做法 | 注意 |
 |---|---|---|
-| 開 worker | `start_session`（`mcp__ccd_session__start_session`） | 工單先落檔；提示只給工單路徑、RESUME_STATE 路徑和一句目標。**只有 PO 親自發的那一輪能直接開**，見下方「開 worker 的限制」。 |
+| 開 worker | `start_session`（`mcp__ccd_session__start_session`） | 工單先落檔；提示只給工單路徑、RESUME_STATE 路徑和一句目標，再加一句「開工時把 TEMP、TMP（及 TMPDIR）設成 WORK_DIR/tmp」（2.2.4，`docs/02`）。**只有 PO 親自發的那一輪能直接開**，見下方「開 worker 的限制」。 |
 | 傳訊息給 worker | `SendMessage`（`to` 填 `local_…` 開頭的 session id） | 只在 `docs/03` 的三種情況發。送達就會叫醒對方一輪（回傳「已送達」不代表已讀）；長內容寫檔，訊息只給路徑。 |
 | 讀 session 清單和狀態 | `list_sessions`、`get_session`（`mcp__ccd_session_mgmt__…`） | `get_session` 的 `isRunning` 分辨在跑或閒置，`isArchived` 表示已封存。恢復時對照 `ACTIVE_WORKSTREAMS.md`，找閒置、中斷、等回覆的線（`docs/06`）。 |
 | 讀額度和上下文視窗 | `get_usage`（`mcp__ccd_session_mgmt__get_usage`） | `plan` 是帳號的 5 小時、週額度與重置時間；`context` 是某個 session 的 `tokensUsed / contextWindow`（預設自己，可帶別的 session id）。不花額度。 |

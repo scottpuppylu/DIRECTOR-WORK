@@ -14,7 +14,7 @@ GOVERNANCE     = <Direct | Standard | Strict>
 BASE_REF       = <remote/branch @ commit，例：origin/main @ <fetch 後的 commit>>   # 開工前先 git fetch，寫 fetch 後遠端分支的最新 commit；落後時 gate_check.py --order 印 WARN BASE_REF（docs/02）
 NEW_BRANCH     = <分支名>
 WORKTREE       = <路徑>
-WORK_DIR       = <放報告、RESUME_STATE.md、輸出的資料夾>
+WORK_DIR       = <放報告、RESUME_STATE.md、輸出的資料夾>   # 開工時 TEMP、TMP（及 TMPDIR）設成 WORK_DIR/tmp；scratchpad 和系統暫存資料夾算工作區外（docs/02）
 BUDGET         = <US$0 | PO 核准的金額>
 HEAVY_RESOURCE = <無 | 需先 TEST REQUEST：類型、預估分鐘>
 ```
@@ -27,7 +27,9 @@ HEAVY_RESOURCE = <無 | 需先 TEST REQUEST：類型、預估分鐘>
 ## B. 目標
 - MUST HAVE：
 - OPTIONAL：
-- OUT OF SCOPE：
+- 不做（OUT OF SCOPE）：<這次明確不做的範圍；沒有就寫「無」，不可留空>
+- 可呼叫的入口：<交付物是函式庫或工具時，一個公開、測試可直接呼叫的函式：輸入路徑或資料 → 輸出結果，
+  例 `report.build(path) -> Report`；不能只能從命令列用。不是函式庫或工具就寫「不適用」>
 
 可以改和不准碰的路徑（`tools/scope_check.py` 直接讀這兩份清單）：
 

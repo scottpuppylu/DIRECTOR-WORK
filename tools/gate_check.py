@@ -113,6 +113,16 @@ The hash only detects a changed order after the fact; it cannot stop anyone from
 a command ran and passed, not that it tests the right thing.
 Lines starting with `~` are notes for the newer format (v0.10): they never fail a file.
 
+2.2.4 (shadow: WARN lines, the exit code stays the same; --strict makes them FAIL):
+  --after-verdict VERDICT [VERDICT ...] --repo DIR [--orders DIR]
+             commits made after the last gate verdict. Of the verdicts' `CANDIDATE_HEAD:` commits (resolved in --repo),
+             the last is the one the others lead to (else the newest commit date). Each commit from it to HEAD that
+             changes a file outside the verdict order's SCOPE that is not a document prints `~ WARN LATE_COMMIT <sha>
+             <subject>: <files>`. A document is a file under a DIRECTOR/ folder or a .md / .rst / .txt file. The order
+             is the verdict's `ORDER:` file, looked up in --orders, the verdict's folder and ../orders; without it every
+             non-document file counts. A candidate that cannot be resolved, or a HEAD that does not contain it, says it
+             did not compare (NOT_CHECKED, never a silent pass). Only reads (git rev-parse / rev-list / diff).
+
 Bringing in a project that already has files in another format:
   --warn          print WARN instead of FAIL and exit 0, so old files do not block work
   --since DATE    SKIP files dated before DATE (YYYY-MM-DD): ISSUED_BY of an order, UPDATED of a RESUME_STATE, the
@@ -1435,6 +1445,91 @@ def preflight(report, order, order_path, evidence_dir=None, dispatch=None, log_n
     return lacks, unchecked
 
 
+def is_document(path):
+    """2.2.4: a file under a DIRECTOR/ folder, or a .md / .rst / .txt file."""
+    parts = path.replace("\\", "/").split("/")
+    return "DIRECTOR" in parts[:-1] or parts[-1].lower().endswith((".md", ".rst", ".txt"))
+
+
+def verdict_order(verdict, text, orders_dir=None):
+    """2.2.4: the order file a verdict's `ORDER:` line names, from orders_dir, the verdict's folder or ../orders."""
+    named = order_line(text)
+    if not named or not named[0].split():
+        return None
+    name = named[0].split()[0].strip("`")
+    folder = pathlib.Path(verdict).resolve().parent
+    for where in ([pathlib.Path(orders_dir)] if orders_dir else []) + [folder, folder.parent / "orders"]:
+        if (where / name).is_file():
+            return where / name
+    return None
+
+
+def after_verdict(verdicts, repo, orders_dir=None, strict=False):
+    """2.2.4 (shadow): commits after the last verdict's candidate that change files outside its order's SCOPE that are
+    not documents. Returns (lines to print, number of late commits found, files not found)."""
+    lines, missing, found = [], [], []
+    for path in verdicts:
+        if not pathlib.Path(path).is_file():
+            missing.append(path)
+            lines.append(f"FAIL after-verdict {path}\n  - file not found")
+            continue
+        text = pathlib.Path(path).read_text(encoding="utf-8-sig")
+        head = re.search(r"^\s*CANDIDATE_HEAD\s*[:=]\s*(\S*)", text, re.M)
+        value = head.group(1).strip("`").lower() if head else ""
+        full = resolve_commit(repo, value) if re.fullmatch(r"[0-9a-f]{7,40}", value) else None
+        if full:
+            found.append((full, path, text))
+        else:
+            lines.append(f"  ~ NOT_CHECKED {path}: CANDIDATE_HEAD {value or '(none)'} is not a commit in {repo}")
+    if not found:
+        if verdicts and not missing:
+            lines.insert(0, f"NOT_CHECKED after-verdict: no verdict candidate resolves in {repo}; not compared")
+        return lines, 0, missing
+
+    def leads_to(a, b):
+        return a == b or base_git(repo, "merge-base", "--is-ancestor", a, b)[0] == 0
+    last = next((f for f in found if all(leads_to(o[0], f[0]) for o in found)), None)
+    how = "the others lead to it"
+    if last is None:
+        last = max(found, key=lambda f: int((base_git(repo, "log", "-1", "--format=%ct", f[0])[1] or "0").split()[0]))
+        how = "newest commit date; the candidates are on different lines"
+    candidate, path, text = last
+    order = verdict_order(path, text, orders_dir)
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("scope_check", pathlib.Path(__file__).resolve().parent / "scope_check.py")
+    scope_check = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(scope_check)
+    scope_items = parse_list(order.read_text(encoding="utf-8-sig"), "SCOPE") if order else None
+    scope = [scope_check.glob_regex(g) for g in scope_items or [] if g != "NONE"]
+    code, out = base_git(repo, "rev-parse", "--verify", "--quiet", "HEAD^{commit}")
+    head_sha = out.lower() if code == 0 else ""
+    title = (f"AFTER_VERDICT {path} candidate {candidate[:12]} ({how}); order "
+             + (f"{order.name} SCOPE {len(scope_items or [])} item(s)" if order else "not found: every non-document file counts"))
+    if not head_sha:
+        return [f"NOT_CHECKED {title}", f"  ~ NOT_CHECKED HEAD is not a commit in {repo}"] + lines, 0, missing
+    if head_sha == candidate:
+        return [f"OK   {title}", "  ~ HEAD is the candidate; no commit after the verdict"] + lines, 0, missing
+    if not leads_to(candidate, head_sha):
+        return [f"NOT_CHECKED {title}", f"  ~ NOT_CHECKED HEAD {head_sha[:12]} does not contain the candidate; not compared"] \
+            + lines, 0, missing
+    code, out = base_git(repo, "rev-list", "--reverse", "--parents", f"{candidate}..{head_sha}")
+    late = []
+    for row in (out.split("\n") if code == 0 and out else []):
+        commit, *parents = row.split()
+        code, names = base_git(repo, "-c", "core.quotePath=false", "diff", "--name-only", "--no-renames",
+                               parents[0] if parents else "4b825dc642cb6eb9a060e54bf8d69288fbee4904", commit)
+        outside = [n for n in names.split("\n") if n and not is_document(n) and not any(rx.fullmatch(n) for rx in scope)]
+        if outside:
+            subject = base_git(repo, "log", "-1", "--format=%s", commit)[1]
+            late.append(f"  ~ {'FAIL' if strict else 'WARN'} LATE_COMMIT {commit[:12]} {subject}: "
+                        + ", ".join(outside[:8]) + (f" (+{len(outside) - 8} more)" if len(outside) > 8 else ""))
+    count = len(out.split("\n")) if code == 0 and out else 0
+    word = "FAIL" if late and strict else ("WARN" if late else "OK  ")
+    return ([f"{word} {title}: HEAD {head_sha[:12]} is {count} commit(s) later, {len(late)} change files outside "
+             f"SCOPE that are not documents" + ("" if strict else "; shadow, exit unchanged")] + late + lines,
+            len(late), missing)
+
+
 def check_verdict(text, notes):
     problems = []
     section = re.search(r"^##\s*A\b.*?$(.*?)(?=^##\s|\Z)", text, re.M | re.S)
@@ -1696,7 +1791,11 @@ def main():
     ap.add_argument("--order-history", metavar="DIR", help="with --match: old orders, found by hash, for carried-over evidence")
     ap.add_argument("--artifact-root", metavar="DIR", help="with --po-acceptance: the folder the entry and manifest paths "
                     "are read from (default: the record file's folder)")
-    ap.add_argument("--strict", action="store_true", help="2.2.2: with --resume, RESUME_SIZE fails instead of a shadow note")
+    ap.add_argument("--after-verdict", nargs="+", default=[], metavar="VERDICT", help="2.2.4: with --repo, WARN for "
+                    "commits after the last verdict's candidate that change files outside its order's SCOPE (shadow)")
+    ap.add_argument("--orders", metavar="DIR", help="2.2.4: with --after-verdict, the folder the verdict's ORDER file is in")
+    ap.add_argument("--strict", action="store_true", help="2.2.2: with --resume, RESUME_SIZE fails instead of a shadow note; "
+                    "2.2.4: with --after-verdict, a late commit fails")
     ap.add_argument("--config", metavar="director_work.json", help="2.2.2: with --resume, read resume.max_bytes / "
                     "resume.max_line_bytes (default: director_work.json beside the RESUME_STATE, else 20480 / 4096); "
                     "with --order, read base_ref.check / fetch / strict")
@@ -1735,15 +1834,26 @@ def main():
             target, written = write_snapshot(data, a.snapshot, name)
             print(f"  SNAPSHOT {target} ({'written' if written else 'already there, kept'})")
     brief_failed = print_brief(a.brief, a.snapshot) if a.brief and (a.snapshot or not (jobs or a.preflight)) else False
-    if not jobs and (a.hash or a.brief) and not a.preflight:
-        return 1 if missing or brief_failed else 0
+    late_failed = 0
+    if a.after_verdict or a.orders:
+        if not a.after_verdict:
+            ap.error("--orders works with --after-verdict")
+        if not a.repo or not pathlib.Path(a.repo).is_dir():
+            ap.error("--after-verdict needs --repo DIR, the checkout the commits are in")
+        if a.orders and not pathlib.Path(a.orders).is_dir():
+            ap.error(f"--orders: folder not found: {a.orders}")
+        lines, late, late_missing = after_verdict(a.after_verdict, a.repo, a.orders, a.strict)
+        print("\n".join(lines))
+        late_failed = len(late_missing) + (late if a.strict else 0)
+    if not jobs and (a.hash or a.brief or a.after_verdict) and not a.preflight:
+        return 1 if missing or brief_failed or late_failed else 0
     if not jobs and not a.preflight:
         ap.error("give at least one of --resume / --order / --report / --verdict / --test-request / --po-acceptance / "
-                 "--match / --preflight / --hash / --brief")
-    if a.repo and not (a.preflight or a.order):
-        ap.error("--repo works with --preflight or --order")
-    if a.strict and not a.resume:
-        ap.error("--strict works with --resume")
+                 "--match / --preflight / --hash / --brief / --after-verdict")
+    if a.repo and not (a.preflight or a.order or a.after_verdict):
+        ap.error("--repo works with --preflight, --order or --after-verdict")
+    if a.strict and not (a.resume or a.after_verdict):
+        ap.error("--strict works with --resume or --after-verdict")
     if a.config and not (a.resume or a.order):
         ap.error("--config works with --resume or --order")
     if a.strict_base and not a.order:
@@ -1849,7 +1959,7 @@ def main():
     if a.warn or a.since:
         print(f"checked {len(jobs) - skipped - undated}, {'warned' if a.warn else 'failed'} {failed}, skipped {skipped}"
               + (f", UNDATED {undated} (not checked)" if undated else ""))
-    return 1 if failed and not a.warn else 0
+    return 1 if (failed and not a.warn) or late_failed else 0
 
 
 def not_utf8(error, argv=None):

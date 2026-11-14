@@ -6,6 +6,63 @@
 - **MINOR**：新增規則、文件、工具或選項，舊檔案照樣通過。
 - **PATCH**：修正文字、修 bug，規則不變。
 
+## 2.2.4 — 2026-11-14
+
+PATCH（版本號照 PO 指定；PO 2026-11-14：WO-DS-006 試跑學到的修進原版 DW，不加 OpenSpec／SDD、不加每輪必讀）：report_vs_audit 的誤判一次修好、gate_check 新增「最後一份裁決之後的未審程式碼」shadow 檢查、暫存檔指到 WORK_DIR、工單和規格審查範本加兩個欄位、派工規劃加三行。新選項照定義算 MINOR，PO 指定版本號，所以標 PATCH。新檢查是 shadow（只印 WARN，exit code 不變），加 `--strict` 才判不過。舊檔案、舊指令照樣能用。
+
+### report_vs_audit 比對修正（WO-DS-006 的 64 條誤判）
+
+- 問題：三組試跑的 TASK REPORT 用 2.2.3 重跑，共 64 條 FAIL（工單寫 63，重跑實數 64），逐條對照動作紀錄原文，全部是指令確實有跑的誤判，沒有一條真漏跑。總監只好逐筆人工判。
+- 變數先展開再比：同一呼叫或同一 agent 較早呼叫裡的指定（bash、PowerShell、here-string、`$env:`、`set`）給 `$X`、`${X}`、`$env:X`、`%X%` 值；找不到值的變數在它那個詞裡代表任意文字。
+- `git -C DIR x` 當成 `cd DIR ; git x`；全形 `；` 也分句；字中的 `...`／`…` 代表任意文字；短 hex 對完整 hex 的前綴；宣告的絕對路徑對紀錄的相對路徑；`at=HH:MM:SS` 和時間區間；`AC-1 .. AC-6` 有空格；選項換順序；`python -c` 太短時連啟動程式一起比。
+- RAN: 之前就開的 ``` 圍欄不算 RAN 區塊；多段主張可以在依時間排的幾筆呼叫裡逐段找到。
+- 新狀態 **UNVERIFIED**（in log cut part）：主張在任何呼叫都找不到，但 `at=` 範圍內有一筆被截在 500 字的呼叫、而且同一報告另一條指令對到了它，主張可能在被截掉的那段，紀錄既證明不了有跑、也證明不了沒跑。這種主張印 `UNVERIFIED`，不算 OK、也不算 FAIL：最後一行另計 `unverified=n`，exit code 不變。審查的人要自己看這幾條。在截斷呼叫留下來的那段就對得到的主張仍是 OK。harness 對應的工具（pwsh）整個 session 沒有 error 狀態時，exit 不是 0 的宣告印「not checkable」。
+- 64 條按 21 種理由各做成去識別案例（假路徑、假 session），加上沒人跑過的對照組（仍 FAIL），寫進 selftest 並做 mutation 測試。2.2.3 的 selftest 一條沒壞。
+
+### gate_check --after-verdict（shadow）
+
+- 問題：sdd 組在最後一份 PASS 裁決之後又 commit 了兩次程式碼（改到工單 SCOPE 外的檔），沒有再過 gate，卻沒有任何工具提醒。
+- `gate_check.py --after-verdict <裁決…> --repo <checkout> [--orders <工單資料夾>]`：取最後一份裁決的 `CANDIDATE_HEAD`，從它到 HEAD 的每個 commit，只要改到工單 SCOPE 以外、又不是文件（`DIRECTOR/` 底下或 `.md`／`.rst`／`.txt`）的檔，就印 `~ WARN LATE_COMMIT <sha> <標題>: <檔案>`。exit code 不變；`--strict` 時 FAIL。候選解不出或 HEAD 不含候選印 `NOT_CHECKED`，不當作通過。只讀。
+- 對 sdd 組試驗 repo 唯讀跑一次：裁決之後改到 SCOPE 外程式碼的兩個 commit 都印 WARN；只動文件的 commit 不列。
+
+### 範本與文件
+
+- 暫存檔（L-053 重演）：`docs/02`、`BOOTSTRAP` 第 12 步、`docs/11` 開 worker 的提示、`templates/WORK_ORDER.md` 的 WORK_DIR 欄都寫明開工時把 TEMP、TMP（及 TMPDIR）設成 `WORK_DIR/tmp`；harness scratchpad 和系統暫存資料夾算工作區外。
+- `templates/WORK_ORDER.md` B 節：「不做（OUT OF SCOPE）」不可留空（可寫「無」）；「可呼叫的入口」：函式庫或工具要有一個測試可直接呼叫的公開函式（輸入路徑或資料 → 輸出結果）。`templates/SPEC_REVIEW.md` 第 9 項審這兩欄。
+- `docs/05`「派工規劃」加三行：平行線在整合前至少切成一段完整功能加測試；兩條長線能同時跑就同時派；派工前估每條線的時間，同時在跑的時間不到一半就合併或重切。
+- 都只在寫工單、審規格、開 worker、派工時讀，不是每輪必讀。
+
+### status.py 長路徑（總監驗收時發現）
+
+- 問題：TMP 設成約 110 字的長路徑時，產生的 `status.py` 每行從行尾切到 `width`，路徑後面的狀態字（OK、LOW、計數）被切掉，selftest 有 6 個 status 案例 FAIL。
+- `tools/status_gen.py` 產生的 `status.py`：一行超過 `width` 時頭尾都留，把行內最長路徑的中段換成 `…`（路徑太短不夠換時，換整行的中段），寬度上限照舊。selftest 加一個 150 字以上路徑的案例和 2 個 mutation（改回從行尾切要被抓到）；比對路徑的案例改成接受中段換成 `…` 的寫法，路徑開頭、檔名和行尾的狀態字仍逐字比。
+- selftest 開頭給整個 process 設 `GIT_CONFIG_COUNT`／`GIT_CONFIG_KEY_n=core.longpaths`／`GIT_CONFIG_VALUE_n=true`（原本有 `GIT_CONFIG_COUNT` 就接在後面），它叫起來的工具裡的 git 也吃到，長 TMP 下 git 不會因 Windows 260 字上限報「Filename too long」；只在 selftest 裡設，tools 不變。
+- 本機 remote 那一側（receive-pack／upload-pack）不繼承 `GIT_CONFIG_COUNT`，所以 release、BASE_REF 測試建的 bare origin 和 worker_clone 測試裡被 clone 的兩個 repo，另外在 repo 裡設 `core.longpaths`。`test_submodule_ignore` 的 GIT_DIR 超過 220 字時 git 本身會停（`'$GIT_DIR' too big`，`core.longpaths` 無效），改印 `SKIP test_submodule_ignore: GIT_DIR <n> chars > 220 (git limit)`。
+- selftest 最後一行改成 `selftest: 通過/總數 passed; skipped=N`：每一行 SKIP 都分開算，不算進 passed；exit 規則不變。三項 Windows 長路徑限制寫進 `tools/README.md` 的「已知限制」。
+
+### 已知限制
+
+- container 執行（`container/run_worker.sh`）沒有 WORK_DIR/tmp：container 裡沒有 WORK_DIR，暫存檔規則只寫在文件和範本。
+- UNVERIFIED 的主張要人看：工具只能說「可能在截斷處」，不能判斷有沒有跑。
+
+### 遷移
+
+- 不用遷移。report_vs_audit 最後一行多了 `unverified=n`（放在最後，原有欄位位置不變）；`--after-verdict` 是新選項，預設 shadow；`--strict` 以前只配 `--resume`，現在也配 `--after-verdict`。已經產生的 `status.py` 要用 `status_gen.py --force` 重新產生，才會換成頭尾都留的截寬。selftest 最後一行原本的 `skipped N git group(s)` 換成 `skipped=N`，有程式讀這一行的要跟著改。
+- 舊工單沒有「不做」「可呼叫的入口」照樣通過 `gate_check`（欄位不是工具檢查項，由規格審查看）。
+
+### 數字
+
+- 每輪必讀（`docs/01`、`03`、`06`、`08`）：9,548 → 9,548 bytes（沒變）。本版沒有改這四份，也沒有新增每輪必讀的檔案或步驟。
+- `selftest.py`：2.2.3 的 2,551 項 → 本版 2,622 項（+71：report_vs_audit 2.2.4 案例與 mutation（含 UNVERIFIED 兩個案例與 4 個 mutation）、`--after-verdict` 案例與 mutation、status.py 長路徑案例與 mutation、本段 CHANGELOG 的對齊初衷檢查），Python 3.11 與 3.9 各用短 TMP 和剛好 140 字的長 TMP 跑，四次都全過（`GIT_DIR` 的 SKIP 一次都沒出現；這台機器另有 2 個和 TMP 無關的環境 SKIP：8.3 短檔名關閉、不能建 symlink，所以 skipped=2）。
+- WO-DS-006 回歸：report_vs_audit 對三組 TASK REPORT 原樣重跑，FAIL 64 → 0、UNVERIFIED 18（claude 8 → FAIL 0／UNVERIFIED 4、dsh-sdd 32 → 0／11、dsh-nosdd 24 → 0／3）；其餘 46 條 OK。去識別的對照組（沒人跑的指令）仍 FAIL。
+
+對齊初衷：
+1. 幫到誰：審查交件的總監（誤判不必再逐筆人工判；裁決之後偷偷再改的程式碼會被點名）、寫工單和審規格的總監（「不做」「可呼叫的入口」兩欄）、worker（暫存檔放哪裡、開工就設好）。依據：PO 2026-11-14 指示、WO-DW-224、WO-DS-006 試跑結果。
+2. Desktop：都是本機命令列工具和範本，Desktop Code 分頁的 session 照常用；開 worker 的提示多一句。
+3. 服務：初衷 5（成品要真的對）：裁決之後的未審程式碼、可呼叫的入口讓評分不靠攔截；初衷 7（零成本）：只用標準庫（shlex、bashlex、PowerShell tokenizer 查過不採用），沒有新相依。
+4. 核心：每輪必讀沒有變長；新檢查先 shadow；git 只讀。
+5. 舊檔案和舊指令：照樣能用；2.2.3 比得到的主張仍比得到，沒人跑的仍 FAIL。
+
 ## 2.2.3 — 2026-11-14
 
 PATCH（版本號照 PO 指定；PO 2026-11-14：把試跑學到、對原版 DW 有用的放進來，不加 OpenSpec／SDD）：WO-DS-004 雙方試跑的教訓（LESSONS_INTAKE L-048～L-055）。report_vs_audit 比對修正和兩種 shadow WARN、`verify --rerun` 的唯讀 git、兩份範本的清單、暫存檔位置規則。新檢查全部 shadow（只印 WARN，exit code 不變）。舊檔案、舊指令照樣能用。

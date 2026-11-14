@@ -22,6 +22,11 @@ import time
 
 TOOLS = pathlib.Path(__file__).resolve().parent
 TEMPLATES = TOOLS.parent / "templates"
+# 2.2.4: under a long TMP, git on Windows stops at 260 characters ("Filename too long"). core.longpaths=true for every
+# git that selftest starts, also inside the tools it runs; an existing GIT_CONFIG_COUNT list is kept and extended.
+_GIT_N = int(os.environ.get("GIT_CONFIG_COUNT") or 0)
+os.environ.update({"GIT_CONFIG_COUNT": str(_GIT_N + 1), f"GIT_CONFIG_KEY_{_GIT_N}": "core.longpaths",
+                   f"GIT_CONFIG_VALUE_{_GIT_N}": "true"})
 
 RESUME = """PROGRESS: tests pass at abc123
 DOING: AC-2 of WO-001
@@ -122,11 +127,12 @@ GIT_GROUPS = {
     "test_pause", "test_audit", "test_audit_names", "test_review", "test_guard_modes", "test_doctor",
     "test_doctor_launch", "test_worker_clone", "test_preflight", "test_trusted_rerun", "test_rerun_binding",
     "test_trusted_isolation", "test_rerun_tree_modes_v220", "test_required_final_v220", "test_rerun_brief_v220",
-    "test_release_222", "test_base_ref_222",
+    "test_release_222", "test_base_ref_222", "test_after_verdict_224",
 }
 
 
 def skip(group, why="needs git, none on PATH"):
+    """A named skip: printed now and counted in the summary's skipped=N (2.2.4: every SKIP line, not only git)."""
     skipped.append(f"{group} ({why})")
     print(f"SKIP {group}: {why}")
 
@@ -1326,6 +1332,9 @@ def test_submodule_ignore(tmp):
     """v0.13 batch 3 (S04): `submodule.<name>.ignore=all` does not hide a staged change of a FORBIDDEN submodule."""
     root = tmp / "submodule"
     source, outer = root / "source", root / "outer"
+    gitdir = len(str(outer / ".git" / "modules" / "vendor" / "lib"))
+    if gitdir > 220:  # 2.2.4: git itself stops with "'$GIT_DIR' too big" past this, core.longpaths or not
+        return skip("test_submodule_ignore", f"GIT_DIR {gitdir} chars > 220 (git limit)")
     source.mkdir(parents=True)
     outer.mkdir()
 
@@ -1431,13 +1440,13 @@ def test_hook_protect(tmp):
     if done.returncode != 2:
         failures.append(f"hook_guard --protect stopped checking Bash: exit {done.returncode}")
     if os.name != "nt":
-        print("SKIP hook_guard junction and 8.3 cases: not Windows")
+        skip("hook_guard junction and 8.3 cases", "not Windows")
     else:
         link = tmp / "protect" / "dirlink"
         made = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(director)], capture_output=True,
                               encoding="utf-8", errors="replace")
         if made.returncode != 0:
-            print(f"SKIP hook_guard junction case: mklink /J failed: {(made.stdout + made.stderr).strip()}")
+            skip("hook_guard junction case", f"mklink /J failed: {(made.stdout + made.stderr).strip()}")
         else:
             guard("junction to DIRECTOR", 2, "Write", link / "orders" / "WO-009.md")
             os.rmdir(link)  # removes the junction only, not its target
@@ -1449,7 +1458,7 @@ def test_hook_protect(tmp):
         n = ctypes.windll.kernel32.GetShortPathNameW(str(longdir), buf, len(buf))
         short = buf.value if n else str(longdir)
         if os.path.normcase(short) == os.path.normcase(str(longdir)):
-            print("SKIP hook_guard 8.3 case: no short name on this volume (8.3 names are off)")
+            skip("hook_guard 8.3 case", "no short name on this volume (8.3 names are off)")
         else:
             total += 1
             done = subprocess.run([sys.executable, "-I", "-X", "utf8", str(TOOLS / "hook_guard.py"), "--mode", "block", "--protect", str(longdir)],
@@ -1469,7 +1478,7 @@ def test_hook_protect(tmp):
         try:
             os.link(director / "DIRECTOR_LOG.md", hard)
         except OSError as error:
-            print(f"SKIP hook_guard hardlink case: {error}")
+            skip("hook_guard hardlink case", f"{error}")
         else:
             guard("hardlink of DIRECTOR_LOG.md (same file id)", 2, "Write", hard)
             hard.unlink()
@@ -1479,7 +1488,7 @@ def test_hook_protect(tmp):
             guard("administrative UNC share of an existing order", 2, "Edit", unc + "\\orders\\WO-001-a.md")
             guard("new file in orders through the UNC share", 2, "Write", unc + "\\orders\\WO-003.md")
         else:
-            print(f"SKIP hook_guard UNC case: {unc} is not reachable")
+            skip("hook_guard UNC case", f"{unc} is not reachable")
 
     repo = tmp / "protect" / "repo"
     repo.mkdir()
@@ -3715,6 +3724,360 @@ def test_report_vs_audit_223(tmp):
         killed(f"report_vs_audit 2.2.3 {name}", wrong)
 
 
+RVA_EV224 = ("python tools/evidence_record.py run --label AC-1 --order D:/w/orders/wo-9.md --cwd D:/w/repo -- "
+             "python -m unittest")
+RVA_SCOPE224 = "python D:/w/tools/scope_check.py --order D:/w/orders/wo-9.md --repo D:/w/repo"
+# (name, tool, command in the log, claimed command, should match) for matches() in process; 2.2.4 (WO-DS-006 misses,
+# de-identified: the shapes of the 64 FAILs in H1_CLASSIFY, with made-up paths)
+RVA_224_CASES = [
+    ("git -C DIR x is cd DIR then git x", "Bash", "cd D:/w/repo && ls; git status --short", "git -C D:/w/repo status",
+     True),
+    ("git -C with another folder", "Bash", "cd D:/w/repo && ls; git status --short", "git -C D:/w/other status", False),
+    ("bash variables are put back", "Bash", "T=D:/w/tools; O=D:/w/orders/wo-9.md\npython $T/gate_check.py --hash $O",
+     "python D:/w/tools/gate_check.py --hash D:/w/orders/wo-9.md", True),
+    ("a put-back variable still has to match", "Bash", "T=D:/w/tools; O=D:/w/orders/wo-9.md\n"
+     "python $T/gate_check.py --hash $O", "python D:/w/tools/gate_check.py --hash D:/w/orders/wo-8.md", False),
+    ("PowerShell $x = a + b is put back", "PowerShell",
+     '$r = "D:\\w\\repo"; $o = $r + "\\orders\\wo-9.md"; python D:\\w\\tools\\scope_check.py --order $o --repo $r',
+     "scope_check.py --order D:/w/repo/orders/wo-9.md --repo D:/w/repo", True),
+    ("a here-string is a value", "PowerShell", "$o = @\"\nD:\\w\\orders\\wo-9.md\n\"@\npython tools/gate_check.py --hash $o",
+     "gate_check.py --hash D:/w/orders/wo-9.md", True),
+    ("a here-string value still has to match", "PowerShell",
+     "$o = @\"\nD:\\w\\orders\\wo-9.md\n\"@\npython tools/gate_check.py --hash $o", "gate_check.py --hash D:/w/orders/wo-8.md",
+     False),
+    ("a bash heredoc does not hide the next line", "Bash",
+     "cat <<'EOF' > D:/w/a.txt\nhello\nEOF\npython tools/gate_check.py --hash D:/w/orders/wo-9.md",
+     "gate_check.py --hash D:/w/orders/wo-9.md", True),
+    (".../x and ...\\x inside a word", "Bash", RVA_SCOPE224, "scope_check.py --order .../wo-9.md --repo ...\\repo", True),
+    (".../x with another file", "Bash", RVA_SCOPE224, "scope_check.py --order .../wo-8.md --repo ...\\repo", False),
+    ("a short hex is a prefix of the logged sha", "Bash",
+     "python tools/scope_check.py --base a0b1c2d3e4f5a6 --candidate 5e6f7a8b9c0d1e2f3a4b",
+     "scope_check.py --base a0b1c2d3e4 --candidate 5e6f7a8b9c0d", True),
+    ("a short hex with another start", "Bash", "python tools/scope_check.py --base a0b1c2d3e4f5a6 --candidate 5e6f7a8b9c0d1e",
+     "scope_check.py --base a0b1c2d3e4 --candidate 5e6f7a8b9c0e", False),
+    ("an absolute claimed path ends with the logged relative one", "Bash",
+     "python DIRECTOR/tools/gate_check.py --report DIRECTOR/reports/r.md",
+     "python D:/w/DIRECTOR/tools/gate_check.py --report D:/w/DIRECTOR/reports/r.md", True),
+    ('python -c "..." is compared with its launcher', "Bash", 'python -B -c "import ast; print(1)"',
+     'python -B -c "..."', True),
+    ('python -c "..." against another call', "Bash", "python -B -m unittest", 'python -B -c "..."', False),
+    ("options in another order", "Bash", RVA_EV224,
+     "evidence_record.py run --order .../wo-9.md --cwd .../repo --label AC-1 -- python -m unittest", True),
+    ("options in another order, another value", "Bash", RVA_EV224,
+     "evidence_record.py run --order .../wo-9.md --cwd .../repo --label AC-2 -- python -m unittest", False),
+    ("a full claim in another order names every option", "Bash", RVA_EV224,
+     "evidence_record.py run --cwd D:/w/repo --label AC-1 -- python -m unittest", False),
+    ("a full-width ； ends a statement and a word between CJK words is a note", "Bash",
+     "git clone --quiet D:/w/repo D:/w/tmp/c1; cd D:/w/tmp/c1; python D:/w/tools/scope_check.py --repo .",
+     "git clone --quiet ...；複製 w9 三檔後 scope_check.py --repo .", True),
+    ("； with another option", "Bash",
+     "git clone --quiet D:/w/repo D:/w/tmp/c1; cd D:/w/tmp/c1; python D:/w/tools/scope_check.py --repo .",
+     "git clone --depth ...；複製 w9 三檔後 scope_check.py --repo .", False)]
+RVA_CUT224 = "python tools/build_all.py --mode full --target alpha " + "--x " * 140 + "; python tools/lint.py --all"
+# log rows: (MM:SS, agent, command, kind, status, tool_raw); session S1, 2026-11-14 03:MM:SS UTC
+RVA_224_ROWS = [
+    ("01:10", "w1", "python -m unittest tests.test_a", "result", "ok", None),
+    ("02:00", "w1", "T=D:/w/tools", "result", "ok", None),
+    ("02:30", "w1", "python $T/gate_check.py --hash D:/w/orders/wo-9.md", "result", "ok", None),
+    ("03:00", "w1", "python -m py_compile a.py", "result", "ok", None),
+    ("03:20", "w1", "git status --porcelain", "result", "ok", None),
+    ("10:00", "w1", RVA_CUT224, "result", "ok", None),
+    ("20:00", "w1", "for l in AC-1 AC-2 AC-3; do python tools/evidence_record.py run --label $l -- python -m unittest; "
+     "done", "result", "ok", None),
+    ("30:00", "w2", "python tools/scope_check.py --order D:/w/orders/wo-9.md --repo D:/w/repo", "result", "ok", "pwsh"),
+    ("35:00", "w1", "python tools/report.py --week", "result", "ok", None),
+    ("41:00", "w1", "python tools/books.py --strict", "result", "ok", None)]
+RVA_224_LOGS = {"main": RVA_224_ROWS,
+                "pwsh_error": RVA_224_ROWS + [("50:00", "w2", "python tools/x.py", "failure", "error", "pwsh")]}
+# (name, report body after SESSION_ID: S1, log, exit, says, lacks); run by the CLI and, for mutants, in process
+RVA_224_RUNS = [
+    ("at=HH:MM:SS", "RAN: `python -m unittest tests.test_a` exit=0 at=03:01:10\n", "main", 0,
+     ["seq 1 at", "PASS claims=1 ok=1"], []),
+    ("at= span HH:MM–HH:MM widens the tolerance", "RAN: `python tools/report.py --week` exit=0 at=03:00–03:40\n", "main",
+     0, ["seq 9 at", "PASS claims=1 ok=1"], []),
+    ("variables carry from call to call of the agent",
+     "RAN: `python D:/x/other/gate_check.py --hash D:/w/orders/wo-9.md` exit=0\n", "main", 1,
+     ["not run in session S1"], []),
+    ("a fence opened outside RAN: closes there; a table after it is no claim",
+     "```text\nRAN:\n  - `python -m py_compile a.py` exit=0\n```\n\nACCEPTANCE:\n| AC-1 | `python -m nothing_ran` | PASS |\n"
+     "\n```text\nNEXT: x\n```\n", "main", 0, ["PASS claims=1 ok=1"], []),
+    ("statements run in separate calls", "RAN: `python -m py_compile a.py; git status --porcelain` exit=0\n", "main", 0,
+     ["its statements were run in separate calls, seq 4, 5", "PASS claims=1 ok=1"], []),
+    ("statements in separate calls must keep their order",
+     "RAN: `git status --porcelain; python -m py_compile a.py` exit=0\n", "main", 1, ["not run in session S1"], []),
+    ("a claim in the cut part of a call another claim matched is UNVERIFIED, not OK",
+     "RAN: `build_all.py --mode full --target alpha ...` exit=0\nRAN: `python tools/lint.py --all` exit=0\n", "main", 0,
+     ["UNVERIFIED command: `python tools/lint.py --all`: in log cut part: no call shows it, but seq 6 was cut at the "
+      "log's input limit", "OK   command: `build_all.py", "PASS claims=2 ok=1 failed=0", "unverified=1"],
+     ["OK   command: `python tools/lint.py"]),
+    ("a claim found in the kept part of a cut call stays OK",
+     "RAN: `python tools/build_all.py --mode full --target alpha` exit=0\n", "main", 0,
+     ["OK   command: `python tools/build_all.py --mode full --target alpha`: seq 6", "PASS claims=1 ok=1 failed=0",
+      "unverified=0"], ["UNVERIFIED"]),
+    ("a cut call no other claim matched covers nothing", "RAN: `python tools/lint.py --all` exit=0\n", "main", 1,
+     ["`python tools/lint.py --all`: not run in session S1"], ["may be in the cut part"]),
+    ("a cut call outside at= covers nothing",
+     "RAN: `build_all.py --mode full --target alpha ...` exit=0\nRAN: `python tools/lint.py --all` exit=0 at=03:50\n",
+     "main", 1, ["`python tools/lint.py --all`: not run in session S1"], ["may be in the cut part"]),
+    ("exit=1 on a mapped tool that never reports error: not checkable", "RAN: `" + RVA_SCOPE224.replace("D:/w/tools/", "tools/")
+     + "` exit=1\n", "main", 0, ["seq 8 is a pwsh call and no pwsh call of this session has status error",
+                                  "PASS claims=1 ok=1"], []),
+    ("exit=1 on a mapped tool that does report error is checked", "RAN: `"
+     + RVA_SCOPE224.replace("D:/w/tools/", "tools/") + "` exit=1\n", "pwsh_error", 1,
+     ["exit=1, but the log says ok (seq 8)"], ["not checkable"]),
+    ("exit=1 on a hook-logged call is checked", "RAN: `python tools/books.py --strict` exit=1\n", "main", 1,
+     ["exit=1, but the log says ok (seq 10)"], ["not checkable"]),
+    ("AC-1 .. AC-3 with spaces is a range (a $l loop)",
+     "RAN: `evidence_record.py run --label AC-1 .. AC-3 -- python -m unittest` exit=0\n", "main", 0,
+     ["seq 7, 7, 7 at", "PASS claims=1 ok=1"], []),
+    ("a command nobody ran stays FAIL", "RAN: `python tools/deploy.py --prod` exit=0\n", "main", 1,
+     ["not run in session S1"], [])]
+
+
+def rva224_matches_wrong(module, audit):
+    return [name for name, tool, command, claim, want in RVA_224_CASES
+            if bool(module.matches({"command": claim}, {"tool": tool, "input": audit.summary({"command": command})})) != want]
+
+
+def rva224_runs_wrong(module, reports, logs):
+    wrong = []
+    for (name, _, log, code, says, lacks), report in zip(RVA_224_RUNS, reports):
+        try:
+            got, out = call_main(module, "--report", report, "--log", logs[log], "--utc-offset", "+00:00")
+        except Exception as error:  # a mutant that crashes is a wrong answer
+            wrong.append(f"{name}: crashed {type(error).__name__}")
+            continue
+        if got != code or any(s not in out for s in says) or any(s in out for s in lacks):
+            wrong.append(name)
+    return wrong
+
+
+def test_report_vs_audit_224(tmp):
+    """2.2.4 (WO-DW-224 B1, the 64 WO-DS-006 misses): report_vs_audit puts variables back ($X, ${X}, $env:X, %X%, a
+    PowerShell a + b, a here-string; carried from call to call of the agent; unknown ones are any text), reads git -C
+    DIR as cd DIR, "..." / "…" inside a word as any text, a short hex as a prefix, an absolute claimed path against a
+    relative logged one, at=HH:MM:SS and a span, a fence opened outside RAN:, a claim whose statements were run in
+    separate calls, options in another order, AC-1 .. AC-6, ； and a word between CJK notes; a claim found nowhere but
+    possibly in the cut part of a call another claim matched is UNVERIFIED (its own status and count, not OK, not FAIL),
+    while a claim found in the kept part of a cut call is OK; exit on a mapped tool that never reports error is
+    not checkable. Commands nobody ran stay FAIL. De-identified synthetic logs; mutation tested."""
+    global total
+    folder = tmp / "rva224"
+    folder.mkdir()
+    spec = importlib.util.spec_from_file_location("audit_log_for_rva224", TOOLS / "audit_log.py")
+    audit = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(audit)
+    total += 1
+    if not audit.summary({"command": RVA_CUT224}).endswith("…") or "lint.py" in audit.summary({"command": RVA_CUT224}):
+        failures.append("report_vs_audit 2.2.4: the RVA_CUT224 log line is not cut before lint.py, so it tests nothing")
+    logs = {}
+    for log_name, rows in RVA_224_LOGS.items():
+        prev, out = audit.GENESIS, []
+        for seq, (clock, agent, command, kind, status, raw) in enumerate(rows, 1):
+            entry = {"seq": seq, "ts": f"2026-11-14T03:{clock}.000+00:00", "session_id": "S1", "agent_id": agent,
+                     "tool": "Bash", "tool_use_id": f"t{seq}", "input": audit.summary({"command": command}),
+                     "kind": kind, "result": {"status": status}, "duration_ms": None, "prev": prev}
+            if raw:
+                entry["tool_raw"] = raw
+            entry["hash"] = audit.digest(entry)
+            prev = entry["hash"]
+            out.append(entry)
+        logs[log_name] = folder / f"{log_name}.jsonl"
+        logs[log_name].write_text("".join(audit.canonical(e) + "\n" for e in out), encoding="utf-8")
+    reports = [_write_text(folder / f"r{n}.md", f"SESSION_ID: S1\n{body}") for n, (_, body, *_) in enumerate(RVA_224_RUNS)]
+    for (name, _, log, code, says, lacks), report in zip(RVA_224_RUNS, reports):
+        expect(f"report_vs_audit 2.2.4 CLI: {name}", "report_vs_audit.py", code, "--report", report, "--log", logs[log],
+               "--utc-offset", "+00:00", says=says, lacks=lacks)
+    real = mutant(TOOLS / "report_vs_audit.py", [], "report_vs_audit_224_real")
+    total += 1
+    if real is None or rva224_matches_wrong(real, audit):
+        failures.append(f"report_vs_audit 2.2.4 in process gets cases wrong: {real and rva224_matches_wrong(real, audit)}")
+    total += 1
+    if real is None or rva224_runs_wrong(real, reports, logs):
+        failures.append(f"report_vs_audit 2.2.4 in process gets runs wrong: {real and rva224_runs_wrong(real, reports, logs)}")
+    for name, swaps, by_runs in [
+            ("no git -C", [('    for statement in norm(GIT_C.sub(lambda found: f"cd {found.group(1)} ; git ", command))'
+                            '.split(" ; "):\n', '    for statement in norm(command).split(" ; "):\n')], False),
+            ("no variables", [("            out.append(refs(part))\n", "            out.append(part)\n")], False),
+            ("no here-string", [("    for found in HERE_STRING.finditer(command):\n", "    for found in []:\n")], False),
+            ("no ... inside a word", [("    pattern = word_pattern(claim_word)\n", "    pattern = None\n")], False),
+            ("no hex prefix", [("    if HEX.fullmatch(claim_word) and HEX.fullmatch(log_word) and "
+                                "log_word.startswith(claim_word):\n", "    if False:\n")], False),
+            ("no absolute claim, relative log", [('    return ("/" in log_word and not log_word.startswith(("/", ".", "-"))'
+                                                  ' and re.match(', '    return (False and re.match(')], False),
+            ("no launcher-kept compare", [('        return word_match(fold(launched), norm(command).split(" "), cut, '
+                                           'short)\n', "        return False\n")], False),
+            ("no options in another order", [('            or any_order(words, have.split(" "), leaves_out(words) if '
+                                              'short is None else short))\n', "            or False)\n")], False),
+            ("another order may leave options out", [("            if used != sorted(used) and (short or len(used) == "
+                                                      "len(log_options)):\n", "            if used != sorted(used):\n")],
+             False),
+            ("no ；", [('text.replace("；", ";")', 'text.replace("；", "；")')], False),
+            ("no CJK-note fold", [('    words = fold(want.split(" "))\n', '    words = want.split(" ")\n')], False),
+            ("no carry between calls", [("            expanded, envs[agent] = expand_line(command, cut, "
+                                         "envs.get(agent))\n", "            expanded, _ = expand_line(command, cut)\n")],
+             True),
+            ("no HH:MM:SS", [('    clock = re.fullmatch(r"(\\d{1,2}):(\\d{2})(?::\\d{2}(?:\\.\\d+)?)?", value)\n',
+                              '    clock = re.fullmatch(r"(\\d{1,2}):(\\d{2})", value)\n')], True),
+            ("no span", [("    span = AT_SPAN.fullmatch(value)\n", "    span = None\n")], True),
+            ("no outer fence", [('and (outer or field != "RAN"):', "and False:")], True),
+            ("no separate calls", [("        parts = split_runs(claim, mine, offset, tolerance)\n",
+                                    "        parts = None\n")], True),
+            ("no cut cover", [("                if cover is not None:\n", "                if False:\n")], True),
+            ("cut part printed as OK", [("        if index in in_cut:\n", "        if False:\n")], True),
+            ("the kept part of a cut call is UNVERIFIED", [("        if index in in_cut:\n",
+                                                            "        if index in in_cut or any(command_of(e)[1] for e in "
+                                                            "shown):\n")], True),
+            ("UNVERIFIED not counted", [("            unverified += 1\n", "            pass\n")], True),
+            ("UNVERIFIED fails the run", [("            unverified += 1\n", "            failed += 1\n")], True),
+            ("cut cover without another claim", [('    pool = [e for e in mine if e.get("seq") in anchors and',
+                                                  "    pool = [e for e in mine if True and")], True),
+            ("cut cover outside at=", [('            and command_of(e)[1] and (at is None or near(str(e.get("ts")), at, '
+                                        'offset, tolerance + extra))]\n', "            and command_of(e)[1]]\n")], True),
+            ("no mapped-tool exit rule", [('        elif (raw and claim["exit"] != 0', '        elif (False and raw')],
+             True),
+            ("mapped-tool exit rule with an error seen", [('not any(e.get("tool_raw") == raw and',
+                                                           'not any(False and e.get("tool_raw") == raw and')], True),
+            ("no spaced range", [('    command = ID_SPACED.sub(r"\\1..\\2", command)\n', "    pass\n")], True)]:
+        module = mutant(TOOLS / "report_vs_audit.py", swaps, "report_vs_audit_224_mutant")
+        wrong = module is None or (rva224_runs_wrong(module, reports, logs) if by_runs
+                                   else rva224_matches_wrong(module, audit))
+        killed(f"report_vs_audit 2.2.4 {name}", wrong)
+
+AV224_ORDER = """# WO-002 app fix
+ORDER_ID: WO-002
+REVISION = 1
+SCOPE:
+- app.py
+- lib/**
+FORBIDDEN:
+- secret.py
+"""
+AV224_VERDICT = """# GATE VERDICT {wo}
+ORDER: {order} REVISION 1
+CANDIDATE_HEAD: {head}
+"""
+
+
+def test_after_verdict_224(tmp):
+    """2.2.4 (WO-DW-224 B2): gate_check --after-verdict. Commits after the last verdict's candidate that change a
+    file outside the order's SCOPE that is not a document print `~ WARN LATE_COMMIT` (exit unchanged); --strict
+    fails. No later commit, documents only (DIRECTOR/ folder, .md) and in-SCOPE code stay OK; the last of several
+    verdicts is the one the others lead to; a candidate that does not resolve is NOT_CHECKED. Mutation tested."""
+    global total
+    folder = tmp / "after_verdict_224"
+    repo, gates, orders = folder / "repo", folder / "DIRECTOR" / "gates", folder / "DIRECTOR" / "orders"
+    for d in (repo / "lib", gates, orders):
+        d.mkdir(parents=True)
+
+    def git(*args):
+        return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args], cwd=repo,
+                              check=True, capture_output=True, text=True).stdout.strip()
+
+    def commit(message, files):
+        for name, text in files.items():
+            path = repo / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        git("add", "-A")
+        git("commit", "-q", "-m", message)
+        return git("rev-parse", "HEAD")
+
+    git("init", "-q", "-b", "main")
+    first = commit("start", {"app.py": "a = 1\n", "other.py": "b = 1\n"})
+    (orders / "WO-002-app.md").write_text(AV224_ORDER, encoding="utf-8")
+    old = gates / "WO-001-GATE.md"
+    old.write_text(AV224_VERDICT.format(wo="WO-001", order="WO-001-none.md", head=first[:12]), encoding="utf-8")
+    second = commit("candidate", {"app.py": "a = 2\n"})
+    verdict = gates / "WO-002-GATE.md"
+    verdict.write_text(AV224_VERDICT.format(wo="WO-002", order="WO-002-app.md", head=second), encoding="utf-8")
+    both = [verdict, old]
+    expect("after-verdict: HEAD is the candidate", "gate_check.py", 0, "--after-verdict", old, verdict, "--repo", repo,
+           says=["OK   AFTER_VERDICT", f"candidate {second[:12]} (the others lead to it)", "HEAD is the candidate"],
+           lacks="LATE_COMMIT")
+    stages = [("none", both, False)]
+    docs = commit("docs only", {"README.md": "x\n", "docs/guide.md": "y\n", "DIRECTOR/state.json": "{}\n"})
+    expect("after-verdict: documents only", "gate_check.py", 0, "--after-verdict", *both, "--repo", repo,
+           says=["OK   AFTER_VERDICT", "is 1 commit(s) later, 0 change files outside SCOPE"], lacks="LATE_COMMIT")
+    inside = commit("code inside SCOPE", {"app.py": "a = 3\n", "lib/x.py": "c = 1\n"})
+    expect("after-verdict: documents and in-SCOPE code only", "gate_check.py", 0, "--after-verdict", *both, "--repo", repo,
+           says=["OK   AFTER_VERDICT", "is 2 commit(s) later, 0 change files outside SCOPE"], lacks="LATE_COMMIT")
+    stages.append(("docs", both, False))
+    late = commit("code outside SCOPE", {"other.py": "b = 2\n", "notes.md": "z\n"})
+    expect("after-verdict: a code commit outside SCOPE is a WARN, exit unchanged", "gate_check.py", 0, "--after-verdict",
+           *both, "--repo", repo, says=["WARN AFTER_VERDICT", f"~ WARN LATE_COMMIT {late[:12]} code outside SCOPE: other.py",
+                                        "shadow, exit unchanged", "is 3 commit(s) later, 1 change files"],
+           lacks=[docs[:12], inside[:12], "notes.md"])
+    expect("after-verdict: --strict fails", "gate_check.py", 1, "--after-verdict", *both, "--repo", repo, "--strict",
+           says=["FAIL AFTER_VERDICT", f"~ FAIL LATE_COMMIT {late[:12]}"], lacks="shadow, exit unchanged")
+    expect("after-verdict: the older verdict alone counts every later commit", "gate_check.py", 0, "--after-verdict", old,
+           "--repo", repo, says=["order not found: every non-document file counts", "~ WARN LATE_COMMIT " + second[:12]])
+    stages += [("late", both, False), ("strict", both, True)]
+    bad = gates / "WO-003-GATE.md"
+    bad.write_text(AV224_VERDICT.format(wo="WO-003", order="WO-002-app.md", head="deadbeef0"), encoding="utf-8")
+    expect("after-verdict: a candidate that is not a commit is NOT_CHECKED", "gate_check.py", 0, "--after-verdict", bad,
+           "--repo", repo, says=["NOT_CHECKED after-verdict", "~ NOT_CHECKED", "deadbeef0 is not a commit"])
+    expect("after-verdict: needs --repo", "gate_check.py", 2, "--after-verdict", verdict,
+           says=None)
+    expect("after-verdict: a missing verdict file fails", "gate_check.py", 1, "--after-verdict", folder / "nope.md",
+           "--repo", repo, says="file not found")
+    expect("after-verdict: --strict alone is still refused", "gate_check.py", 2, "--verdict", verdict, "--strict")
+    expect("after-verdict: --orders needs --after-verdict", "gate_check.py", 2, "--verdict", verdict, "--orders", orders)
+    total += 1
+    for name, path in (("is_document DIRECTOR", "DIRECTOR/a.json"), ("is_document md", "x/y.MD"),
+                       ("is_document backslash", "a\\DIRECTOR\\b.py")):
+        module = mutant(TOOLS / "gate_check.py", [], "gate_check_av224")
+        if module is None or not module.is_document(path):
+            failures.append(f"after-verdict: {name}: {path} is not a document")
+    if mutant(TOOLS / "gate_check.py", [], "gate_check_av224").is_document("DIRECTORY/a.py"):
+        failures.append("after-verdict: DIRECTORY/a.py counted as a document")
+    real = mutant(TOOLS / "gate_check.py", [], "gate_check_av224")
+    git("checkout", "-q", "--detach", second)
+    want = [(name, real.after_verdict([str(v) for v in paths], str(repo), None, strict)) for name, paths, strict in stages[:1]]
+    git("checkout", "-q", inside)
+    want += [(name, real.after_verdict([str(v) for v in paths], str(repo), None, strict)) for name, paths, strict in stages[1:2]]
+    git("checkout", "-q", "main")
+    want += [(name, real.after_verdict([str(v) for v in paths], str(repo), None, strict)) for name, paths, strict in stages[2:]]
+    expected = {"none": 0, "docs": 0, "late": 1, "strict": 1}
+    for name, (lines, count, _) in want:
+        total += 1
+        if count != expected[name]:
+            failures.append(f"after-verdict: after_verdict() {name} found {count} late commit(s), not {expected[name]}")
+
+    def wrong_with(module):
+        got = []
+        for head, part in ((second, stages[:1]), (inside, stages[1:2]), ("main", stages[2:])):
+            git("checkout", "-q", "--detach", head) if head != "main" else git("checkout", "-q", "main")
+            for name, paths, strict in part:
+                try:
+                    lines, count, _ = module.after_verdict([str(v) for v in paths], str(repo), None, strict)
+                except Exception as error:
+                    got.append(f"{name}: crashed {type(error).__name__}")
+                    continue
+                text = "\n".join(lines)
+                if count != expected[name] or (name == "strict") != ("~ FAIL LATE_COMMIT" in text) \
+                        or (name == "late") != ("~ WARN LATE_COMMIT" in text) \
+                        or (name in ("late", "strict")) != (f"{second[:12]} (the others lead to it)" in text and count > 0):
+                    got.append(name)
+        git("checkout", "-q", "main")
+        return got
+    if wrong_with(real):
+        failures.append(f"after-verdict: the real module is wrong at {wrong_with(real)}")
+    for name, swaps in (
+            ("no document rule", [('    return "DIRECTOR" in parts[:-1] or parts[-1].lower().endswith((".md", ".rst", ".txt"))',
+                                   '    return False')]),
+            ("no SCOPE", [("not is_document(n) and not any(rx.fullmatch(n) for rx in scope)", "not is_document(n)")]),
+            ("no strict", [("""late.append(f"  ~ {'FAIL' if strict else 'WARN'} LATE_COMMIT""",
+                            """late.append(f"  ~ {'WARN'} LATE_COMMIT""")]),
+            ("first verdict, not last", [("last = next((f for f in found if all(leads_to(o[0], f[0]) for o in found)), None)",
+                                          "last = found[-1]")]),
+            ("every commit is late", [("        if outside:\n", "        if True:\n")])):
+        module = mutant(TOOLS / "gate_check.py", swaps, f"gate_check_av224_{name.replace(' ', '_')}")
+        if module is not None:
+            killed(f"after-verdict {name}", wrong_with(module))
+
+
+
 def _write_text(path, text):
     path.write_text(text, encoding="utf-8")
     return path
@@ -4730,8 +5093,7 @@ def test_container(tmp):
     spec.loader.exec_module(doctor)
     bash = doctor.git_bash() if os.name == "nt" else shutil.which("bash")
     if not bash:
-        print("SKIP run_worker.sh --dry-run cases: no bash (Git Bash on Windows)")
-        return
+        return skip("run_worker.sh --dry-run cases", "no bash (Git Bash on Windows)")
 
     def run(*args):
         argv = [bash, (box / "run_worker.sh").as_posix(), "--dry-run", *[str(a) for a in args]]
@@ -4818,8 +5180,7 @@ def test_worker_clone(tmp):
     spec.loader.exec_module(doctor)
     bash = doctor.git_bash() if os.name == "nt" else shutil.which("bash")
     if not bash:
-        print("SKIP worker_clone.sh cases: no bash (Git Bash on Windows)")
-        return
+        return skip("worker_clone.sh cases", "no bash (Git Bash on Windows)")
 
     def git(where, *args, check_rc=True):
         done = subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "core.autocrlf=false",
@@ -4835,6 +5196,7 @@ def test_worker_clone(tmp):
     repo = folder / "repo"
     repo.mkdir()
     git(repo, "init", "-q", "-b", "main")
+    git(repo, "config", "core.longpaths", "true")  # 2.2.4: the clone's upload-pack ignores GIT_CONFIG_COUNT
     (repo / "a.txt").write_text("one\n", encoding="utf-8")
     git(repo, "add", "a.txt")
     git(repo, "commit", "-qm", "one")
@@ -4889,6 +5251,7 @@ def test_worker_clone(tmp):
 
     good = bundle("good", clone, "refs/heads/wb")
     evil = folder / "evil"
+    git(clone, "config", "core.longpaths", "true")  # 2.2.4: this clone's upload-pack ignores GIT_CONFIG_COUNT too
     git(folder, "clone", "-q", "--no-local", clone, evil)
     git(evil, "update-ref", "refs/heads/other", tip)
     git(evil, "update-ref", "refs/heads/wbx", tip)
@@ -5049,7 +5412,7 @@ def test_worker_clone(tmp):
         os.symlink(clone, alias, target_is_directory=True)
     except (OSError, NotImplementedError, AttributeError):
         alias = None
-        print("SKIP F11 symlink alias case: this OS or user cannot make symlinks")
+        skip("F11 symlink alias case", "this OS or user cannot make symlinks")
     if alias is not None:
         done = run("--clone", c, "--name", "w1", "--director", (alias / "DIRECTOR").as_posix())
         check("F11 DIRECTOR through a symlink to the clone: exit 2", done.returncode == 2 and "overlaps" in done.stderr, done.stdout + done.stderr)
@@ -5237,8 +5600,7 @@ def test_dns_allow(tmp):
     spec.loader.exec_module(doctor)
     bash = doctor.git_bash() if os.name == "nt" else shutil.which("bash")
     if not bash:
-        print("SKIP run_worker.sh allowlist cases: no bash (Git Bash on Windows)")
-        return
+        return skip("run_worker.sh allowlist cases", "no bash (Git Bash on Windows)")
     clone, director = folder / "c", folder / "D"
     (clone / ".git" / "hooks").mkdir(parents=True)
     (clone / ".git" / "config").write_text("[core]\n", encoding="utf-8")
@@ -5413,6 +5775,24 @@ def test_usage_mix(tmp):
     expect("usage_mix break-even UNKNOWN", "usage_mix.py", 0, *base, says="RESTART break-even UNKNOWN")
 
 
+def path_line(out, prefix, path, suffix):
+    """2.2.4: a status line that names a path: the whole line, or (cut to the width) the same line with the middle of the
+    path turned into "…" while the prefix, the start of the path, its file name and the suffix all stay. So a test does
+    not depend on how long TMP is, and still checks the status word and the counts at the end."""
+    path = str(path)
+    for line in out.splitlines():
+        if line == prefix + path + suffix:
+            return True
+        if not (line.startswith(prefix) and line.endswith(suffix) and len(line) > len(prefix) + len(suffix)):
+            continue
+        middle = line[len(prefix):len(line) - len(suffix)]
+        if middle.count("…") == 1:
+            head, end = middle.split("…")
+            if head and path.startswith(head) and path.endswith(end) and end.endswith(pathlib.PurePath(path).name):
+                return True
+    return False
+
+
 def test_status_gen(tmp):
     """status_gen.py writes a status.py that only reads, prints at most max_lines lines of at most width characters,
     and exits 1 on a missing path or a disk below the threshold (L-042)."""
@@ -5524,12 +5904,14 @@ def test_status_director(tmp):
         expect("status_gen director config", "status_gen.py", 0, "--out", script, "--config", conf, says="WROTE")
         done = subprocess.run([sys.executable, "-I", str(script)], capture_output=True, encoding="utf-8")
         out = done.stdout
-        want = [f"PO {d / 'PO_PENDING.md'}: answered=2, new=1", "ORDERS ", ": 2 open of 3", "  ... 1 more",
+        want = ["ORDERS ", ": 2 open of 3", "  ... 1 more",
                 ": 2 not sent", "  - [ ] to 總監: report A",
                 "AUDIT a.jsonl last 1h: lines=6 blocked=2 log_reads=2 sessions=2",
                 "AUDIT b.jsonl last 1h: lines=0 blocked=0 log_reads=0 sessions=0",
                 "PROC probe: running (1)", "PROC idle_watch: NOT RUNNING", "DISK "]
         bad = [w for w in want if w not in out]
+        if not path_line(out, "PO ", d / "PO_PENDING.md", ": answered=2, new=1"):
+            bad.append(f"PO {d / 'PO_PENDING.md'}: answered=2, new=1")
         check("status.py director sections", done.returncode == 1 and not bad and len(out.splitlines()) <= 20,
               f"exit {done.returncode}, missing {bad}: {out[-900:]}")
         check("status.py director: WO-1 is closed, notes.md is no order", "WO-1.md" not in out and "notes.md" not in out
@@ -6953,6 +7335,59 @@ def test_status_po_page_missing(tmp):
         killed(f"status PO_PAGE_MISSING {name}", wrong(swap))
 
 
+def test_status_long_path(tmp):
+    """2.2.4: status.py under a folder of 150 characters or more (a long TMP): every line still fits the width (160) and
+    keeps its end (OK, the counts, the file name), and a line without a path keeps its start and its end. A cut from
+    the end of the line (before 2.2.4) lost the status word; mutation tested on the generated script."""
+    d = tmp / "status_long"
+    while len(str(d)) < 150:
+        d = d / ("long_path_" + "p" * 30)
+    d.mkdir(parents=True)
+    check("status long path: the folder is 150 characters or more", len(str(d)) >= 150, f"{len(str(d))} characters")
+    (d / "run.log").write_text("first\n" + "x" * 300 + " END\n", encoding="utf-8")
+    (d / "out").mkdir()
+    (d / "out" / "a.png").write_bytes(b"x")
+    (d / "PO_PENDING.md").write_text("ID: OD-1\nSTATUS: answered\n", encoding="utf-8")
+    conf = _write(d / "status.json", {
+        "schema_version": 1, "name": "long", "logs": ["run.log"], "log_lines": 2, "outputs": ["out"], "disk": str(d),
+        "disk_min_gib": 0.001, "po_page": {"path": "PO_PENDING.md", "counts": [{"label": "answered",
+                                                                              "regex": r"^STATUS:\s*answered\b"}]}})
+    script = d / "status.py"
+    expect("status_gen writes the long-path script", "status_gen.py", 0, "--out", script, "--config", conf, says="WROTE")
+
+    def wrong(swap=None):
+        run = script
+        if swap:
+            source = script.read_text(encoding="utf-8")
+            if source.count(swap[0]) != 1:
+                return [f"anchor {swap[0]!r} not found once"]
+            run = d / "mutant.py"
+            run.write_text(source.replace(*swap), encoding="utf-8")
+        done = subprocess.run([sys.executable, "-I", str(run)], capture_output=True, encoding="utf-8")
+        out, lines = done.stdout, done.stdout.splitlines()
+        bad = [f"exit {done.returncode}"] if done.returncode != 0 else []
+        bad += [f"{len(x)} characters: {x}" for x in lines if len(x) > 160]
+        for start, end in (("DISK ", " OK"), ("OUT ", ": 1 files, newest 1"), ("LOG ", " ago)"), ("  xxx", "x END")):
+            if not any(x.startswith(start) and x.endswith(end) for x in lines):
+                bad.append(f"no line {start}...{end}")
+        if not any(x.startswith("LOG ") and "run.log (" in x for x in lines):
+            bad.append("LOG line lost the file name")
+        if not path_line(out, "PO ", d / "PO_PENDING.md", ": answered=1"):
+            bad.append("PO line")
+        if not path_line(out, "~ PO_PAGE_MISSING: ", d / "DIRECTOR_STATE.md",
+                         " has no PO_PAGE_URL line; publish and pin the PO page (BOOTSTRAP step 6)"):
+            bad.append("PO_PAGE_MISSING line")
+        return bad + ([out[-600:]] if bad else [])
+
+    bad = wrong()
+    check("status.py under a long path keeps every line's end within the width", not bad, str(bad))
+    for name, swap in [("cut from the end of the line", ('    out.append(fit(str(text), CONFIG["width"]))\n',
+                                                         '    out.append(str(text)[:CONFIG["width"]])\n')),
+                       ("a line without a path cut from its end",
+                        ('    return text[:head] + "…" + text[len(text) - (width - 1 - head):]\n', '    return text[:width]\n'))]:
+        killed(f"status long path: {name}", wrong(swap))
+
+
 def _write(path, data):
     path.write_text(json.dumps(data), encoding="utf-8")
     return path
@@ -8186,6 +8621,7 @@ def rel_origin(tmp, name):
     base = tmp / name
     base.mkdir(parents=True)
     rel_git(base, "init", "-q", "--bare", "-b", "main", "origin.git")
+    rel_git(base / "origin.git", "config", "core.longpaths", "true")  # 2.2.4: a local remote ignores GIT_CONFIG_COUNT
     origin = base / "origin.git"
     seed = rel_clone(origin, base / "seed")
     rel_write((seed / "a.txt"), "base\n")
@@ -8359,6 +8795,7 @@ def test_base_ref_222(tmp):
     base = tmp / "base_ref_222"
     base.mkdir(parents=True)
     rel_git(base, "init", "-q", "--bare", "-b", "main", "origin.git")
+    rel_git(base / "origin.git", "config", "core.longpaths", "true")  # 2.2.4: a local remote ignores GIT_CONFIG_COUNT
     proj = rel_clone(base / "origin.git", base / "proj")
     rel_write((proj / "src.txt"), "x\n")
     rel_git(proj, "add", "-A")
@@ -8500,6 +8937,7 @@ def main():
         guarded(test_setup_check, tmp)
         guarded(test_setup_check_221, tmp)
         guarded(test_status_po_page_missing, tmp)
+        guarded(test_status_long_path, tmp)
         guarded(test_audit_mask_tree, tmp)
         guarded(test_mask_leaks_v22)
         guarded(test_audit_recover, tmp)
@@ -8519,12 +8957,14 @@ def main():
         guarded(test_release_222, tmp)
         guarded(test_base_ref_222, tmp)
         guarded(test_report_vs_audit_223, tmp)
+        guarded(test_report_vs_audit_224, tmp)
+        guarded(test_after_verdict_224, tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     for failure in failures:
         print(f"FAIL {failure}")
-    note = f"; skipped {len(skipped)} git group(s), see SKIP lines" if skipped else ""
-    print(f"selftest: {total - len(failures)}/{total} passed{note}")
+    note = ", see SKIP lines" if skipped else ""  # 2.2.4: every SKIP counted on its own, never inside passed
+    print(f"selftest: {total - len(failures)}/{total} passed; skipped={len(skipped)}{note}")
     return 1 if failures else 0
 
 
