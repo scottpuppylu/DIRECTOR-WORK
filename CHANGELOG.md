@@ -6,6 +6,56 @@
 - **MINOR**：新增規則、文件、工具或選項，舊檔案照樣通過。
 - **PATCH**：修正文字、修 bug，規則不變。
 
+## 2.2.2 — 2026-11-14
+
+PATCH（版本號照 PO 指定；PO 2026-11-14：要改的一次在 2.2.2 改完）：RESUME_STATE 太大的問題（量測、shadow 檢查、原文搬移工具），從 DeepSeek 版 ds.3 移植的 `release.py` 和工單 BASE_REF 新鮮度檢查。新工具和選項照定義算 MINOR，PO 指定版本號，所以標 PATCH。新檢查全部先 shadow（只印 `~` 提示，exit code 不變），加 `--strict` / `--strict-base` 才判不過。舊檔案、舊指令照樣能用。
+
+### RESUME_STATE 大小（shadow）與 resume_archive.py
+
+- 問題：RESUME_STATE 每次續接都整份讀，表頭 `Before:` 鏈越接越長。實測一份 115,026 bytes（約 57,513 token），最長一行 32,699 bytes。
+- `memory_size_check.py --kind resume`：一次量多份（`--file` 多次、`--glob`、`--workstreams <ACTIVE_WORKSTREAMS.md>`），每檔一行，含 token 估計、最長行、`movable`（resume_archive 會搬走的量）；最後一行 `SIZE: PASS|OVER|MISSING`。上限 20480 bytes、單行 4096（`director_work.json` 的 `resume.max_bytes`、`resume.max_line_bytes`）。只讀。單檔舊用法輸出不變。
+- `gate_check.py --resume`：超過時印 `~ shadow: RESUME_SIZE ...`，exit code 不變；`--strict` 才判不過；`--config` 讀上限。
+- `setup_check.py`：RESUME_STATE 表頭檢查加大小（shadow）；`director_work.json` 多查 `resume`、`base_ref`、`release` 三個區塊的型別。
+- 新 `tools/resume_archive.py`：「壓縮」只代表原文搬移，搬到同資料夾 `RESUME_HISTORY_<YYYYMMDD>.md`，原處留索引（日期、歷史檔、sha256）。近期只看筆數（`resume.keep_recent`，預設 10），不看天數；四行表頭仍是四行，`Before:` 鏈保留現況和最新 10 筆，只搬更舊的尾段；現況（`UPDATED:` 段）、標題含 `resume.protect_headings` 字的段落、沒有完整日期的段落都不動。順序或筆數看不清就不搬，印 shadow 提示。預設 dry-run；`--execute` 先寫 `.bak`，搬完驗三項：(a) 歷史檔逐字含搬走的內容 (b) 留下的部分 sha256 不變 (c) 放回去等於原檔（逐 byte），任一項不過就還原並 exit 1。
+- 文件：`docs/06` 的 gate_check 那一行加一句（每輪必讀沒有變長，見「數字」）；細節在 `docs/06b`（需要時才讀）和 `tools/README.md`；`templates/RESUME_STATE.md` 註明上限。
+- 只由各工作線自己跑 resume_archive（總監巡查時用 memory_size_check 量），不是每輪步驟。
+
+### 新 tools/release.py（從 DeepSeek 版 ds.3 移植）
+
+- 發版一次做完：fetch → 工作樹檢查 → 比對遠端主線（落後停；分岔停，或 `--merge` 另開 `release/<版本>`，dry run 用 merge-tree 預測衝突）→ 版本（VERSION＝CHANGELOG 第一段；tag 不在遠端或已指向 HEAD；排序高於遠端所有 tag；`-<label>.N` 序號只會變大）→ selftest → 公開掃描 → push（不 force）→ annotated tag → `gh release create --latest --verify-tag`。每步用 ls-remote / `gh release view` 驗；重跑時做過的步驟印 `SKIP`。
+- 預設 dry run，只有 `--execute` 動遠端。selftest 指令是 `python -I -X utf8 tools/selftest.py`。DSH／ds 專屬部分拿掉；DS 版沒有 OpenSpec／SDD 的部分（已查），本版也不放。
+- bug 修正（移植時發現）：DS 版從工作樹讀 VERSION 和 CHANGELOG，tag 卻打在 HEAD，兩者可能不一樣。2.2.2 一律用 `git show HEAD:...` 讀；追蹤中的檔案改了沒 commit（含 staged）時 dry run 也停在 `STEP FAIL: worktree`，印出檔名（VERSION 改了會印工作樹和 HEAD 各是哪一版）和 `NEXT:`（commit 或還原）。未追蹤的檔不算。
+- 公開掃描 `<remote>/<branch>..HEAD`：私人路徑（`DIRECTOR/`、`CLAUDE.local.md`、`.claude/settings.local.json`、Claude session 紀錄）、新增行（`secret_mask.py` 的秘密格式、像真值的 `key = value`、noreply 和 `*.invalid` 以外的 email、使用者路徑）、commit 訊息、作者／提交者 email。秘密值只印種類，不印內容。PATH 上有 gitleaks 也一起跑。
+- 設定：`director_work.json` 的 `"release"`（`remote`、`branch`、`title`、`tag_message`、`selftest`、`gh_repo`）；不認得的鍵直接拒絕。
+- 只在發版時跑。push、tag、Release 仍要 PO 核准（`docs/08`）。本版 v2.2.2 就是用它發的（PR → CI 全綠 → merge → 在 merge 後的 main 跑）。
+
+### gate_check --order：BASE_REF 新鮮度（從 ds.3 移植，WARN）
+
+- 在 `--repo`（預設是工單所在資料夾）先 `git fetch`，再拿 BASE_REF 的 commit 比遠端分支：一樣印 `~ BASE_REF <commit> = origin/main (fetched now)`；落後或 commit 不存在印 `~ WARN BASE_REF: ...`，exit code 不變；`--strict-base` 或 `"base_ref": {"strict": true}` 才判不過。
+- fetch 失敗、資料夾不是 git checkout、沒有 remote：印 `not compared with the remote: ...`，不會默默當作通過。
+- 開關 `director_work.json` 的 `"base_ref"`（`check`、`fetch`、`strict`）。`templates/WORK_ORDER.md` 的 BASE_REF 註解改成「開工前先 git fetch，寫 fetch 後的最新 commit」；`docs/02` 加 BASE_REF 和發版兩段。
+- 只在派工時跑（總監檢查工單），不是每輪步驟。
+
+### 遷移
+
+- 不用遷移。新檢查都是 shadow / WARN。
+- 想讓 RESUME_STATE 大小或 BASE_REF 落後判不過：`gate_check.py --resume --strict`、`gate_check.py --order --strict-base`，或在 `director_work.json` 設 `"base_ref": {"strict": true}`。
+- 已經很大的 RESUME_STATE：先 `resume_archive.py <檔>` 看 dry-run，再 `--execute`。
+- `director_work.json` 的 `"release"` 區塊寫錯鍵，`release.py` 會拒絕（exit 2）；`setup_check.py` 也會報。
+
+### 數字
+
+- 每輪必讀（`docs/01`、`03`、`06`、`08`）：9,549 → 9,548 bytes（少 1 byte）。PO 2026-11-14：額外花的額度不能比省下的多；本版沒有新增每輪必讀的檔案或步驟。release.py 只在發版時跑，BASE_REF 只在派工時跑，resume_archive 只由各工作線自己跑。
+- A5 實測（一份 115,026 bytes 的 RESUME_STATE 複本，keep_recent 10）：115,026 → 57,472 bytes，每次續接少讀 57,554 bytes（約 28,777 token，以 bytes / 2 估計，少 50.0%）。19 段、60,162 bytes 原文搬到歷史檔；四行表頭各保留現況和最新 10 筆 `Before:`，(a)(b)(c) 驗證和另寫的獨立檢查都通過。剩下 57,472 bytes 是現況、未結和沒日期的段落，照規則不動，由總監人工判斷。
+- `selftest.py`：2.2.1 的 2,391 項 → 本版 2,499 項（+108：RESUME 大小與 resume_archive、release.py、BASE_REF、setup_check 設定鍵，以及本段 CHANGELOG 的對齊初衷檢查），全過。
+
+對齊初衷：
+1. 幫到誰：每次續接都要整份讀 RESUME_STATE 的 session（實測少讀一半）、派工的總監（從舊 commit 開工會先看到 WARN）、發版的人（從 HEAD 發、不會把沒 commit 的版本號打成 tag）。依據：PO 2026-11-14 指示、WO-DW-222、DeepSeek 版 ds.3。
+2. Desktop：都是本機命令列工具，Desktop Code 分頁的 session 照常用；release.py 需要 git 和 gh。
+3. 服務：初衷 4（中斷不丟進度）：搬移是原文、可逐 byte 還原；初衷 5（成品要真的對）：發版從 HEAD、每步驗證；初衷 7（零成本）：只用標準庫，額外額度小於省下的。
+4. 核心：每輪必讀沒有變長；新檢查先 shadow / WARN。
+5. 舊檔案和舊指令：照樣能用；`memory_size_check` 單檔用法輸出不變。
+
 ## 2.2.1 — 2026-11-14
 
 PATCH（版本號照 PO 指定）：依 DeepSeek 版與 2.2.0 的比較報告 A 節，修 `report_vs_audit` 的截斷 bug，`setup_check` 多查三個檔案（shadow），新增從 transcript 重建動作紀錄的工具。照上面的定義，新增工具和選項（`transcript_audit.py`、`setup_check --strict`）本來算 MINOR；PO 指定這版叫 2.2.1，所以仍標 PATCH。新工具只是加上去，舊檔案、舊指令都不受影響。舊檔案、舊紀錄照樣能讀；結果會變的只有 `report_vs_audit` 原本判錯的幾類（下面）。

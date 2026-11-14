@@ -13,6 +13,7 @@
 
 - 一律落檔：`DIRECTOR/orders/WO-<編號>-<短名>.md`，格式見 `templates/WORK_ORDER.md`。訊息只附路徑、一句摘要和必要的決定。
 - 必填：`PRIMARY_WORKER / MODEL / EFFORT / FALLBACK / GOVERNANCE / BASE_REF / SCOPE / FORBIDDEN / ACCEPTANCE / DELIVERABLES / STOP_RULES`。
+- BASE_REF 寫 `origin/main @ <commit>`：派工前先 `git fetch`，填 fetch 後遠端分支的最新 commit（2.2.2）。`gate_check.py --order <工單> --repo <專案>` 會自己 fetch 再比：commit 不存在或落後遠端時印 `~ WARN BASE_REF`，加 `--strict-base` 判不過；fetch 失敗或不是 git checkout 會印「not compared with the remote」，不當作通過。故意從舊版開工就在工單寫明理由。開關在 `director_work.json` 的 `"base_ref"`（`check`、`fetch`、`strict`，預設 true／true／false）。
 - 內容分段：A 背景、B 目標（MUST / OPTIONAL / OUT OF SCOPE，加上 SCOPE / FORBIDDEN 路徑清單）、C 執行前檢查、D 實作要求、E 驗收條件、F 安全與版控、G 完成定義。
 - 驗收條件每項有：ID、類型、要求、驗證方法、預期。結果（實際、證據、狀態）寫在 TASK REPORT 的 ACCEPTANCE 表，不寫回工單。Mock 和單元測試不能當成真實環境的驗收。
 - 類型 `AUTO / REVIEW / PO`：
@@ -58,6 +59,12 @@
   - 要正式綁定時，寫 `PO_ACCEPTANCE.json`（schema `po-acceptance-v1`：candidate_id、commit、entry、manifest_sha256、offered_message_ref；有回覆時再加 reply_ref 和 outcome）。用 `gate_check.py --po-acceptance 檔 [--candidate <40 位>]` 檢查，少綁一項就印 `~ UNBOUND_PO_REPLY`。
   - 2.2 起還要能核對成品本身：再寫 `entry_sha256` 和 `manifest`（manifest 檔的路徑），檔案放在驗收紀錄檔旁邊（或用 `--artifact-root` 指定）。檔不見、內容變了、一則回覆用在兩份成品，都算綁不到；沒寫這兩欄的舊紀錄顯示「成品待核對」。同一 commit 有多份成品時，報告寫 `CANDIDATE_ID:` 指定是哪一份。
   - 裁決可以選填 `ORDER_SHA256:` 和 `REPORT_SHA256:`。之後檔案被改，`--match` 會印 `~ VERDICT_RECORD`。
+
+### 發版（2.2.2）
+
+- 用 `tools/release.py`：先 dry run，乾淨再加 `--execute`。它從 HEAD 讀 VERSION 和 CHANGELOG，工作樹有沒 commit 的改動就停並印下一步；遠端主線比本機新就停（落後），分岔要 `--merge` 另開 `release/<版本>`；selftest 和公開掃描（金鑰、私人 email、使用者路徑、私人檔案）過了才 push、打 annotated tag、建 GitHub Release（Latest），每步用 ls-remote／`gh release view` 驗。細節見 `tools/README.md`。
+- 有 PR 和 CI 時照順序：PR → CI 全綠 → merge → 在 merge 後的主線 commit（例如 `git switch --detach origin/main`）跑 `release.py`，這時 push 是 SKIP，只打 tag 和建 Release。CI 沒全綠不發版。
+- push、tag、Release 都要 PO 核准（`docs/08`）；release.py 不代替核准。
 
 ### 重資源排程（有總管時）
 

@@ -24,10 +24,15 @@ step 6, director_work.json at step 7):
                       OPTIONS and RECOMMENDED are filled in; SOURCE is filled in or NONE; answered / closed needs a real
                       ANSWER; an ID is used once
   RESUME_STATE.md     the four header lines PROGRESS / DOING / NEXT_STEP / COMMS first, in this order, filled in, and
-                      UPDATED with a date (the same rule as `gate_check.py --resume`)
+                      UPDATED with a date (the same rule as `gate_check.py --resume`); 2.2.2: the file is at most
+                      resume.max_bytes (20480) and no line over resume.max_line_bytes (4096), RESUME_SIZE otherwise
   director_work.json  a JSON object; schema_version 1 (or left out); window 100000-1000000; mode general / beginner;
                       plugins_off name@marketplace; guard_profile / guard_mode known values; the *_pattern keys valid
-                      regular expressions; the other known keys of the right type (an unknown key is a note)
+                      regular expressions; 2.2.2 resume: an object, max_bytes / max_line_bytes / keep_recent whole
+                      numbers above 0, protect_headings a list of non-empty strings; base_ref: an object,
+                      check / fetch / strict true or false (gate_check --order); release: an object, remote / branch /
+                      title / tag_message / selftest strings, gh_repo owner/name or null (release.py); the other
+                      known keys of the right type (an unknown key is a note)
 These start in shadow mode: what they find is printed as `  ~ shadow: ...` and the exit code stays what the PO page
 check gives. --strict turns them into `  - problem` lines that fail.
 
@@ -56,8 +61,12 @@ CONFIG_STRINGS = ("backup_dir", "protect_director", "director_worktree", "sessio
 CONFIG_LISTS = ("skip_worktrees", "po_pending_files")
 CONFIG_BOOLS = ("hooks", "runtime_guard", "guard_review")
 CONFIG_PATTERNS = ("trace_id_pattern", "po_item_pattern", "po_open_pattern")
-CONFIG_KEYS = (("schema_version", "mode", "window", "plugins_off", "guard_profile", "guard_mode") + CONFIG_STRINGS
+CONFIG_KEYS = (("schema_version", "mode", "window", "plugins_off", "guard_profile", "guard_mode", "resume", "base_ref",
+                "release") + CONFIG_STRINGS
                + CONFIG_LISTS + CONFIG_BOOLS + CONFIG_PATTERNS)
+RESUME_KEYS = ("max_bytes", "max_line_bytes", "keep_recent", "protect_headings")
+BASE_REF_KEYS = ("check", "fetch", "strict")  # 2.2.2: gate_check --order BASE_REF freshness
+RELEASE_KEYS = ("remote", "branch", "title", "tag_message", "selftest", "gh_repo")  # 2.2.2: release.py
 
 
 def filled(name, value, problems):
@@ -181,6 +190,14 @@ def check_resume_header(text, notes):
     return [f"RESUME_STATE: {problem}" for problem in neighbour("gate_check").check_resume(text, notes)]
 
 
+def check_resume_size(path, notes):
+    """2.2.2: RESUME_STATE.md over resume.max_bytes / max_line_bytes (gate_check's rule, limits from director_work.json
+    beside it, else 20480 / 4096)."""
+    gate = neighbour("gate_check")
+    size = gate.resume_size(path.read_bytes(), *gate.resume_limits_for(path, None, notes))
+    return [f"RESUME_STATE: {size}"] if size else []
+
+
 def pattern_problem(key, value):
     if not isinstance(value, str):
         return f"{key}: a string (a regular expression), got {type(value).__name__}"
@@ -236,6 +253,42 @@ def check_config(text, notes):
     for key in CONFIG_PATTERNS:
         if data.get(key) is not None and pattern_problem(key, data[key]):
             say(pattern_problem(key, data[key]))
+    if "resume" in data:  # 2.2.2: the RESUME_STATE size and resume_archive.py settings (memory_size_check holds the rule)
+        found = []
+        neighbour("memory_size_check").resume_settings(data, found)
+        problems += [note.rsplit("; ", 1)[0] for note in found]
+        if isinstance(data["resume"], dict):
+            odd = sorted(k for k in data["resume"] if k not in RESUME_KEYS and not k.startswith("_"))
+            if odd:
+                notes.append(f"director_work.json: resume keys no tool reads: {', '.join(odd)} (a typo?)")
+    if "base_ref" in data:  # 2.2.2: gate_check --order reads these switches
+        block = data["base_ref"]
+        if not isinstance(block, dict):
+            say(f"base_ref: an object with check / fetch / strict, got {block!r}")
+        else:
+            for key, value in block.items():
+                if key.startswith("_"):
+                    continue
+                if key not in BASE_REF_KEYS:
+                    notes.append(f"director_work.json: base_ref key no tool reads: {key} (a typo?)")
+                elif not isinstance(value, bool):
+                    say(f"base_ref.{key}: true or false, got {value!r}")
+    if "release" in data:  # 2.2.2: release.py refuses an unknown key, so it is a problem here too
+        block = data["release"]
+        if not isinstance(block, dict):
+            say(f"release: an object, got {block!r}")
+        else:
+            for key, value in block.items():
+                if key.startswith("_"):
+                    continue
+                if key not in RELEASE_KEYS:
+                    say(f"release.{key}: release.py does not read it and refuses the config "
+                        f"(keys: {', '.join(RELEASE_KEYS)})")
+                elif key == "gh_repo":
+                    if value is not None and not (isinstance(value, str) and re.fullmatch(r"[\w.-]+/[\w.-]+", value)):
+                        say(f"release.gh_repo: owner/name or null, got {value!r}")
+                elif value is not None and not (isinstance(value, str) and value.strip()):
+                    say(f"release.{key}: a non-empty string, got {value!r}")
     unknown = sorted(k for k in data if k not in CONFIG_KEYS and not k.startswith("_"))
     if unknown:
         notes.append(f"director_work.json: keys no tool reads: {', '.join(unknown)} (a typo?)")
@@ -260,6 +313,8 @@ def check_neighbours(folder, notes):
             problems.append(f"{name}: cannot read ({error.__class__.__name__})")
             continue
         problems += check(text, notes)
+        if name == "RESUME_STATE.md":
+            problems += check_resume_size(path, notes)
     if missing:
         notes.append(f"not checked, not there yet: {', '.join(missing)}")
     return problems

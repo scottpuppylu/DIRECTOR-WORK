@@ -6,12 +6,21 @@ which writes one snapshot file.
 Passing means the file follows the format and the rules below. It does not mean the work is correct: reviewing the
 evidence and the product is still the Director's job (docs/02, docs/07).
 
-  --resume   the four header lines come first, in order, filled in; UPDATED holds a date
+  --resume   the four header lines come first, in order, filled in; UPDATED holds a date.
+             2.2.2 (shadow): a file over resume.max_bytes (default 20480) or with a line over resume.max_line_bytes
+             (default 4096) gets `~ shadow: RESUME_SIZE <bytes> ... ~<tokens> tokens, longest line <n>: <bytes>`; the
+             exit code stays the same, --strict makes it fail. The limits come from --config director_work.json, else
+             a director_work.json beside the file, else the defaults (memory_size_check.py holds the rule)
   --order    required fields filled in; SCOPE / FORBIDDEN are concrete path lists; acceptance rows are concrete;
              an optional `CHECKS:` list holds one `- AC-n: ["program", "arg"]` line (JSON array of strings) per AUTO
              criterion: the check the Director approves, locked by the dispatch hash. A Strict order with an AUTO
              criterion and no check is noted. An optional `REQUIRED_CHANGES:` list (globs the work must change, read
-             by scope_check.py) must lie inside SCOPE and outside FORBIDDEN, or the order cannot be done
+             by scope_check.py) must lie inside SCOPE and outside FORBIDDEN, or the order cannot be done.
+             2.2.2: BASE_REF freshness. The BASE_REF commit is compared with its remote branch after a git fetch in
+             --repo (default: the order's folder): a commit that is missing or behind prints `~ WARN BASE_REF ...`,
+             --strict-base makes it fail. A fetch that fails, or a folder that is not a git checkout, says it did not
+             compare (never a silent pass). Switches: "base_ref" {"check", "fetch", "strict"} in --config, else the
+             director_work.json in the order's folder or the one above it
   --report   required fields filled in; RESULT in the vocabulary; PASS is refused with NOT_RUN tests or a scope violation
   --test-request
              every field of templates/TEST_REQUEST.md filled; BUILD_GB, CACHE_GB and WRITE_GB in GiB, not GB;
@@ -907,6 +916,41 @@ def check_resume(text, notes):
     return problems
 
 
+def size_tool():
+    """memory_size_check.py from this folder: one source for the size rule (2.2.2)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("gate_check_memory_size",
+                                                  pathlib.Path(__file__).resolve().parent / "memory_size_check.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def resume_size(raw, max_bytes=None, max_line_bytes=None):
+    """2.2.2: `RESUME_SIZE ...` when a RESUME_STATE's bytes are over the limits (default 20480 bytes, lines 4096 bytes:
+    docs/06; every resume reads the whole file), else None. Shadow unless --strict."""
+    tool = size_tool()
+    default_bytes, default_line = tool.LIMITS["resume"]
+    max_bytes = default_bytes if max_bytes is None else max_bytes
+    max_line_bytes = default_line if max_line_bytes is None else max_line_bytes
+    facts = tool.measure(raw)
+    over = tool.over_limits(facts, max_bytes, max_line_bytes)
+    if not over:
+        return None
+    return (f"RESUME_SIZE {facts['bytes']} bytes (limit {max_bytes}), ~{facts['tokens']} tokens, longest line "
+            f"{facts['longest_line']}: {facts['longest_bytes']} bytes (limit {max_line_bytes}); over: {', '.join(over)}; "
+            "move old sections word for word to RESUME_HISTORY_<YYYYMMDD>.md beside it: resume_archive.py, dry-run "
+            "first (docs/06)")
+
+
+def resume_limits_for(path, config, notes):
+    """The limits for one RESUME_STATE: --config, else director_work.json beside the file, else the defaults."""
+    found = pathlib.Path(config) if config else pathlib.Path(path).resolve().parent / "director_work.json"
+    if not config and not found.is_file():
+        return None, None
+    return size_tool().config_limits(found, notes)
+
+
 def check_order(text, notes):
     problems = []
     for key in ORDER_FIELDS:
@@ -1521,6 +1565,117 @@ def dated(kind, text):
     return m.group(m.lastindex or 0) if m else None
 
 
+BASE_DEFAULTS = {"check": True, "fetch": True, "strict": False}
+BASE_SHA = re.compile(r"(?:(?P<ref>[\w./-]+)\s*@\s*)?\b(?P<sha>[0-9a-fA-F]{7,40})\b")
+
+
+def base_config(order_path, config_path, notes):
+    """2.2.2: the "base_ref" switches: --config, else director_work.json in the order's folder or the one above it
+    (DIRECTOR/orders/WO.md -> DIRECTOR/director_work.json). A switch that is not true / false is a note, default kept."""
+    config = dict(BASE_DEFAULTS)
+    folder = pathlib.Path(order_path).resolve().parent
+    found = [pathlib.Path(config_path)] if config_path else [f / "director_work.json" for f in (folder, folder.parent)]
+    path = next((f for f in found if f.is_file()), None)
+    if path is None:
+        return config
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as error:
+        notes.append(f"{path.name}: cannot read ({error}); base_ref defaults used")
+        return config
+    block = data.get("base_ref") if isinstance(data, dict) else None
+    if block is None:
+        return config
+    if not isinstance(block, dict):
+        notes.append(f"{path.name} base_ref: an object with check / fetch / strict, got {block!r}; defaults used")
+        return config
+    for key, value in block.items():
+        if key.startswith("_"):
+            continue
+        if key not in BASE_DEFAULTS:
+            notes.append(f"{path.name} base_ref.{key}: not a key this check reads (check, fetch, strict)")
+        elif not isinstance(value, bool):
+            notes.append(f"{path.name} base_ref.{key}: true or false, got {value!r}; {str(BASE_DEFAULTS[key]).lower()} used")
+        else:
+            config[key] = value
+    return config
+
+
+def base_git(repo, *args, timeout=120):
+    import subprocess
+    try:
+        proc = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return 1, str(error)
+    return proc.returncode, (proc.stdout if proc.returncode == 0 else (proc.stderr or proc.stdout)).strip()
+
+
+def base_ref_problems(order_text, repo, config, notes, fetched):
+    """2.2.2 (ported from the DeepSeek port's ds.3): is the order's BASE_REF commit still the tip of its remote branch?
+    A commit that is missing or behind is a `WARN BASE_REF` note, a problem with --strict-base ("strict"). A fetch
+    that fails, or a folder that is not a git checkout, says it did not compare: never a silent pass.
+    fetched caches one fetch per repository and remote for the whole run."""
+    if not config["check"]:
+        return []
+    m = re.search(r"^[ \t]*BASE_REF[ \t]*=[ \t]*(.*)$", order_text, re.M)
+    value = re.split(r"\s+#", m.group(1))[0].strip() if m else ""  # a trailing ` # comment` is not the ref
+    found = BASE_SHA.search(value)
+    if not found:  # no commit named (e.g. `main @ <placeholder>`): nothing to compare, and no note (older orders unchanged)
+        return []
+    problems = []
+
+    def warn(message):
+        (problems if config["strict"] else notes).append(("" if config["strict"] else "WARN ") + "BASE_REF: " + message)
+        return problems
+
+    sha, ref = found.group("sha").lower(), found.group("ref") or ""
+    code, top = base_git(repo, "rev-parse", "--show-toplevel")
+    if code:
+        return warn(f"not compared with the remote: {repo} is not a git checkout (give --repo <project checkout>)")
+    code, remotes = base_git(repo, "remote")
+    remotes = remotes.split() if not code else []
+    remote, branch = None, None
+    if "/" in ref and ref.split("/", 1)[0] in remotes:
+        remote, branch = ref.split("/", 1)
+    elif remotes:
+        remote = "origin" if "origin" in remotes else remotes[0]
+        branch = ref if ref and "/" not in ref else None
+    if not remote:
+        return warn("not compared with the remote: the repository has no remote")
+    if config["fetch"]:
+        key = (top, remote)
+        if key not in fetched:
+            fetched[key] = base_git(repo, "fetch", "--quiet", remote)
+        code, message = fetched[key]
+        if code:
+            return warn(f"not compared with the remote: git fetch {remote} failed "
+                        f"({message.splitlines()[-1][:200] if message else code})")
+    else:
+        notes.append(f"BASE_REF: compared with the local copy of {remote} (\"base_ref\": {{\"fetch\": false}}); not fetched")
+    if not branch:
+        code, head = base_git(repo, "symbolic-ref", "--short", f"refs/remotes/{remote}/HEAD")
+        branch = head.split("/", 1)[1] if not code and "/" in head else "main"
+    tip_ref = f"{remote}/{branch}"
+    code, tip = base_git(repo, "rev-parse", "--verify", "-q", tip_ref + "^{commit}")
+    if code:
+        return warn(f"not compared with the remote: {tip_ref} does not exist")
+    code, full = base_git(repo, "rev-parse", "--verify", "-q", sha + "^{commit}")
+    if code:
+        return warn(f"commit {sha} does not exist in {top}" + (" (even after fetching)" if config["fetch"] else ""))
+    if full == tip:
+        notes.append(f"BASE_REF {sha} = {tip_ref} ({'fetched now' if config['fetch'] else 'local copy'})")
+        return []
+    code, behind = base_git(repo, "rev-list", "--count", f"{full}..{tip}")
+    code2, ahead = base_git(repo, "rev-list", "--count", f"{tip}..{full}")
+    behind, ahead = int(behind or 0) if not code else 0, int(ahead or 0) if not code2 else 0
+    if behind:
+        return warn(f"{sha} is {behind} commit(s) behind {tip_ref} ({tip[:10]})" + (f" and {ahead} ahead" if ahead else "")
+                    + f"; start the work from {tip_ref} (git fetch, then a branch from it) or write in the order why not")
+    notes.append(f"BASE_REF {sha} is {ahead} commit(s) ahead of {tip_ref} (not pushed yet); not stale")
+    return []
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     for kind in CHECKS:
@@ -1532,13 +1687,21 @@ def main():
     ap.add_argument("--hash", nargs="+", default=[], metavar="FILE", help="print the hash ORDER_SHA256 compares and the DISPATCH line")
     ap.add_argument("--preflight", nargs=2, action="append", default=[], metavar=("REPORT", "ORDER"),
                     help="list what an older review lacks for a Strict review now (LACKS lines)")
-    ap.add_argument("--repo", metavar="DIR", help="with --preflight: a trusted checkout to resolve a short HEAD in")
+    ap.add_argument("--repo", metavar="DIR", help="with --preflight: a trusted checkout to resolve a short HEAD in; "
+                    "2.2.2 with --order: the project checkout the BASE_REF is fetched and compared in (default: the "
+                    "order's folder)")
     ap.add_argument("--brief", metavar="BRIEF", help="the brief's fingerprints; with --order / --match / --preflight: "
                     "BRIEF_STALE notes (shadow)")
     ap.add_argument("--snapshot", metavar="DIR", help="with --brief or --hash: keep a snapshot in DIR (atomic write)")
     ap.add_argument("--order-history", metavar="DIR", help="with --match: old orders, found by hash, for carried-over evidence")
     ap.add_argument("--artifact-root", metavar="DIR", help="with --po-acceptance: the folder the entry and manifest paths "
                     "are read from (default: the record file's folder)")
+    ap.add_argument("--strict", action="store_true", help="2.2.2: with --resume, RESUME_SIZE fails instead of a shadow note")
+    ap.add_argument("--config", metavar="director_work.json", help="2.2.2: with --resume, read resume.max_bytes / "
+                    "resume.max_line_bytes (default: director_work.json beside the RESUME_STATE, else 20480 / 4096); "
+                    "with --order, read base_ref.check / fetch / strict")
+    ap.add_argument("--strict-base", action="store_true", help="2.2.2: with --order, a BASE_REF commit that is missing "
+                    "or behind its remote branch, or a fetch that fails, fails (default: a WARN note)")
     ap.add_argument("--warn", action="store_true", help="report problems as WARN and exit 0")
     ap.add_argument("--since", metavar="YYYY-MM-DD", help="skip files dated before this day")
     a = ap.parse_args()
@@ -1577,8 +1740,18 @@ def main():
     if not jobs and not a.preflight:
         ap.error("give at least one of --resume / --order / --report / --verdict / --test-request / --po-acceptance / "
                  "--match / --preflight / --hash / --brief")
-    if a.repo and not a.preflight:
-        ap.error("--repo works with --preflight")
+    if a.repo and not (a.preflight or a.order):
+        ap.error("--repo works with --preflight or --order")
+    if a.strict and not a.resume:
+        ap.error("--strict works with --resume")
+    if a.config and not (a.resume or a.order):
+        ap.error("--config works with --resume or --order")
+    if a.strict_base and not a.order:
+        ap.error("--strict-base works with --order")
+    if a.repo and not pathlib.Path(a.repo).is_dir():
+        ap.error(f"--repo: folder not found: {a.repo}")
+    if a.config and not pathlib.Path(a.config).is_file():
+        ap.error(f"--config: file not found: {a.config}")
     if a.since and not DATE.fullmatch(a.since):
         ap.error("--since takes a date: YYYY-MM-DD")
     if a.evidence_dir and not (a.match or a.preflight):
@@ -1609,6 +1782,7 @@ def main():
             print(f"  ~ {line}")
 
     failed = skipped = undated = 0
+    fetched = {}  # 2.2.2: one git fetch per repository and remote for the BASE_REF check
     for report_path, order_path in a.preflight:
         files = [pathlib.Path(report_path), pathlib.Path(order_path)]
         if not all(f.is_file() for f in files):
@@ -1655,6 +1829,17 @@ def main():
             problems = CHECKS[kind](text, notes)
             if kind == "verdict" and (a.match or candidate):
                 problems += verdict_binding(text, matched, candidate, notes, pairs)
+            if kind == "resume":  # 2.2.2: size, shadow unless --strict
+                size = resume_size(files[0].read_bytes(), *resume_limits_for(files[0], a.config, notes))
+                if size and a.strict:
+                    problems.append(size)
+                elif size:
+                    notes.append(f"shadow: {size}")
+            if kind == "order":  # 2.2.2: BASE_REF freshness, WARN unless --strict-base
+                base = base_config(files[0], a.config, notes)
+                base["strict"] = base["strict"] or a.strict_base
+                problems += base_ref_problems(text, pathlib.Path(a.repo) if a.repo else files[0].resolve().parent, base,
+                                              notes, fetched)
         if brief and text is not None and kind in ("order", "match"):
             brief_notes(text if kind == "order" else files[1].read_text(encoding="utf-8-sig"), files[-1], brief, notes)
         failed += bool(problems)
