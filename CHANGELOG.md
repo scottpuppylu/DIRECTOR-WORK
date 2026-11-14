@@ -47,7 +47,7 @@ PATCH（版本號照 PO 指定；PO 2026-11-14：要改的一次在 2.2.2 改完
 
 - 每輪必讀（`docs/01`、`03`、`06`、`08`）：9,549 → 9,548 bytes（少 1 byte）。PO 2026-11-14：額外花的額度不能比省下的多；本版沒有新增每輪必讀的檔案或步驟。release.py 只在發版時跑，BASE_REF 只在派工時跑，resume_archive 只由各工作線自己跑。
 - A5 實測（一份 115,026 bytes 的 RESUME_STATE 複本，keep_recent 10）：115,026 → 57,472 bytes，每次續接少讀 57,554 bytes（約 28,777 token，以 bytes / 2 估計，少 50.0%）。19 段、60,162 bytes 原文搬到歷史檔；四行表頭各保留現況和最新 10 筆 `Before:`，(a)(b)(c) 驗證和另寫的獨立檢查都通過。剩下 57,472 bytes 是現況、未結和沒日期的段落，照規則不動，由總監人工判斷。
-- `selftest.py`：2.2.1 的 2,391 項 → 本版 2,498 項（+107：RESUME 大小與 resume_archive、release.py、BASE_REF、setup_check 設定鍵），全過。
+- `selftest.py`：2.2.1 的 2,391 項 → 本版 2,499 項（+108：RESUME 大小與 resume_archive、release.py、BASE_REF、setup_check 設定鍵，以及本段 CHANGELOG 的對齊初衷檢查），全過。
 
 對齊初衷：
 1. 幫到誰：每次續接都要整份讀 RESUME_STATE 的 session（實測少讀一半）、派工的總監（從舊 commit 開工會先看到 WARN）、發版的人（從 HEAD 發、不會把沒 commit 的版本號打成 tag）。依據：PO 2026-11-14 指示、WO-DW-222、DeepSeek 版 ds.3。
