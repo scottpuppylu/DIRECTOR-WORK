@@ -3742,10 +3742,10 @@ RVA_224_CASES = [
     (".../x and ...\\x inside a word", "Bash", RVA_SCOPE224, "scope_check.py --order .../wo-9.md --repo ...\\repo", True),
     (".../x with another file", "Bash", RVA_SCOPE224, "scope_check.py --order .../wo-8.md --repo ...\\repo", False),
     ("a short hex is a prefix of the logged sha", "Bash",
-     "python tools/scope_check.py --base 98f9a89ec0aa11 --candidate 1dc08601cd04b1d6238e",
-     "scope_check.py --base 98f9a89ec0 --candidate 1dc08601cd04", True),
-    ("a short hex with another start", "Bash", "python tools/scope_check.py --base 98f9a89ec0aa11 --candidate 1dc08601cd04b1",
-     "scope_check.py --base 98f9a89ec0 --candidate 1dc08601cd05", False),
+     "python tools/scope_check.py --base a0b1c2d3e4f5a6 --candidate 5e6f7a8b9c0d1e2f3a4b",
+     "scope_check.py --base a0b1c2d3e4 --candidate 5e6f7a8b9c0d", True),
+    ("a short hex with another start", "Bash", "python tools/scope_check.py --base a0b1c2d3e4f5a6 --candidate 5e6f7a8b9c0d1e",
+     "scope_check.py --base a0b1c2d3e4 --candidate 5e6f7a8b9c0e", False),
     ("an absolute claimed path ends with the logged relative one", "Bash",
      "python DIRECTOR/tools/gate_check.py --report DIRECTOR/reports/r.md",
      "python D:/w/DIRECTOR/tools/gate_check.py --report D:/w/DIRECTOR/reports/r.md", True),
@@ -3777,7 +3777,7 @@ RVA_224_ROWS = [
      "done", "result", "ok", None),
     ("30:00", "w2", "python tools/scope_check.py --order D:/w/orders/wo-9.md --repo D:/w/repo", "result", "ok", "pwsh"),
     ("35:00", "w1", "python tools/report.py --week", "result", "ok", None),
-    ("41:00", "w1", "python tools/ledger.py --strict", "result", "ok", None)]
+    ("41:00", "w1", "python tools/books.py --strict", "result", "ok", None)]
 RVA_224_LOGS = {"main": RVA_224_ROWS,
                 "pwsh_error": RVA_224_ROWS + [("50:00", "w2", "python tools/x.py", "failure", "error", "pwsh")]}
 # (name, report body after SESSION_ID: S1, log, exit, says, lacks); run by the CLI and, for mutants, in process
@@ -3796,9 +3796,15 @@ RVA_224_RUNS = [
      ["its statements were run in separate calls, seq 4, 5", "PASS claims=1 ok=1"], []),
     ("statements in separate calls must keep their order",
      "RAN: `git status --porcelain; python -m py_compile a.py` exit=0\n", "main", 1, ["not run in session S1"], []),
-    ("a claim in the cut part of a call another claim matched",
+    ("a claim in the cut part of a call another claim matched is UNVERIFIED, not OK",
      "RAN: `build_all.py --mode full --target alpha ...` exit=0\nRAN: `python tools/lint.py --all` exit=0\n", "main", 0,
-     ["seq 6 was cut at the log's input limit", "may be in the cut part", "PASS claims=2 ok=2"], []),
+     ["UNVERIFIED command: `python tools/lint.py --all`: in log cut part: no call shows it, but seq 6 was cut at the "
+      "log's input limit", "OK   command: `build_all.py", "PASS claims=2 ok=1 failed=0", "unverified=1"],
+     ["OK   command: `python tools/lint.py"]),
+    ("a claim found in the kept part of a cut call stays OK",
+     "RAN: `python tools/build_all.py --mode full --target alpha` exit=0\n", "main", 0,
+     ["OK   command: `python tools/build_all.py --mode full --target alpha`: seq 6", "PASS claims=1 ok=1 failed=0",
+      "unverified=0"], ["UNVERIFIED"]),
     ("a cut call no other claim matched covers nothing", "RAN: `python tools/lint.py --all` exit=0\n", "main", 1,
      ["`python tools/lint.py --all`: not run in session S1"], ["may be in the cut part"]),
     ("a cut call outside at= covers nothing",
@@ -3810,7 +3816,7 @@ RVA_224_RUNS = [
     ("exit=1 on a mapped tool that does report error is checked", "RAN: `"
      + RVA_SCOPE224.replace("D:/w/tools/", "tools/") + "` exit=1\n", "pwsh_error", 1,
      ["exit=1, but the log says ok (seq 8)"], ["not checkable"]),
-    ("exit=1 on a hook-logged call is checked", "RAN: `python tools/ledger.py --strict` exit=1\n", "main", 1,
+    ("exit=1 on a hook-logged call is checked", "RAN: `python tools/books.py --strict` exit=1\n", "main", 1,
      ["exit=1, but the log says ok (seq 10)"], ["not checkable"]),
     ("AC-1 .. AC-3 with spaces is a range (a $l loop)",
      "RAN: `evidence_record.py run --label AC-1 .. AC-3 -- python -m unittest` exit=0\n", "main", 0,
@@ -3842,8 +3848,9 @@ def test_report_vs_audit_224(tmp):
     PowerShell a + b, a here-string; carried from call to call of the agent; unknown ones are any text), reads git -C
     DIR as cd DIR, "..." / "…" inside a word as any text, a short hex as a prefix, an absolute claimed path against a
     relative logged one, at=HH:MM:SS and a span, a fence opened outside RAN:, a claim whose statements were run in
-    separate calls, options in another order, AC-1 .. AC-6, ； and a word between CJK notes; a claim found nowhere in
-    the cut part of a call another claim matched is not checkable; exit on a mapped tool that never reports error is
+    separate calls, options in another order, AC-1 .. AC-6, ； and a word between CJK notes; a claim found nowhere but
+    possibly in the cut part of a call another claim matched is UNVERIFIED (its own status and count, not OK, not FAIL),
+    while a claim found in the kept part of a cut call is OK; exit on a mapped tool that never reports error is
     not checkable. Commands nobody ran stay FAIL. De-identified synthetic logs; mutation tested."""
     global total
     folder = tmp / "rva224"
@@ -3908,6 +3915,12 @@ def test_report_vs_audit_224(tmp):
             ("no separate calls", [("        parts = split_runs(claim, mine, offset, tolerance)\n",
                                     "        parts = None\n")], True),
             ("no cut cover", [("                if cover is not None:\n", "                if False:\n")], True),
+            ("cut part printed as OK", [("        if index in in_cut:\n", "        if False:\n")], True),
+            ("the kept part of a cut call is UNVERIFIED", [("        if index in in_cut:\n",
+                                                            "        if index in in_cut or any(command_of(e)[1] for e in "
+                                                            "shown):\n")], True),
+            ("UNVERIFIED not counted", [("            unverified += 1\n", "            pass\n")], True),
+            ("UNVERIFIED fails the run", [("            unverified += 1\n", "            failed += 1\n")], True),
             ("cut cover without another claim", [('    pool = [e for e in mine if e.get("seq") in anchors and',
                                                   "    pool = [e for e in mine if True and")], True),
             ("cut cover outside at=", [('            and command_of(e)[1] and (at is None or near(str(e.get("ts")), at, '

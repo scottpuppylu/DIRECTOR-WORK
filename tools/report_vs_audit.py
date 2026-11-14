@@ -42,19 +42,22 @@ the agent that ran its commands made its last commit after its last scope_check.
 agent in the session (X=v / export X=v, $x = 'v' / "v" / @'...'@ here-string, $env:X = v, set X=v) gives $X, ${X},
 $env:X and %X% their value; a variable with no value found (and a cut last word that starts with $) stands for any
 text inside its word. "git -C DIR x" is read as "cd DIR ; git x"; ； also ends a statement. Inside a word, "..." / "…"
-stands for any text (.../ledger matches d:/w/ledger, D:/.../x.py a longer path), a short hex word (7+) matches a longer
+stands for any text (.../repo matches d:/w/repo, D:/.../x.py a longer path), a short hex word (7+) matches a longer
 hex word that starts with it, an absolute claimed path matches a relative logged one it ends with, and a word between
 two CJK-only words is left out with them. at= takes HH:MM:SS and a span HH:MM–HH:MM (the span is added to the
 tolerance). A ``` fence opened before RAN: and closed after it is not a RAN block. A claim of several statements that
 no single call holds may be found statement by statement in calls in time order (OK with a note). A claim not found
-in any call is "not checkable" (OK with a note) when a call cut at the log's input limit lies within at= (any time when
-at= is not given) and another command of the same report matched that cut call: the claim may sit in its cut part. A
+in any call is UNVERIFIED (in log cut part) when a call cut at the log's input limit lies within at= (any time when
+at= is not given) and another command of the same report matched that cut call: the claim may sit in its cut part, so
+the log can neither show it ran nor show it did not. UNVERIFIED is its own status, not OK: it is counted apart
+(unverified=n) and does not change the exit code. A claim found in the part of a cut call that the log kept is OK. A
 call of a harness tool the log maps (tool_raw) whose status in this session is never error does not carry the exit
 code, so a claimed exit other than 0 is "not checkable" there.
 
-Prints OK / FAIL per claim, WARN lines, and a last line
-  REPORT_VS_AUDIT: PASS|FAIL|NONE claims=n ok=n failed=n session=ID logs=n
-exit 1 on any FAIL or a broken hash chain, 0 on PASS or NONE (no claims found), 2 when it cannot run.
+Prints OK / UNVERIFIED / FAIL per claim, WARN lines, and a last line
+  REPORT_VS_AUDIT: PASS|FAIL|NONE claims=n ok=n failed=n session=ID logs=n unverified=n
+exit 1 on any FAIL or a broken hash chain, 0 on PASS or NONE (no claims found), 2 when it cannot run. UNVERIFIED
+claims never fail the run.
 """
 import argparse
 import collections
@@ -826,15 +829,18 @@ def main(argv=None):
         results.append([[form, *check(dict(claim, command=form), mine, offset, a.tolerance_min, session)]
                         for form in forms])
     anchors = {last.get("seq") for rows in results for _, wrong, last, _ in rows if last is not None and not wrong}
-    for rows, claim in zip(results, found_claims):
+    in_cut = set()
+    for index, (rows, claim) in enumerate(zip(results, found_claims)):
         for row in rows:
             if row[2] is None:
                 cover = cut_cover(dict(claim, command=row[0]), mine, offset, a.tolerance_min, anchors)
                 if cover is not None:
-                    row[1:] = [[], cover, (f"not checkable: no call shows it, but seq {cover.get('seq')} was cut at the "
-                                           f"log's input limit and another command of this report matched it, so it "
-                                           f"may be in the cut part")]
-    for rows, claim in zip(results, found_claims):
+                    row[1:] = [[], cover, (f"no call shows it, but seq {cover.get('seq')} was cut at the log's input "
+                                           f"limit and another command of this report matched it, so it may be in the "
+                                           f"cut part; not verified")]
+                    in_cut.add(index)
+    unverified = 0
+    for index, (rows, claim) in enumerate(zip(results, found_claims)):
         label = f"{claim['kind']}: `{claim['command']}`".replace("\n", "; ")
         if not mine:
             failed += 1
@@ -852,6 +858,10 @@ def main(argv=None):
             failed += 1
             print(f"FAIL {label}: " + "; ".join(problems))
             continue
+        if index in in_cut:
+            unverified += 1
+            print(f"UNVERIFIED {label}: in log cut part: " + "; ".join(notes) + " (exit code unchanged)")
+            continue
         backing += shown
         last = shown[-1]
         print(f"OK   {label}: seq {', '.join(str(e.get('seq')) for e in shown)} at {last.get('ts')} "
@@ -863,9 +873,10 @@ def main(argv=None):
     warning = scope_warning(text, mine, backing) if mine else None
     if warning:
         print(f"WARN scope_check: {warning}")
-    ok = len(found_claims) - failed
+    ok = len(found_claims) - failed - unverified
     result = "FAIL" if failed or broken else ("NONE" if not found_claims else "PASS")
-    print(f"REPORT_VS_AUDIT: {result} claims={len(found_claims)} ok={ok} failed={failed} session={session} logs={len(a.log)}")
+    print(f"REPORT_VS_AUDIT: {result} claims={len(found_claims)} ok={ok} failed={failed} session={session} logs={len(a.log)} "
+          f"unverified={unverified}")
     return 1 if result == "FAIL" else 0
 
 

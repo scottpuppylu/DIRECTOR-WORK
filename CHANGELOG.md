@@ -16,14 +16,14 @@ PATCH（版本號照 PO 指定；PO 2026-11-14：WO-DS-006 試跑學到的修進
 - 變數先展開再比：同一呼叫或同一 agent 較早呼叫裡的指定（bash、PowerShell、here-string、`$env:`、`set`）給 `$X`、`${X}`、`$env:X`、`%X%` 值；找不到值的變數在它那個詞裡代表任意文字。
 - `git -C DIR x` 當成 `cd DIR ; git x`；全形 `；` 也分句；字中的 `...`／`…` 代表任意文字；短 hex 對完整 hex 的前綴；宣告的絕對路徑對紀錄的相對路徑；`at=HH:MM:SS` 和時間區間；`AC-1 .. AC-6` 有空格；選項換順序；`python -c` 太短時連啟動程式一起比。
 - RAN: 之前就開的 ``` 圍欄不算 RAN 區塊；多段主張可以在依時間排的幾筆呼叫裡逐段找到。
-- 被截在 500 字的呼叫：同一報告另一條指令對到它、`at=` 也在範圍內時，找不到的主張印「not checkable … may be in the cut part」（OK，附註記，不宣稱已驗證）。harness 對應的工具（pwsh）整個 session 沒有 error 狀態時，exit 不是 0 的宣告印「not checkable」。
+- 新狀態 **UNVERIFIED**（in log cut part）：主張在任何呼叫都找不到，但 `at=` 範圍內有一筆被截在 500 字的呼叫、而且同一報告另一條指令對到了它，主張可能在被截掉的那段，紀錄既證明不了有跑、也證明不了沒跑。這種主張印 `UNVERIFIED`，不算 OK、也不算 FAIL：最後一行另計 `unverified=n`，exit code 不變。審查的人要自己看這幾條。在截斷呼叫留下來的那段就對得到的主張仍是 OK。harness 對應的工具（pwsh）整個 session 沒有 error 狀態時，exit 不是 0 的宣告印「not checkable」。
 - 64 條按 21 種理由各做成去識別案例（假路徑、假 session），加上沒人跑過的對照組（仍 FAIL），寫進 selftest 並做 mutation 測試。2.2.3 的 selftest 一條沒壞。
 
 ### gate_check --after-verdict（shadow）
 
 - 問題：sdd 組在最後一份 PASS 裁決之後又 commit 了兩次程式碼（改到工單 SCOPE 外的檔），沒有再過 gate，卻沒有任何工具提醒。
 - `gate_check.py --after-verdict <裁決…> --repo <checkout> [--orders <工單資料夾>]`：取最後一份裁決的 `CANDIDATE_HEAD`，從它到 HEAD 的每個 commit，只要改到工單 SCOPE 以外、又不是文件（`DIRECTOR/` 底下或 `.md`／`.rst`／`.txt`）的檔，就印 `~ WARN LATE_COMMIT <sha> <標題>: <檔案>`。exit code 不變；`--strict` 時 FAIL。候選解不出或 HEAD 不含候選印 `NOT_CHECKED`，不當作通過。只讀。
-- 對 sdd 組試驗 repo 唯讀跑一次：抓到 813c046、9145b6d 兩個 commit（都改到 `records.py`，後者另有 `json_import.py`）；只動 OpenSpec 封存文件的 3fe9c41 不列。
+- 對 sdd 組試驗 repo 唯讀跑一次：裁決之後改到 SCOPE 外程式碼的兩個 commit 都印 WARN；只動文件的 commit 不列。
 
 ### 範本與文件
 
@@ -32,16 +32,21 @@ PATCH（版本號照 PO 指定；PO 2026-11-14：WO-DS-006 試跑學到的修進
 - `docs/05`「派工規劃」加三行：平行線在整合前至少切成一段完整功能加測試；兩條長線能同時跑就同時派；派工前估每條線的時間，同時在跑的時間不到一半就合併或重切。
 - 都只在寫工單、審規格、開 worker、派工時讀，不是每輪必讀。
 
+### 已知限制
+
+- container 執行（`container/run_worker.sh`）沒有 WORK_DIR/tmp：container 裡沒有 WORK_DIR，暫存檔規則只寫在文件和範本。
+- UNVERIFIED 的主張要人看：工具只能說「可能在截斷處」，不能判斷有沒有跑。
+
 ### 遷移
 
-- 不用遷移。`--after-verdict` 是新選項，預設 shadow；`--strict` 以前只配 `--resume`，現在也配 `--after-verdict`。
+- 不用遷移。report_vs_audit 最後一行多了 `unverified=n`（放在最後，原有欄位位置不變）；`--after-verdict` 是新選項，預設 shadow；`--strict` 以前只配 `--resume`，現在也配 `--after-verdict`。
 - 舊工單沒有「不做」「可呼叫的入口」照樣通過 `gate_check`（欄位不是工具檢查項，由規格審查看）。
 
 ### 數字
 
 - 每輪必讀（`docs/01`、`03`、`06`、`08`）：9,548 → 9,548 bytes（沒變）。本版沒有改這四份，也沒有新增每輪必讀的檔案或步驟。
-- `selftest.py`：2.2.3 的 2,551 項 → 本版 2,612 項（+61：report_vs_audit 2.2.4 案例與 mutation、`--after-verdict` 案例與 mutation、本段 CHANGELOG 的對齊初衷檢查），全過（Python 3.11 與 3.9）。
-- WO-DS-006 回歸：report_vs_audit 對三組 TASK REPORT 原樣重跑，FAIL 64 → 0（claude 8 → 0、dsh-sdd 32 → 0、dsh-nosdd 24 → 0）；去識別的對照組（沒人跑的指令）仍 FAIL。
+- `selftest.py`：2.2.3 的 2,551 項 → 本版 2,617 項（+66：report_vs_audit 2.2.4 案例與 mutation（含 UNVERIFIED 兩個案例與 4 個 mutation）、`--after-verdict` 案例與 mutation、本段 CHANGELOG 的對齊初衷檢查），全過（Python 3.11 與 3.9）。
+- WO-DS-006 回歸：report_vs_audit 對三組 TASK REPORT 原樣重跑，FAIL 64 → 0、UNVERIFIED 18（claude 8 → FAIL 0／UNVERIFIED 4、dsh-sdd 32 → 0／11、dsh-nosdd 24 → 0／3）；其餘 46 條 OK。去識別的對照組（沒人跑的指令）仍 FAIL。
 
 對齊初衷：
 1. 幫到誰：審查交件的總監（誤判不必再逐筆人工判；裁決之後偷偷再改的程式碼會被點名）、寫工單和審規格的總監（「不做」「可呼叫的入口」兩欄）、worker（暫存檔放哪裡、開工就設好）。依據：PO 2026-11-14 指示、WO-DW-224、WO-DS-006 試跑結果。

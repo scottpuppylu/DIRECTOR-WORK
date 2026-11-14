@@ -704,7 +704,7 @@ python -I -X utf8 report_vs_audit.py --report <報告.md> --log <動作紀錄.js
 - 報告裡的主張來自兩處：`RAN:` 行（`` RAN: `指令` exit=0 at=19:40 ``，exit 和 at 可省），以及 TESTS / EVIDENCE / DONE 欄位裡看起來是跑 selftest、Unity、Blender 或雜湊檢查的 `` `指令` ``（同一行的 `exit=N`；PASS、OK、通過 當成 exit 0）。
 - session 取 `--session`，沒有就取報告的 `SESSION_ID:`，再沒有就取紀錄裡唯一的 session_id；都沒有就 exit 2。
 - shell 指令比對同一個 session 的 Bash / PowerShell 紀錄（空白、引號、斜線方向不計；紀錄被截在 500 字的比前段）；`mcp__` 工具比對工具名。exit 0 要有一筆 ok，其他 exit 要有一筆 error；有 `at=` 就要在誤差內。只被 hook 擋下的會寫明。紀錄的雜湊鏈斷了印 `FAIL log: hash chain`。
-- 最後一行 `REPORT_VS_AUDIT: PASS|FAIL|NONE claims= ok= failed= session= logs=`；FAIL exit 1，不能跑 exit 2。
+- 最後一行 `REPORT_VS_AUDIT: PASS|FAIL|NONE claims= ok= failed= session= logs= unverified=`（`unverified=` 是 2.2.4 加的，放在最後）；FAIL exit 1，不能跑 exit 2。
 - 只證明「有跑、結果和報告一致」，不證明跑的內容對；動作紀錄沒有 exit code，用 ok / error 判斷。
 - 2.2.3（L-052、L-054）：
   - 換行、`;`、`&&`、`||` 把指令切成幾段（兩邊都切，每段各自去掉啟動程式），多段的主張可以對到 heredoc、跨行 `python -c`、PowerShell here-string 這類多行腳本，順序要一樣；`RAN:` 下面用 ``` 包起來的一段算一個主張，exit / at 寫在結尾的 ``` 後面（沒收尾的不算）。
@@ -714,10 +714,10 @@ python -I -X utf8 report_vs_audit.py --report <報告.md> --log <動作紀錄.js
   - 兩種 shadow WARN（exit code 不變）：`RAN:` 清單裡沒有 `` `指令` `` 的一行（沒東西可比）；報告寫 `SCOPE_CHECK: … PASS`，但跑了報告裡多數指令的那個 agent 最後一次 commit 之後沒有成功跑過 `scope_check.py`。
 - 2.2.4（WO-DS-006 試跑重跑出的 64 條誤判，去識別後做成 selftest 案例）：
   - 變數先展開再比：同一呼叫或同一 agent 較早的呼叫裡的指定（`X=v`、`export X=v`、`$x = 'v'`、here-string、`$env:X = v`、`set X=v`、PowerShell 的 `a + b`）給 `$X`、`${X}`、`$env:X`、`%X%` 值；找不到值的變數在它那個詞裡代表任意文字。
-  - `git -C DIR x` 當成 `cd DIR ; git x`；全形 `；` 也是分句。字中的 `...`／`…` 代表任意文字（`.../ledger`、`D:/.../x.py`）；7 位以上的短 hex 對到以它開頭的完整 hex；宣告的絕對路徑可以對到紀錄裡以它結尾的相對路徑；兩個中日文詞之間的詞一起略過。
+  - `git -C DIR x` 當成 `cd DIR ; git x`；全形 `；` 也是分句。字中的 `...`／`…` 代表任意文字（`.../repo`、`D:/.../x.py`）；7 位以上的短 hex 對到以它開頭的完整 hex；宣告的絕對路徑可以對到紀錄裡以它結尾的相對路徑；兩個中日文詞之間的詞一起略過。
   - `at=` 收 `HH:MM:SS` 和區間 `HH:MM–HH:MM`（區間長度加進誤差）；`AC-1 .. AC-6` 有空格也算範圍；選項順序不同（每個選項連同它的值）也算同一條指令；`python -c "..."` 去掉啟動程式後太短時連啟動程式一起比。
   - RAN: 之前就開的 ``` 圍欄不算 RAN 區塊。多段主張沒有一筆呼叫全包時，可以依時間順序在不同呼叫裡逐段找到（OK，附註記）。
-  - 截斷覆蓋：主張在任何呼叫都找不到，但 `at=` 範圍內有一筆被截在 500 字的呼叫、而且同一報告另一條指令對到了它，印「not checkable … may be in the cut part」（OK，附註記，不宣稱已驗證）。
+  - **UNVERIFIED**（in log cut part）：主張在任何呼叫都找不到，但 `at=` 範圍內有一筆被截在 500 字的呼叫、而且同一報告另一條指令對到了它。主張可能在被截掉的那段，紀錄證明不了有跑、也證明不了沒跑，所以是獨立狀態：不算 OK、不算 FAIL，最後一行另計 `unverified=n`，exit code 不變；審查的人要自己看這幾條。在截斷呼叫留下來的那段就對得到的主張仍是 OK。
   - harness 對應的工具（紀錄的 `tool_raw`，例如 pwsh）在這個 session 從沒有 error 狀態時，狀態不帶 exit code：宣告 exit 不是 0 印「not checkable」。
   - 沒有人跑的指令照樣 FAIL（selftest 有對照組）。
 - 2.2.1：被截在 500 字的紀錄行照 JSON 規則解回（`\"`、`\\` 還原；2.2.0 沒還原，含引號或反斜線路徑的長指令比不到）。比對前去掉 `&`、`cmd /c`、啟動程式（python、py、pwsh、powershell、node、bash 等）和它的啟動旗標；`...`、`…`、`<名稱>` 當萬用字；單一檔名可以對到以它結尾的較長路徑；靠詞比對時至少要 2 個實詞（只寫啟動程式不算）。只比 Bash / PowerShell 的紀錄。紀錄有 `kind=rebuild` 行時多印 `~ note: a log was rebuilt from a transcript ...`。
