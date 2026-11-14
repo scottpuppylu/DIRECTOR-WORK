@@ -4269,7 +4269,7 @@ def test_ran_line_225(tmp):
                                   "import sys; sys.exit(3)")
     text = report.read_text(encoding="utf-8")
     total += 1
-    if code != 3 or not re.search(r"^- `.+ -c \"?import sys; sys\.exit\(3\)\"?` exit=3 at=\d\d:\d\d(-\d\d:\d\d)?$", text, re.M) \
+    if code != 3 or not re.search(r"^- `.+ -c [\"']?import sys; sys\.exit\(3\)[\"']?` exit=3 at=\d\d:\d\d(-\d\d:\d\d)?$", text, re.M) \
             or text.index("python -m old") > text.index("exit=3") or not text.rstrip().endswith("NEXT: x"):
         failures.append(f"ran_line run mode: exit {code}, report {text!r}, stderr {err!r}")
     before = datetime.datetime.now(datetime.timezone.utc)
