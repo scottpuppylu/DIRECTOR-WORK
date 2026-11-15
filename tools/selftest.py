@@ -10395,6 +10395,22 @@ def guarded(test, *args):
         skip(test.__name__, f"needs git, none on PATH ({type(error).__name__} after it started)")
 
 
+def test_help_any_console_230(tmp=None):
+    """2.3.0: every tool's --help works on a console that is not UTF-8 (Windows cp950 / cp1252 pipes). Two tools
+    switched stdout to UTF-8 only after parse_args, so --help died with UnicodeEncodeError; run() passes -X utf8 and
+    never saw it, so this group runs with UTF-8 mode off."""
+    global total
+    for tool in sorted(TOOLS.glob("*.py")):
+        if tool.name == "selftest.py":
+            continue
+        total += 1
+        done = subprocess.run([sys.executable, "-I", "-X", "utf8=0", str(tool), "--help"], capture_output=True,
+                              stdin=subprocess.DEVNULL, timeout=120)
+        out = done.stdout + done.stderr
+        if done.returncode != 0 or b"UnicodeEncodeError" in out:
+            failures.append(f"help_any_console {tool.name}: exit {done.returncode}: {out.decode('utf-8', 'replace').strip()[-200:]}")
+
+
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="director_work_selftest_")).resolve()
@@ -10516,6 +10532,7 @@ def main():
         guarded(test_verdict_self_check_230, tmp)
         guarded(test_round_conditions_230, tmp)
         guarded(test_rules_docs_230, tmp)
+        guarded(test_help_any_console_230, tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     for failure in failures:

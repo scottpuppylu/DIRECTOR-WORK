@@ -186,6 +186,7 @@ def render(rows, previous):
 
 
 def main(argv=None):
+    sys.stdout.reconfigure(encoding="utf-8")  # before parse_args: --help prints during parsing
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("table", help="Markdown or JSON table of work-order items")
     ap.add_argument("--previous", metavar="SNAPSHOT", help="an earlier --save snapshot, for the delta")

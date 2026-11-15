@@ -28,6 +28,7 @@ MINOR（版本號照工單 WO-DW-230）：一週試跑學到的事做成工具�
 - `templates/CPU_REPRO.md`（F4、F6、F8）：關掉預設編譯 glob、印組件路徑和雜湊、新鮮度、雜湊比對、整數開關用整數解析並在第一個 frame 印 `flag X read = 值`、碰撞標籤的單元測試寫進檢查清單（DW 本身沒有碰撞邏輯，由專案寫）。
 - `tools/flag_check.py`（F6）：log 裡每個開關的讀取行，型別錯、值錯、太晚、缺行都是 STOP，這次執行不判定。
 - `ran_line.py`（F7）：指令行照作業系統引號（POSIX 單引號、Windows 雙引號），selftest 兩種都測，Linux CI 和 Windows 測的是同一件事。
+- `completion.py`、`report_vs_audit.py`：在不是 UTF-8 的主控台（Windows cp950／cp1252）上 `--help` 會因 UnicodeEncodeError 失敗，因為輸出改成 UTF-8 的那一行在解析參數之後才執行；現在移到解析參數之前。`report_vs_audit.py` 從 2.2.5 就有這個問題。selftest 新增一組：每個工具在 UTF-8 模式關閉時跑 `--help`，必須 exit 0 且沒有編碼錯誤（原本的 `run()` 固定加 `-X utf8`，所以抓不到）。
 
 ### 規則（文件和範本）
 
@@ -59,7 +60,7 @@ MINOR（版本號照工單 WO-DW-230）：一週試跑學到的事做成工具�
 ### 數字
 
 - 每輪必讀（`docs/01`、`03`、`06`、`08`）：本版沒有改這四份，也沒有新增每輪必讀的檔案或步驟。
-- `selftest.py`：2.2.5 的 2,741 項 → 本版 2,915 項（+174：N1–N8、F1–F8 各工具的案例與 mutation、裁決「自己查證的證據」案例（預設 warn、warn、fail、`--config`、錯的值）與 mutation、setup_check 的 `verdict_self_check` 案例、round_check 條件表案例與 mutation、規則文字檢查）。Python 3.11 全過；skipped=1 是這台機器不能建 symlink。既有測試只改了一處：共用的裁決範例 `VERDICT` 補上自己查證的那一行。
+- `selftest.py`：2.2.5 的 2,741 項 → 本版 2,949 項（+208：N1–N8、F1–F8 各工具的案例與 mutation、裁決「自己查證的證據」案例（預設 warn、warn、fail、`--config`、錯的值）與 mutation、setup_check 的 `verdict_self_check` 案例、round_check 條件表案例與 mutation、規則文字檢查、每個工具在非 UTF-8 主控台跑 `--help`）。Python 3.11 全過；skipped=1 是這台機器不能建 symlink。既有測試只改了一處：共用的裁決範例 `VERDICT` 補上自己查證的那一行。
 
 對齊初衷：
 1. 幫到誰：總監（完成度不再靠自報、裁決要自己查過、一條線一次看完、授權到期前提醒）、worker（送 TR 前先在 CPU 上擋掉、DONE 由腳本自己發、build 和開關有沒有真的生效看得到）、審查者（審查包不會漏掉階段、不會被檔名或渲染設定誤導）。依據：工單 WO-DW-230 列的一週試跑事故（自報 100%、錯過短階段的抽格、檔案時間誤判 build、開關沒讀到、GO 沒人 ACK、豁免一直被叫醒、整合卡 10 小時以上）。

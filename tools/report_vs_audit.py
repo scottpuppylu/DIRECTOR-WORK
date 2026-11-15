@@ -1155,6 +1155,7 @@ def stamp_checks(text, pool, offset, tolerance, repo):
 
 
 def main(argv=None):
+    sys.stdout.reconfigure(encoding="utf-8")  # before parse_args: --help prints during parsing
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--report", help="the worker's TASK REPORT")
     ap.add_argument("--lead", action="append", default=[],
