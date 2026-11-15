@@ -6,6 +6,69 @@
 - **MINOR**：新增規則、文件、工具或選項，舊檔案照樣通過。
 - **PATCH**：修正文字、修 bug，規則不變。
 
+## 2.3.0 — 2026-11-15
+
+MINOR（版本號照工單 WO-DW-230）：一週試跑學到的事做成工具和規則：完成度要有證據、修正前先查可行性、模擬和 patch 讀同一份設定、豁免要寫解除條件、執行腳本自己發 ACK / DONE、授權到期提醒、一條線的摘要一次印完、送 TR 前依缺陷類別跑 CPU 檢查；審查包、雜湊比對、build 新鮮度、開關讀取各有檢查；規則補「先用 DW 工具」、根因研究的條件表、放寬標準前盲測、同一組核對、真實影片並排比對（含呈現方式）、裁決要有自己查證的證據。不加 OpenSpec／SDD、不加每輪必讀、不加任何每日／每小時／節奏類的額度上限。
+
+### 新工具
+
+- `tools/completion.py`（N1）：完成度表，每項只給 0／25／50／75／100；100 沒有實際行為的證據路徑算 75 並 WARN；加權總分、關鍵路徑、和上次快照比的變化（`--previous`／`--save`）。`visibility` 高（玩家看得到）的項目標延後，沒有紀錄的決定就 WARN。
+- `gate_check.py --feasibility`（N2）：開一組修正或凍結 gate 數字之前要有 CPU 可行性紀錄（FEASIBILITY／FEASIBLE_COUNT／SCRIPT／RESULT），找到 0 個解就不開；門檻值寫來源。
+- `tools/sim_check.py`（N3）：patch 和模擬的設定逐項一致（同一個檔直接通過），模擬重現上次實測（容差內）；不符就「先修模擬」。
+- `tools/waiver.py`（N4）：豁免寫 `--until`（解除的事件）和 `--watch`（事件會改到的檔，記內容雜湊），存在 JSON 檔、重開讀得回來；內容沒變不叫醒人。`block` 記錄卡住整合的分支，超過 N 小時（預設 8）建議在預設關閉的開關後面先合。閒置監看呼叫 `check --wake-only`。
+- `templates/run_closing.py`（N5）：`run` 第一行寫 ACK、`finally` 自己寫 DONE（含 exit code）；`go` 寫 GO 後等 5 分鐘，沒 ACK 先看 DONE／RESULT 檔，沒有才補通知一次，再沒有印 `NO_ACK`；`check` 判 NO_ACK 前先看結果。接專案只改 `signal()`、`seen()`。
+- `doctor.py --licenses`（N6）：授權剩不到 3 天（`--license-days`）WARN，寫明哪個工具持有；`--licenses-only` 只查授權。
+- `tools/line_brief.py`（N7）：一條工作線的看板行、git 狀態和最後 commit、最新結果檔開頭、log 尾段一次印完；設定放 status 設定的 `"lines"`（`status_gen` 接受並忽略它）。
+- `tools/pre_tr.py`（N8）＋ `templates/pre_tr.json`：依改到的檔判斷缺陷類別，每類的 CPU 檢查都要過；改到的類別沒有檢查也擋 TR。
+
+### 修正與新檢查
+
+- `tools/pack_check.py`（F1、F5）：審查包抽格（事件沒抽到、間隔大過最短階段的一半、和動作週期同步）、主體在畫面內（讀 PNG 檔頭）、近景真的拍到部位、檔名洩漏版本或結論、manifest 和檔案一致、渲染設定（動態模糊、景深、解析度、有損格式、和參考不同）會做出假缺陷；`readme` 從包裡實際的檔案產生 README。
+- `tools/hash_check.py`（F2、F3、F4）：雜湊比對少一個案例是 FAIL（不是略過）；build 新不新用內容雜湊判斷，不看檔案時間；`show` 印實際跑的組件路徑和雜湊。
+- `templates/CPU_REPRO.md`（F4、F6、F8）：關掉預設編譯 glob、印組件路徑和雜湊、新鮮度、雜湊比對、整數開關用整數解析並在第一個 frame 印 `flag X read = 值`、碰撞標籤的單元測試寫進檢查清單（DW 本身沒有碰撞邏輯，由專案寫）。
+- `tools/flag_check.py`（F6）：log 裡每個開關的讀取行，型別錯、值錯、太晚、缺行都是 STOP，這次執行不判定。
+- `ran_line.py`（F7）：指令行照作業系統引號（POSIX 單引號、Windows 雙引號），selftest 兩種都測，Linux CI 和 Windows 測的是同一件事。
+- 十個工具（`completion.py`、`report_vs_audit.py`、`gate_check.py`、`metrics_report.py`、`poll_hint.py`、`resume_archive.py`、`scope_check.py`、`trace_report.py`、`transcript_audit.py`、`usage_mix.py`）：在不是 UTF-8 的主控台（Windows cp950／cp1252）上 `--help` 會因 UnicodeEncodeError 失敗，因為輸出改成 UTF-8 的那一行在解析參數之後才執行；現在移到解析參數之前。其中八個從 2.3.0 之前就有這個問題。selftest 新增一組：每個工具的 `--help` 在 stdout／stderr 都是 cp1252 的情況下執行（不管這台機器是什麼主控台），必須 exit 0 且沒有編碼錯誤；原本的 `run()` 固定加 `-X utf8`，cp950 的機器又能編碼中文，所以本機抓不到，只有 CI 的 Windows runner 抓到。
+
+### 規則（文件和範本）
+
+- 先用 DW 現有工具，沒有才自己寫並說明為什麼（`docs/02`、`templates/WORK_ORDER.md`）。
+- 根因研究每一節先放「測試條件 vs 參考條件」表；`round_check.py` 沒找到印 `~ WARN NO_CONDITIONS_TABLE`（`docs/07` 第 4 節、`templates/RESUME_STATE.md`）。
+- 放寬量測標準前先做一次盲測，確認前舊標準照用；宣告一組做完前核對資料夾、程式、提示詞是同一組（`docs/07`、`templates/WORK_ORDER.md`）。
+- 和真實影片對照涵蓋每一種情境類型，在成品內並排看；呈現方式（HUD、各階段鏡頭、切鏡時機、重播）也和真實轉播並排；設計原創，不複製轉播單位或其他產品的素材、標誌（`docs/07` 第 1 節）。
+- 每份裁決要有「自己查證的證據」：A 節至少一行 `- `<指令>` exit=<n> at=<HH:MM>`（`ran_line.py` 印）。沒有這一行就不該判 PASS／PASS_WITH_WARNINGS／CONDITIONAL_PASS；`gate_check.py --verdict` 的嚴重度看專案設定 `"verdict_self_check"`：`"warn"`（2.3.x 預設，印 `~ WARN SELF_CHECK`，exit code 不變）或 `"fail"`（判 FAIL）（`director_work.example.json`、`templates/GATE_VERDICT.md`、`docs/02`、`docs/07` 第 6 節）。
+
+### 查過的現成做法
+
+- 標準庫就夠：雜湊用 `hashlib`、PNG 尺寸讀檔頭 24 bytes、引號用 `shlex.join`／`subprocess.list2cmdline`，不另裝套件。
+- build 新鮮度：make／ninja 這類用檔案時間，正是 F3 出錯的原因；內容雜湊的做法和 Bazel、ccache 相同，DW 只做比對，不做快取。
+
+### 已知限制
+
+- `pack_check.py` 的 bbox 要渲染腳本寫進 manifest，工具不從圖片猜；只讀 PNG 的尺寸，其他格式要在 manifest 寫 width／height。
+- `waiver.py` 只叫醒有 `--watch` 檔或 snooze 時間的豁免；只寫 until 文字的豁免要有人照事件 `lift`。
+- `flag_check.py` 只看 log 有沒有印讀取行和值，不證明程式之後真的用了它。
+- 條件表在 2.3.0 只警告，不擋；裁決自己查證的那一行預設也只警告，專案設 `"verdict_self_check": "fail"` 才擋。
+
+### 遷移
+
+- 裁決：新寫的 PASS 類裁決在 A 節加一行自己跑的檢查（`ran_line.py` 印，範本已有）。預設 `"verdict_self_check": "warn"`：舊的 PASS 類裁決沒有這一行只多印 `~ WARN SELF_CHECK`，exit code 不變，向下相容。要擋的專案在 `director_work.json` 自己加 `"verdict_self_check": "fail"`（選擇加入）；3.0 可能把預設改成 `"fail"`。改成 fail 之前：已經結案的舊裁決不必重跑；要重跑就補一行當時自己查證的 `- `指令` exit=<n> at=<HH:MM>`，沒有查證過的照實改判定，不要補假的。FAIL、HOLD 這類判定不受影響。`--config` 現在也可以和 `--verdict` 一起用。
+- `round_check.py` 在研究節沒有條件表時多印 `~ WARN` 行，exit code 不變。
+- status 設定可以加 `"lines"`（給 `line_brief.py`）；舊設定不用改。
+- 其他都是新工具、新選項和範本，舊檔案、舊指令照樣通過。
+
+### 數字
+
+- 每輪必讀（`docs/01`、`03`、`06`、`08`）：本版沒有改這四份，也沒有新增每輪必讀的檔案或步驟。
+- `selftest.py`：2.2.5 的 2,741 項 → 本版 2,949 項（+208：N1–N8、F1–F8 各工具的案例與 mutation、裁決「自己查證的證據」案例（預設 warn、warn、fail、`--config`、錯的值）與 mutation、setup_check 的 `verdict_self_check` 案例、round_check 條件表案例與 mutation、規則文字檢查、每個工具在非 UTF-8 主控台跑 `--help`）。Python 3.11 全過；skipped=1 是這台機器不能建 symlink。既有測試只改了一處：共用的裁決範例 `VERDICT` 補上自己查證的那一行。
+
+對齊初衷：
+1. 幫到誰：總監（完成度不再靠自報、裁決要自己查過、一條線一次看完、授權到期前提醒）、worker（送 TR 前先在 CPU 上擋掉、DONE 由腳本自己發、build 和開關有沒有真的生效看得到）、審查者（審查包不會漏掉階段、不會被檔名或渲染設定誤導）。依據：工單 WO-DW-230 列的一週試跑事故（自報 100%、錯過短階段的抽格、檔案時間誤判 build、開關沒讀到、GO 沒人 ACK、豁免一直被叫醒、整合卡 10 小時以上）。
+2. Desktop：都是本機命令列工具和範本，Desktop Code 分頁的 session 照常用；沒有新的每輪步驟。
+3. 服務：初衷 5（成品要真的對）：完成度要證據、真實影片並排比對、審查包檢查、裁決要自己查證；初衷 2（省額度）：TR 前 CPU 檢查、豁免不亂叫醒、一條線一次摘要；初衷 4（中斷不丟進度）：豁免存在檔案、重開讀回；初衷 7（零成本）：只用標準庫。
+4. 核心：每輪必讀沒有變長；沒有新的 hook 或常駐程序；沒有加額度上限或節奏限制；git 只讀。
+5. 舊檔案和舊指令：照樣通過。舊 PASS 類裁決沒有自己查證的那一行，預設只警告（專案設 `"verdict_self_check": "fail"` 才擋）；條件表只警告。
+
 ## 2.2.5 — 2026-11-15
 
 PATCH（版本號照 PO 指定；WO-DW-225：WO-DS-008 r2 試跑學到的修進原版 DW，不加 OpenSpec／SDD、不加每輪必讀）：report_vs_audit 的 H1 誤報修掉、時間錯照樣抓並標類別；新工具 `ran_line.py` 讓 RAN 行和時間戳從時鐘來；gate_check 新增閘門順序（`--sequence`）和最終驗收（`--final`），`--after-verdict` 改成預設 FAIL；scope_check 共用 checkout 逐 commit 檢查；暫存檔在設了 WORK_DIR 時由工具自己放進 `WORK_DIR/tmp`；範本補 worker 輪數上限與交接、規格審查清單、點子清單。照定義，`--after-verdict` 改預設 FAIL 會讓 2.2.4 通過的情況變不通過（MAJOR 性質），新選項是 MINOR；PO 指定版本號，所以標 PATCH，遷移段寫明怎麼回到舊行為。

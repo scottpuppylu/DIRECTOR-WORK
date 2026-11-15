@@ -62,7 +62,7 @@ CONFIG_LISTS = ("skip_worktrees", "po_pending_files")
 CONFIG_BOOLS = ("hooks", "runtime_guard", "guard_review")
 CONFIG_PATTERNS = ("trace_id_pattern", "po_item_pattern", "po_open_pattern")
 CONFIG_KEYS = (("schema_version", "mode", "window", "plugins_off", "guard_profile", "guard_mode", "resume", "base_ref",
-                "release") + CONFIG_STRINGS
+                "release", "verdict_self_check") + CONFIG_STRINGS
                + CONFIG_LISTS + CONFIG_BOOLS + CONFIG_PATTERNS)
 RESUME_KEYS = ("max_bytes", "max_line_bytes", "keep_recent", "protect_headings")
 BASE_REF_KEYS = ("check", "fetch", "strict")  # 2.2.2: gate_check --order BASE_REF freshness
@@ -273,6 +273,8 @@ def check_config(text, notes):
                     notes.append(f"director_work.json: base_ref key no tool reads: {key} (a typo?)")
                 elif not isinstance(value, bool):
                     say(f"base_ref.{key}: true or false, got {value!r}")
+    if "verdict_self_check" in data and data["verdict_self_check"] not in ("warn", "fail"):  # 2.3.0: gate_check --verdict
+        say(f"verdict_self_check: \"warn\" or \"fail\", got {data['verdict_self_check']!r}")
     if "release" in data:  # 2.2.2: release.py refuses an unknown key, so it is a problem here too
         block = data["release"]
         if not isinstance(block, dict):

@@ -208,6 +208,7 @@ def hidden_changes(root):
 
 
 def main():
+    sys.stdout.reconfigure(encoding="utf-8")  # before parse_args: --help prints during parsing
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--order", required=True, help="work order file holding SCOPE, FORBIDDEN and BASE_REF")
     ap.add_argument("--repo", default=".", help="any folder inside the worktree to check (default: current folder)")

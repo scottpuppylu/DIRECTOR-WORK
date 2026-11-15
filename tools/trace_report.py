@@ -425,6 +425,7 @@ def brief_sections(a, orders):
 
 
 def main():
+    sys.stdout.reconfigure(encoding="utf-8")  # before parse_args: --help prints during parsing
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--orders", required=True)
     ap.add_argument("--reports", required=True)

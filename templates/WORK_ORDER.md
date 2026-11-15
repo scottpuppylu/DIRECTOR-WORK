@@ -98,6 +98,11 @@ CHECKS:
 - DELIVERABLES：<檔案、commit / tag、審查包>
 - 完成：一則 TASK REPORT 給總監（templates/TASK_REPORT.md）。
 - STOP_RULES：同一根因 2 輪沒進展就停；超出 SCOPE 先問；超過測試上限 10 分鐘先停下回報。
+- 先用 DW 現有工具（2.3.0）：檢查、比對、等待、狀態整理先找 `tools/README.md`，自己寫的要說明為什麼現有工具不夠。
+- 根因研究（2.3.0）：`ROOT_CAUSE_STUDY.md` 每一節先放「測試條件 vs 參考條件」表，再寫 WHERE / ALTERNATIVES / DECISION。
+- 放寬量測標準前先做一次盲測；確認前舊標準照用（2.3.0）。
+- 宣告一組做完前，核對資料夾、程式、提示詞是同一組（2.3.0）。
+- 和真實影片對照（2.3.0）：每一種情境類型、在成品內並排；呈現方式（HUD、各階段鏡頭、切鏡時機、重播）也和真實轉播並排；設計原創，不複製別人的素材或標誌。
 - 到 WORKER_LIMIT 就停（2.2.5）：寫 `HANDOFF.md`（`templates/HANDOFF.md`：做完什麼、還剩什麼、下一步、檔案路徑），回報 lead；lead 開新的 worker 從 HANDOFF.md 接續。
 
 ## H. 變更紀錄

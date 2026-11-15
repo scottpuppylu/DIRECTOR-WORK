@@ -14,6 +14,10 @@ RESUME_STATE holds one line per defect that has been fixed more than once:
 From round 4 on, the study file must exist and hold a `## SET n` section (or `## <defect> SET n`) for every finished
 set n, each with filled `WHERE:` (where the problem really is), `ALTERNATIVES:` (ready assets, other methods, a design
 change) and `DECISION:` lines. A defect without a FIX_ROUNDS line is not checked; `FIX_ROUNDS: NONE` is fine.
+2.3.0: each study section starts with a "test conditions vs reference conditions" table (a Markdown table whose header
+names both, e.g. `| item | test conditions | reference conditions |`, with at least one row): a study that never
+compares how the test ran with how the reference ran keeps fixing the wrong thing. A section without it prints
+`~ WARN NO_CONDITIONS_TABLE` (a warning in 2.3.0, not a FAIL).
 
   round_check.py [--dir DIR]          every RESUME_STATE*.md in DIR (default: the current folder)
   round_check.py --resume FILE ...    these files
@@ -75,6 +79,23 @@ def filled_line(section, key):
     return bool(value) and value not in ("...", "…", "NONE") and not PLACEHOLDER.search(value)
 
 
+CONDITIONS_HEAD = re.compile(r"^[ \t]*\|(?=[^\n]*(?:test|測試))(?=[^\n]*(?:reference|參考|基準))[^\n]*\|[ \t]*$",
+                             re.M | re.I)
+
+
+def has_conditions_table(section):
+    """True when the section holds a test-vs-reference conditions table with at least one data row."""
+    m = CONDITIONS_HEAD.search(section)
+    if not m:
+        return False
+    rows = []
+    for line in section[m.end():].splitlines()[1:]:
+        if not line.strip().startswith("|"):
+            break
+        rows.append(line)
+    return any(not re.fullmatch(r"[\s|:\-]*", r) for r in rows)
+
+
 def check_defect(defect, fields, folder):
     problems = []
     try:
@@ -103,6 +124,9 @@ def check_defect(defect, fields, folder):
         empty = [k for k in ("WHERE", "ALTERNATIVES", "DECISION") if not filled_line(sections[n], k)]
         if empty:
             problems.append(f"{study} SET {n}: {', '.join(empty)} empty or missing")
+        if not has_conditions_table(sections[n]):
+            problems.append(f"~ WARN NO_CONDITIONS_TABLE {study} SET {n}: start the study with a `| item | test conditions "
+                            "| reference conditions |` table (how the test ran vs how the reference ran)")
     return problems
 
 
@@ -129,10 +153,11 @@ def main(argv=None):
         for defect, fields, raw in rows:
             defects += 1
             problems = check_defect(defect, fields, f.parent)
-            failed += bool(problems)
-            print(f"{'FAIL' if problems else 'OK  '} {f}: {raw.lstrip('- ')}")
+            hard = [p for p in problems if not p.startswith("~")]
+            failed += bool(hard)
+            print(f"{'FAIL' if hard else 'OK  '} {f}: {raw.lstrip('- ')}")
             for p in problems:
-                print(f"  - {p}")
+                print(p if p.startswith("~") else f"  - {p}")
     print(f"ROUNDS: {'FAIL' if failed else 'PASS'} files={len(files)} defects={defects} failed={failed}")
     return 1 if failed else 0
 

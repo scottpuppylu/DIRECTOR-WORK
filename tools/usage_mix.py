@@ -454,6 +454,7 @@ def render(res):
 
 
 def main(argv=None):
+    sys.stdout.reconfigure(encoding="utf-8")  # before parse_args: --help prints during parsing
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--root", default=str(pathlib.Path.home() / ".claude" / "projects"),
                     help="projects root (default ~/.claude/projects)")

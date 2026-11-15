@@ -30,6 +30,7 @@
 - Worker 不改工單的驗收條件和規格。發現條件做不到、互相矛盾或有錯，回報 `BLOCKED` 並寫明原因，由總監裁決後改工單。
 - 總監改工單時 `REVISION` 加 1，在 H 節記一列（誰改、原因、影響的 AC）。派工時用 `gate_check.py --hash` 印出工單雜湊，把它印的 `DISPATCH <WO-ID> rev=<n> sha=<雜湊>` 那行原樣寫進 `DIRECTOR_LOG`（同一工單以最新一行為準）；worker 在報告填 `ORDER_SHA256`。審查時 `--match ... --dispatch-log DIRECTOR_LOG.md` 拿派工紀錄比對：工單被改過再重算雜湊也會被查出；DISPATCH 必須獨占一行，引用、縮排或圍欄裡的不算；沒有紀錄時各模式都失敗。這是事後查出，不是事前防止：誰都還是改得動工單。
 - 發工單前想清楚需求、現有結構、相依、邊界條件、測試方法，一次給完整。
+- 先用 DW 現有的工具（2.3.0）：要檢查、計數、比對、等待、整理狀態之前，先查 `tools/README.md` 有沒有現成的；有就用，沒有才自己寫，並在報告寫為什麼現有工具不夠。工單的 D 節列出這次要用的 DW 工具。
 - 製作類工單的第一步固定是「既有資產盤點」：未合併的分支（`git log --all -- <路徑>`）、需求方提供過的檔案、舊報告。盤點結果寫進 gate 報告。
 - 規格審查：Strict 和 Standard 工單放上待決頁前必做（Desktop 的做法見 `docs/11`；2.2.5 起 Standard 也必做），Direct 不做。總監開一個短上下文、只讀的 subagent，照 `templates/SPEC_REVIEW.md` 審工單；結果只給總監參考，不增加 PO 的工作。每次在 `DIRECTOR_LOG` 記下花費（subagent 回報的 token）、抓到的問題和審查者的 `session=`；花費高過它省下的返工時報 PO，要不要降回選用由 PO 決定。
 
@@ -49,6 +50,7 @@
 - 證據等級：`VERIFIED_LOCAL / VERIFIED_REMOTE / REPORTED / SUPPORTED / ESTIMATED / ASSUMPTION / UNKNOWN / NOT_TESTED / INVALID`。
 - 狀態分開寫：工程、功能、成品、效能、穩定性、整合、PO 驗收，不用一個 PASS 蓋過其他。
 - 跳過的測試不算 PASS；既有失敗維持原樣寫 `NO_NEW_REGRESSION`，不是 ALL PASS。
+- 裁決的「自己查證的證據」（2.3.0）：A 節至少一行裁決者自己跑的 `- `<指令>` exit=<n> at=<HH:MM>`（`ran_line.py` 印），沒有就不能判 PASS 類；`gate_check.py --verdict` 檢查，嚴重度看 `director_work.json` 的 `verdict_self_check`（`warn` 預設 / `fail`；`docs/07` 第 6 節）。
 - 交接時用 `RESUME_STATE.md`（`docs/06`）；原 worker 先停在安全狀態，接手者先核對 repo 和交接資料一致，不重做已通過的工作。
 - TASK REPORT 可以加 `SESSION_ID:` 和 `RAN:`（一行一個實際跑過的指令，寫 exit 和時間）。總監用 `tools/report_vs_audit.py --report 報告 --log <動作紀錄>` 核對：報告說跑過的 selftest、Unity、Blender、雜湊檢查，動作紀錄裡有沒有、結果和時間對不對得上。它只核對有沒有跑，不代表跑的內容對。
 - RAN 行和時間戳（2.2.5）：RAN 行用 `tools/ran_line.py` 產生（代跑指令或剛跑完補記），裁決表頭和 DIRECTOR_LOG 的時間用 `ran_line.py --stamp`，不手打。報告的 `WORKTREE:` 行照抄 `scope_check.py` 印的那一行（依 `git worktree list` 判斷隔離 worktree 或共用 checkout）。共用 checkout 裡用 `scope_check.py --shared` 只算這張工單自己的 commit。
@@ -84,12 +86,16 @@
 - 會用到 GPU 或引擎的執行腳本不能有預設設定檔，沒給參數就拒跑；清 HOLD 的指令裡不放任何執行腳本（L-025）。
 - 停機（QUIET、叫停）的對象是整條程序樹：由上往下，先停批次腳本（父 shell），再停子程序。停完依 CPU 用量列出所有程序，量一段時間內的 CPU 增量，確認沒有殘留，並回報已停的 PID；不能只比對程序名。下令的一方也獨立確認一次。
 - 長批次腳本每一步開跑前檢查暫停旗標（看板的 QUIET）；有暫停就自己停下。
+- 收尾範本（2.3.0）：`templates/run_closing.py`。`run` 模式第一行就寫 ACK，跑完不論成敗在 `finally` 自己寫 DONE（含 exit code），不靠人記得；`go` 模式寫 GO 後等 5 分鐘，沒 ACK 先看有沒有 DONE / RESULT 檔（已經跑完就不吵），沒有才補通知一次，再沒有就印 `NO_ACK`。接到專案只改 `signal()` 和 `seen()` 兩個函式（寫看板、送訊息的方式）。
+- 豁免要有期限和觸發條件（2.3.0）：`tools/waiver.py`。`add` 寫 `--until`（解除它的事件）和 `--watch`（那個事件會改到的檔，記內容雜湊），存在 WAIVERS.json，重開也讀得回來；檔案內容變了或 snooze 時間到才 `WAKE`，沒變就不吵醒人。沒寫 until 印 WARN。`block` 記錄卡在整合的分支，超過 N 小時（預設 8）印 `INTEGRATION_BLOCKED`，建議改成「在預設關閉的開關後面先合進去」，不要一直等。閒置監看每次跑 `waiver.py check --wake-only`。
 - 工具：`tools/pause_ctl.py on|off|status` 管暫停旗標，worker 的 `hook_guard.py --pause-flag` 在每個工具呼叫前檢查它；停完用 `pause_ctl.py procs` 依 CPU 增量確認沒有殘留（見 `tools/README.md`）。
 
 ### 測試預算
 
 - 每個 TEST REQUEST 寫三件事：**目的**（回答哪個決定）、**最小範圍**（為什麼不能更小）、**上限分鐘**。缺一項退回。
 - 磁碟和時長也要填（`templates/TEST_REQUEST.md`）：build 資料夾、擷取 `組數 × 每組張數 × 單張大小`、Library 和暫存的餘量，總寫入量要涵蓋這三項（L-030）；單位一律 GiB，以排程員實測的餘量為準（L-031）；時長 = 組數 × 單組實測時間（含逾時），不用理想值（L-033）。排程員用 `tools/gate_check.py --test-request 申請檔` 檢查，沒過就退件、不發 GO。
+- 第 0 級的做法寫在 `templates/CPU_REPRO.md`（2.3.0）：明列要編譯的檔、印出實際跑的組件路徑和雜湊（`hash_check.py show`）、用內容雜湊判斷 build 新不新（`hash_check.py fresh`，不看檔案時間）、雜湊比對少一個案例就是 FAIL（`hash_check.py compare`）、開關在第一個 frame 印 `flag X read = 值`（`flag_check.py`，缺行就停、不判定）、模擬和 patch 讀同一個設定且重現上次實測（`sim_check.py`）。
+- 送 TR 之前跑 `tools/pre_tr.py --config pre_tr.json --git-diff <base>`（2.3.0，範例 `templates/pre_tr.json`）：依改到的檔案判斷缺陷類別，每個類別的 CPU 檢查都要過；改到的類別沒有檢查也擋下。
 - 預設上限：功能測試 30 分鐘、效能量測 20 分鐘；超過 60 分鐘要總監核准。超過上限 10 分鐘就先停下回報。
 - 分級：
   - **第 0 級，每次修改後必做，不佔重資源**：離線編譯、CPU 上的單元測試、雜湊、數值檢查、量測腳本。能在這級發現的錯，不准拖到下一級。

@@ -340,6 +340,7 @@ def report(result, settings, size):
 
 
 def main(argv=None):
+    sys.stdout.reconfigure(encoding="utf-8")  # before parse_args: --help prints during parsing
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("file", help="a RESUME_STATE.md")
     ap.add_argument("--execute", action="store_true", help="really move (default: dry-run, writes nothing)")

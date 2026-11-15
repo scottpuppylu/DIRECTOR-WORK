@@ -255,7 +255,7 @@ ANSWER:
 | `docs/10_lessons_learned.md` | 原專案的教訓；每輪必讀規則的理由 | 第一次；寫新規則前；判斷必讀規則的邊界情況時 |
 | `docs/11_claude_desktop.md` | 在 Claude Desktop 上開 worker、傳訊息、讀額度和上下文視窗用哪個工具 | 在 Desktop 上建置與操作時 |
 | `docs/12_chat_to_product.md` | 一般 / 小白模式、專案初衷卡、待決頁網頁（選擇題與成品截圖）、不做歪的檢查 | 建置時；談需求、開選擇題、寫工單時 |
-| `templates/` | CLAUDE.md 段落、工單、報告、RESUME_STATE、測試申請、決策登記、裁決、待決頁（本機帳和網頁 `choice_page.html`）、專案初衷卡、規格審查提示、DIRECTOR/ 其他檔案骨架 | 建置與派工時 |
+| `templates/` | CLAUDE.md 段落、工單、報告、RESUME_STATE、測試申請、決策登記、裁決、待決頁（本機帳和網頁 `choice_page.html`）、專案初衷卡、規格審查提示、DIRECTOR/ 其他檔案骨架；2.3.0 加 CPU 重現步驟（`CPU_REPRO.md`）、送 TR 前的缺陷類別檢查設定（`pre_tr.json`）、執行腳本收尾範本（`run_closing.py`） | 建置與派工時 |
 | `tools/` | 設定寫入、免費探測、用量統計和用量結構、記憶大小檢查；建置檢查（`setup_check`：待決頁網址和置頂）、交件檢查（格式、驗收對照、範圍、證據紀錄、報告對動作紀錄）、追溯表、修正輪數、每線狀態腳本 | 見 `tools/README.md` |
 | `director_work.example.json` | 工具設定範例 | 建置時 |
 | `VERSION`、`CHANGELOG.md` | 版本號、各版改了什麼、升級怎麼遷移 | 建置時記版本；升級時 |

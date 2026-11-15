@@ -14,17 +14,25 @@ Python 3.9 以上，只用標準函式庫。一律用 `python -I -X utf8 <tool> 
 | `gate_check.py` | 檢查 RESUME_STATE（2.2.2 起含大小，shadow）、工單（2.2.2 起含 BASE_REF 新鮮度，會 `git fetch`）、TASK REPORT、裁決的欄位和用詞；`--match` 逐條對照報告和工單的驗收條件，加 `--evidence-dir` 再核對證據紀錄；`--hash` 印工單雜湊；2.2.4 `--after-verdict` 列出最後一份裁決之後動到 SCOPE 外程式碼的 commit（shadow） | 不寫 | 不花 |
 | `release.py`（2.2.2） | 發版一次到位：fetch → 工作樹乾淨 → 比對遠端主線（落後停、分岔停或 `--merge`）→ HEAD 的 VERSION 與 CHANGELOG 最上段一致、tag 排序高於遠端所有 tag → selftest → 公開掃描 → push → annotated tag → `gh release create --latest`，每步用 ls-remote／`gh release view` 驗。預設 dry run | 只有 `--execute` 動遠端；`--merge --execute` 開本機分支 | 不花 |
 | `setup_check.py`（2.2.0） | 建置完成的檢查：`DIRECTOR_STATE.md` 的 `PO_PAGE_URL` 和 `PO_PAGE_PINNED` 兩行是不是三種合法寫法之一；2.2.1 起另查旁邊的 `PO_PENDING.md`、`RESUME_STATE.md` 表頭（2.2.2 加大小）、`director_work.json`（shadow，`--strict` 才失敗） | 不寫 | 不花 |
-| `round_check.py`（1.3.0） | 修正輪數：RESUME_STATE 的 `FIX_ROUNDS:` 到第 4 輪（之後每組）沒有根因研究就 FAIL | 不寫 | 不花 |
+| `round_check.py`（1.3.0） | 修正輪數：RESUME_STATE 的 `FIX_ROUNDS:` 到第 4 輪（之後每組）沒有根因研究就 FAIL；2.3.0 研究沒有「測試條件 vs 參考條件」表印 WARN | 不寫 | 不花 |
 | `report_vs_audit.py`（1.3.0） | 用動作紀錄核對 TASK REPORT：報告說跑過的指令（`RAN:` 和 TESTS / EVIDENCE / DONE 裡的 selftest、Unity、Blender、雜湊檢查）紀錄裡有沒有、exit 和時間對不對；2.2.1 修截斷的長指令（引號、反斜線）比不到；2.2.3 比對多行腳本、省略寫法、多個 AC 編號，印 scope_check 時序 WARN；2.2.4 展開變數、`git -C`、字中 `...`、短 hex、HH:MM:SS、截斷覆蓋 | 不寫 | 不花 |
 | `transcript_audit.py`（2.2.1） | 沒裝 hook 時，從本機 Claude Code transcript（含 subagents）重建一份 hook 格式的動作紀錄，第 1 行標明是重建的 | 只寫 `--out`（已存在要 `--force`） | 不花 |
-| `ran_line.py`（2.2.5） | 從時鐘和指令本身的 exit code 產生 RAN 行（代跑或補記）和 `YYYY-MM-DD HH:MM` 時間戳，不手打 | 只寫 `--to` 指定的檔 | 不花 |
+| `ran_line.py`（2.2.5） | 從時鐘和指令本身的 exit code 產生 RAN 行（代跑或補記）和 `YYYY-MM-DD HH:MM` 時間戳，不手打；2.3.0 指令行照作業系統引號（POSIX 用單引號） | 只寫 `--to` 指定的檔 | 不花 |
+| `completion.py`（2.3.0） | 完成度表：每項只給 0/25/50/75/100，100 沒有實際行為的證據路徑算 75；加權總分、關鍵路徑、和上次快照比的變化；玩家看得到的項目延後要有決定 | 只寫 `--save` | 不花 |
+| `sim_check.py`（2.3.0） | 送 TR 前：patch 和 CPU 模擬讀的設定（時間點、常數、目標）一致，且模擬重現上次實測（容差內） | 不寫 | 不花 |
+| `waiver.py`（2.3.0） | 豁免和延後：`--until` 寫解除的事件、`--watch` 盯的檔內容變了（或 snooze 時間到）才叫醒；存在 JSON 檔，重開讀得回來；整合卡住超過 N 小時建議改成預設關閉的開關先合 | 只寫 `--file` 那份 JSON（原子寫入） | 不花 |
+| `line_brief.py`（2.3.0） | 一條工作線的摘要一次印完：看板行、git 狀態和最後 commit、最新結果檔開頭、log 尾段 | 不寫 | 不花 |
+| `pre_tr.py`（2.3.0） | 送 TR 前依改到的檔判斷缺陷類別，跑每個類別的 CPU 檢查；有一個失敗或類別沒有檢查就擋 | 不寫（跑的檢查自己寫的除外） | 不花 |
+| `pack_check.py`（2.3.0） | 審查包送出前：抽格（漏掉短階段、和週期同步）、主體在畫面內、近景真的拍到部位、檔名洩漏版本或結論、渲染設定會做出假缺陷、README 和實際檔案一致；`readme` 從實際檔案產生 README | 只有 `readme` 寫 README.md | 不花 |
+| `hash_check.py`（2.3.0） | 雜湊比對少一個案例就 FAIL；build 新不新用內容雜湊判斷（不看檔案時間）；印實際跑的組件路徑和雜湊 | 只有 `stamp` 寫 `--out` | 不花 |
+| `flag_check.py`（2.3.0） | 開關有沒有真的被讀到：log 第一個 frame 前每個開關一行 `flag X read = 值`，型別和值都對；缺行就停、不判定 | 不寫 | 不花 |
 | `trace_report.py` | 從工單、報告、裁決產生追溯表：需求 → 工單 → AC → 證據 → 裁決 | 不寫 | 不花 |
 | `metrics_report.py` | 從總監的檔案數出 `PURPOSE.md` 的成效數字：返工、中斷後重做、PO 介入、導入卡住，以及規格審查的花費；`--run` 另數接手演練的決策、重問、PO 操作和第一個可用預覽的時間 | 不寫 | 不花 |
 | `vocabulary.json` | 判定、下一步、RESULT、治理模式、證據等級等固定用詞的唯一來源；`gate_check.py` 讀它 | — | — |
 | `scope_check.py` | 比對實際改動和工單的 SCOPE / FORBIDDEN | 不寫 | 不花 |
 | `evidence_record.py` | 跑驗收指令，留下 exit code、輸出結尾、產物 SHA-256；之後可重新比對 | `run` 寫一份小 JSON，不覆蓋舊的 | 不花 |
 | `hook_guard.py` | PreToolUse hook：預設只提醒（`--mode remind`，呼叫照跑），`--mode ask` 交給使用者，`--mode block` 才擋；對象是 push、`reset --hard`、`git clean`、裸 stash、刪 worktree / 分支 / tag、依名稱結束程序；加 `--protect` 時另擋 Write / Edit 改工單和 `DIRECTOR_LOG.md`；加 `--rules` 時依 `guard_rules.json` 對每個工具呼叫回 deny / ask / 不出聲；加 `--review` 時先把部分 ask 交給第二個模型看；加 `--sessions` 時依 `session_id` 選 director / worker / cleaner | 不寫 | 不花；放行時不輸出。`--review` 每次審查用一次 `claude -p`（不花錢，但吃訂閱額度） |
-| `doctor.py` | 報告一個 worktree 實際生效的防護：claude 版本（生效的那個和 PATH 上每一個）、各設定層合併後的 hook、動作紀錄、權限規則、`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`、隔離、worktree、各 worktree 最近有沒有 session 從那裡啟動；每項標 ENFORCED / CONFIGURED_NOT_VERIFIED / NOT_ENFORCED / MISSING | 不寫 | 不花：`claude --version` 只在本機印版本 |
+| `doctor.py` | 2.3.0 `--licenses` 列出快到期的授權和持有的工具。報告一個 worktree 實際生效的防護：claude 版本（生效的那個和 PATH 上每一個）、各設定層合併後的 hook、動作紀錄、權限規則、`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`、隔離、worktree、各 worktree 最近有沒有 session 從那裡啟動；每項標 ENFORCED / CONFIGURED_NOT_VERIFIED / NOT_ENFORCED / MISSING | 不寫 | 不花：`claude --version` 只在本機印版本 |
 | `status_gen.py`（1.3.0） | 產生一支工作線的 `status.py`：log 尾段、雜湊、磁碟 GiB、git、最新輸出；總監版再加待決頁計數、未結案工單、未送出訊息、最近 1 小時的動作紀錄、常駐程序 | 只寫 `--out` 那一支（已存在要 `--force`）；產生的 `status.py` 不寫 | 不花 |
 | `poll_hint.py`（1.3.0） | PostToolUse hook：同一個 session 10 分鐘內讀同一份 log 第 3 次時，提示「等完成通知」，不擋；`report` 從動作紀錄算各 session 讀 log 的次數 | hook 只寫暫存資料夾的小狀態檔；`report` 不寫 | 不花 |
 | `secret_mask.py` | 把文字裡的私鑰、token、API key、JWT、`password=` 這類值換成 `[MASKED:種類]`；`--check` 只列出找到的種類 | 不寫 | 不花 |
@@ -812,6 +820,124 @@ python -I -X utf8 choice_reconcile.py status   --db <DIRECTOR>/choice_inbox.sqli
 - 帳本檔壞了、壞 `--now`、資料夾不存在：`register` 以外的指令只印 `CHOICE_RECONCILE: SHADOW_ERROR <原因>`，exit 0（`status --json` 印成一份 JSON）；`register` exit 2。`publish` 找不到快照、版本不對是 `REFUSED`，exit 1。帳本被另一個總監鎖住超過 `--busy-timeout`（預設 5 秒）：每個指令都印 `CHOICE_RECONCILE: BUSY <原因>`，exit 1（`status --json` 印一份 `"busy": true` 的 JSON），什麼都沒改，稍後重跑。只有 `MOVED`、`PLANNED`、`SETTLED`、`PUBLISHED` 代表狀態真的改了。
 - 2.1 的帳本第一次被打開時自動升級（`PRAGMA user_version` 2）：先在升級的鎖內備份：複製到暫存檔，`PRAGMA quick_check` 通過、確定是 2.1 的帳本，才取名 `<帳本>.v210.bak`；這個名字已有檔案（例如上次留下的空檔或半截檔）就改用 `<帳本>.v210.bak.<UTC 時間>`，不覆寫。備份失敗就不升級，原帳本不動。之後補欄位和新表，每題最新一版記成現行版（來源 `backfill-2.1`），舊回覆補冪等鍵，已領取的世代記 1、持有者照留（2.1 沒記持有者的仍是空的，要先接手到 `RECONCILE`）。升級後 2.1 版工具不保證能讀。
 - 仍是 shadow：只提示、不擋其他工具；讀 db 和寫回條仍由總監用 `ArtifactData` 做，本工具不連網。
+
+## completion.py（2.3.0，N1）
+
+```text
+python -I -X utf8 completion.py <完成度表.md|.json> [--previous 上週.json] [--save 本週.json] [--root DIR] [--strict]
+```
+
+- 表要有 ID 欄和分數欄（`ID / 編號`、`score / 分數`），可加 `item / 項目`、`evidence / 證據`、`critical / 關鍵`、`weight / 權重`、`visibility / 可見度`、`phase / 階段`、`decision / 決定`。分數只能是 0 / 25 / 50 / 75 / 100。
+- 100 要有證據路徑（存在、非空），沒有就算 75 並印 WARN：分數背後要有實際行為的紀錄。`visibility` 高的項目寫延後（after alpha、延後、later）要有 `decision`，否則 WARN。
+- `--previous` 多印 `prev` 和 `delta` 欄；`--save` 寫快照（schema `completion-v1`）。不是每輪必讀：被問進度或每週跑。
+
+## gate_check.py --feasibility（2.3.0，N2）
+
+```text
+python -I -X utf8 gate_check.py --feasibility <可行性紀錄.md> [...]
+```
+
+- 開一組修正、或凍結一個 gate 的數字之前，先用 CPU 搜尋有沒有可行解。紀錄寫 `FEASIBILITY:`（給哪一組）、`FEASIBLE_COUNT:`（找到幾個解；0 就不開這組）、`SCRIPT:`、`RESULT:`（JSON 有 `feasible_count` 時要相符）；gate 的 `THRESHOLDS:` 每行寫來源（`source=video|mocap|spec|...`）。
+
+## 裁決的「自己查證的證據」（2.3.0）
+
+- `gate_check.py --verdict`：判定是 PASS / PASS_WITH_WARNINGS / CONDITIONAL_PASS，就要至少一行 `- `<指令>` exit=<n> at=<HH:MM>`（`ran_line.py` 印的格式）；只有範例佔位（`<…>`）不算。FAIL、HOLD 這類不需要。
+- 嚴重度：專案設定的 `"verdict_self_check"`。`"warn"`（2.3.x 預設）：缺這一行印 `~ WARN SELF_CHECK`，exit code 不變；`"fail"`：裁決 FAIL。設定從 `--config director_work.json` 讀，沒給就找裁決所在資料夾或上一層的 `director_work.json`；值不是 warn / fail 會印一行說明並用 warn。範例見 `director_work.example.json`。
+
+## sim_check.py（2.3.0，N3）
+
+```text
+python -I -X utf8 sim_check.py --patch-config patch.json --sim-config sim.json --measured last.json --sim-output out.json [--tol 0.05]
+```
+
+- patch 和模擬讀同一個具名設定最好（同一個檔直接通過）；不同檔就逐項比（巢狀用 `a.b` 名稱）。`--measured` 的每個數字要在模擬輸出的容差內；沒給 `--measured` 是 FAIL，除非 `--first-run`。不符就「先修模擬」，TR 等它。
+
+## waiver.py（2.3.0，N4）
+
+```text
+python -I -X utf8 waiver.py add     --file WAIVERS.json --lane <線> --until "<解除它的事件>" [--watch <檔>] [--reason "<為什麼>"]
+python -I -X utf8 waiver.py snooze  --file WAIVERS.json --lane <線> --until "<事件>" --minutes 60
+python -I -X utf8 waiver.py lift    --file WAIVERS.json --lane <線>
+python -I -X utf8 waiver.py block   --file WAIVERS.json --branch <分支> [--note "<卡在哪>"]
+python -I -X utf8 waiver.py unblock --file WAIVERS.json --branch <分支>
+python -I -X utf8 waiver.py check   --file WAIVERS.json [--block-hours 8] [--wake-only]
+```
+
+- 豁免存在 JSON 檔（schema `waivers-v1`，原子寫入），每個程序重新讀，重開不會忘。`--until` 寫解除它的事件（例如授權續約、另一條線的 build 出來）；`--watch` 記那個事件會改到的檔的 SHA-256：內容沒變印 `WAIVED … (unchanged; do not wake)`，檔變了、不見了或 `snooze` 的時間到了才印 `WAKE <線>`。沒寫 until 印 `~ WARN NO_UNTIL`。
+- `block` 記錄卡在整合的分支；超過 `--block-hours` 印 `~ INTEGRATION_BLOCKED`：建議在預設關閉的開關後面先合進去，不要一直等。
+- 接法：閒置監看每次跑 `check --wake-only`，有 `WAKE` 行才叫醒那條線。最後一行 `WAIVERS: lanes= wake= blocked_long=`。
+
+## templates/run_closing.py（2.3.0，N5）
+
+```text
+python -I -X utf8 run_closing.py run   --board <看板資料夾> --id <TR-ID> -- <指令> [參數 ...]
+python -I -X utf8 run_closing.py go    --board <看板資料夾> --id <TR-ID> [--wait 300] [--poll 10] [--result <結果檔>]
+python -I -X utf8 run_closing.py check --board <看板資料夾> --id <TR-ID> [--wait 300] [--result <結果檔>]
+```
+
+- `run`：第一件事寫 ACK，跑指令，`finally` 寫 DONE（含 exit code），失敗、中斷也寫：DONE 由腳本自己發，不靠人記得。
+- `go`：寫 GO 並通知，等 `--wait`（預設 5 分鐘）看 ACK。沒 ACK 先看 DONE 或 `--result` 檔（已經跑完印 `DONE_WITHOUT_ACK`，不再吵），都沒有才補通知一次（`RENOTIFY`），再等不到印 `NO_ACK`、exit 1。
+- `check`：印 `NONE / WAIT_ACK / NO_ACK / RUNNING / DONE / DONE_WITHOUT_ACK`；判 NO_ACK 前先看有沒有結果。
+- 範本用 `<id>.GO / .ACK / .DONE` 檔當訊號。接到專案只改 `signal()`（怎麼寫看板、送通知）和 `seen()`（怎麼讀）兩個函式。
+
+## doctor.py --licenses（2.3.0，N6）
+
+```text
+python -I -X utf8 doctor.py --licenses <授權清單.json|.md> [--license-days 3] [--licenses-only]
+```
+
+- 清單：JSON（list 或 `{"licenses": [...]}`，每筆 `tool`、`license`、`expires`）或 Markdown 表（tool / license / expires 欄）。剩不到 `--license-days` 天印 WARN，寫明是哪個工具持有的，例如 `license expiring: trial (held by image-editor) expires …, 2 day(s) left: renew it now`；過期、日期寫錯另列。
+- 一般 doctor 執行把問題列成 WARN；`--licenses-only` 只查授權、不需要 git，最後一行 `LICENSES: ok= expiring= expired= bad=`，有問題 exit 1。
+
+## line_brief.py（2.3.0，N7）
+
+```text
+python -I -X utf8 line_brief.py <線名> --config <status 設定.json>
+python -I -X utf8 line_brief.py <線名> [--board 看板] [--match 字串] [--repo DIR] [--results DIR --glob "*.md"] [--log 檔]
+```
+
+- 設定放在 status 設定的 `"lines"`（`templates/status_director.json` 有範例；`status_gen` 會忽略它）。印 BOARD（看板裡提到這條線的行）、GIT（`status -sb` 和最後一個 commit）、RESULT（最新結果檔和開頭幾行）、LOG（尾段），最後一行 `LINE_BRIEF: <線> board= git= result= log=`；設定了的部分讀不到 exit 1。要看某條線時跑，不是每輪必讀。
+
+## pre_tr.py（2.3.0，N8）
+
+```text
+python -I -X utf8 pre_tr.py --config pre_tr.json (--git-diff <base> | --changed <檔> ... | --classes <類別> ...) [--strict] [--dry-run]
+```
+
+- 設定（schema `pre-tr-v1`，範例 `templates/pre_tr.json`）：每個缺陷類別寫 `paths`（glob）、`checks`（argv、可寫 `{python}`、`{repo}`）和 `why`。改到的類別每個檢查都要 exit 0；類別沒有檢查印 `MISSING`，也擋 TR。沒歸類的檔印 `~ UNCLASSIFIED`（`--strict` 時也擋）。最後一行 `PRE_TR: PASS|BLOCK classes= checks= failed= missing= unclassified=`。
+
+## pack_check.py（2.3.0，F1 + F5）
+
+```text
+python -I -X utf8 pack_check.py check  <審查包> [--leak-regex REGEX] [--min-part-fraction 0.02] [--margin 0]
+python -I -X utf8 pack_check.py readme <審查包> [--out README.md]
+```
+
+- 審查包要有渲染腳本寫的 `manifest.json`（schema `review-pack-v1`：fps、sampled_frames、events、min_phase_frames、period_frames、images 每張的 camera / frame / subject_bbox / part / part_bbox、render、reference_render）。bbox 是渲染器投影出來的，不是從圖猜的。
+- 檢查：事件影格有抽到、最大間隔不超過最短階段的一半、均勻間隔不是動作週期的倍數；主體每格在畫面內（寬高讀 PNG 檔頭）；近景的部位在圖內且佔至少 2%；檔名不帶版本或結論字樣；manifest 和實際檔案一致；動態模糊、景深、非 100% 解析度、有損格式、和參考不同的設定都 FAIL；README 只能列包裡真的有的檔。
+
+## hash_check.py（2.3.0，F2 + F3 + F4）
+
+```text
+python -I -X utf8 hash_check.py compare --expected 基準.json --actual 這次.json [--allow-extra]
+python -I -X utf8 hash_check.py stamp   --sources <來源> ... [--build <輸出> ...] --out build_stamp.json
+python -I -X utf8 hash_check.py fresh   --stamp build_stamp.json [--sources ...] [--build ...]
+python -I -X utf8 hash_check.py show    <組件或執行檔> ...
+```
+
+- `compare`：基準有、這次沒有的案例是 `MISSING`，FAIL，不是略過；多出來的預設也 FAIL。`fresh`：重算來源和輸出的內容雜湊和 stamp 比，不看檔案時間（checkout、複製、解壓都會改時間）。`show` 印 `<絕對路徑> sha256= bytes=`，CPU 重現時印實際跑的那支。做法見 `templates/CPU_REPRO.md`。
+
+## flag_check.py（2.3.0，F6）
+
+```text
+python -I -X utf8 flag_check.py --flags 開關.json --log 執行.log [--before "<第二個 frame 的 log 樣式>"] [--first-lines 400]
+```
+
+- 每個開關在第一個 frame 前要有一行 `flag <NAME> read = <VALUE>`。整數開關讀到 `1.0`、`true` 是 `TYPE`；值不同是 `WRONG`；太晚是 `LATE`；沒有是 `MISSING`。任何一項就 `FLAGS: STOP`：這次執行不判定。程式端寫法（整數解析、值不對就停）見 `templates/CPU_REPRO.md`。
+
+## round_check.py 的條件表（2.3.0）
+
+- 研究檔每一節要有一張「測試條件 vs 參考條件」表（表頭同時寫到 test / 測試 和 reference / 參考 / 基準，至少一列）；沒有印 `~ WARN NO_CONDITIONS_TABLE`（2.3.0 只警告）。
 
 ## selftest.py
 
