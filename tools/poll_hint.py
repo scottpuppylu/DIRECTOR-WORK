@@ -75,6 +75,7 @@ def audit_command(entry):
 
 
 def report(argv):
+    sys.stdout.reconfigure(encoding="utf-8")  # before parse_args: --help prints during parsing
     ap = argparse.ArgumentParser(prog="poll_hint.py report", description="log reads per session from action logs")
     ap.add_argument("--log", action="append", required=True, help="action log or glob (repeatable)")
     group = ap.add_mutually_exclusive_group()
@@ -162,6 +163,7 @@ def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["report"]:
         return report(argv[1:])
+    sys.stdout.reconfigure(encoding="utf-8")  # before parse_args: --help prints during parsing
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--state-dir", default=os.path.join(tempfile.gettempdir(), "dw-poll-hint"))
     ap.add_argument("--window", type=int, default=600, help="seconds (default 600)")

@@ -10395,8 +10395,16 @@ def guarded(test, *args):
         skip(test.__name__, f"needs git, none on PATH ({type(error).__name__} after it started)")
 
 
+# Runs a tool's --help with stdout / stderr in cp1252 (a Windows console with no CJK), whatever this machine uses;
+# -I ignores PYTHONIOENCODING, so the streams are re-wrapped here.
+HELP_CP1252 = ("import io, os, runpy, sys; tool = sys.argv[1]; sys.path.insert(0, os.path.dirname(tool)); "
+               "sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='cp1252'); "
+               "sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='cp1252'); "
+               "sys.argv = [tool, '--help']; runpy.run_path(tool, run_name='__main__')")
+
+
 def test_help_any_console_230(tmp=None):
-    """2.3.0: every tool's --help works on a console that is not UTF-8 (Windows cp950 / cp1252 pipes). Two tools
+    """2.3.0: every tool's --help works on a console that is not UTF-8 (Windows cp950 / cp1252 pipes). Ten tools
     switched stdout to UTF-8 only after parse_args, so --help died with UnicodeEncodeError; run() passes -X utf8 and
     never saw it, so this group runs with UTF-8 mode off."""
     global total
@@ -10404,7 +10412,7 @@ def test_help_any_console_230(tmp=None):
         if tool.name == "selftest.py":
             continue
         total += 1
-        done = subprocess.run([sys.executable, "-I", "-X", "utf8=0", str(tool), "--help"], capture_output=True,
+        done = subprocess.run([sys.executable, "-I", "-X", "utf8=0", "-c", HELP_CP1252, str(tool)], capture_output=True,
                               stdin=subprocess.DEVNULL, timeout=120)
         out = done.stdout + done.stderr
         if done.returncode != 0 or b"UnicodeEncodeError" in out:

@@ -2190,6 +2190,7 @@ def base_ref_problems(order_text, repo, config, notes, fetched):
 
 
 def main():
+    sys.stdout.reconfigure(encoding="utf-8")  # before parse_args: --help prints during parsing
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     for kind in CHECKS:
         ap.add_argument(f"--{kind}", nargs="+", default=[], metavar="FILE")

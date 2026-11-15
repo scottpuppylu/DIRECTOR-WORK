@@ -334,6 +334,7 @@ def run_report(folder, base_folder):
 
 
 def main():
+    sys.stdout.reconfigure(encoding="utf-8")  # before parse_args: --help prints during parsing
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--director", help="the DIRECTOR folder")
     ap.add_argument("--since", metavar="YYYY-MM-DD")

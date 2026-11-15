@@ -28,7 +28,7 @@ MINOR（版本號照工單 WO-DW-230）：一週試跑學到的事做成工具�
 - `templates/CPU_REPRO.md`（F4、F6、F8）：關掉預設編譯 glob、印組件路徑和雜湊、新鮮度、雜湊比對、整數開關用整數解析並在第一個 frame 印 `flag X read = 值`、碰撞標籤的單元測試寫進檢查清單（DW 本身沒有碰撞邏輯，由專案寫）。
 - `tools/flag_check.py`（F6）：log 裡每個開關的讀取行，型別錯、值錯、太晚、缺行都是 STOP，這次執行不判定。
 - `ran_line.py`（F7）：指令行照作業系統引號（POSIX 單引號、Windows 雙引號），selftest 兩種都測，Linux CI 和 Windows 測的是同一件事。
-- `completion.py`、`report_vs_audit.py`：在不是 UTF-8 的主控台（Windows cp950／cp1252）上 `--help` 會因 UnicodeEncodeError 失敗，因為輸出改成 UTF-8 的那一行在解析參數之後才執行；現在移到解析參數之前。`report_vs_audit.py` 從 2.2.5 就有這個問題。selftest 新增一組：每個工具在 UTF-8 模式關閉時跑 `--help`，必須 exit 0 且沒有編碼錯誤（原本的 `run()` 固定加 `-X utf8`，所以抓不到）。
+- 十個工具（`completion.py`、`report_vs_audit.py`、`gate_check.py`、`metrics_report.py`、`poll_hint.py`、`resume_archive.py`、`scope_check.py`、`trace_report.py`、`transcript_audit.py`、`usage_mix.py`）：在不是 UTF-8 的主控台（Windows cp950／cp1252）上 `--help` 會因 UnicodeEncodeError 失敗，因為輸出改成 UTF-8 的那一行在解析參數之後才執行；現在移到解析參數之前。其中八個從 2.3.0 之前就有這個問題。selftest 新增一組：每個工具的 `--help` 在 stdout／stderr 都是 cp1252 的情況下執行（不管這台機器是什麼主控台），必須 exit 0 且沒有編碼錯誤；原本的 `run()` 固定加 `-X utf8`，cp950 的機器又能編碼中文，所以本機抓不到，只有 CI 的 Windows runner 抓到。
 
 ### 規則（文件和範本）
 
