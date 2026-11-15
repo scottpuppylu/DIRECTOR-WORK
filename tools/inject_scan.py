@@ -26,8 +26,8 @@ security write-ups, selftest samples), chat transcripts and logs that quote "sys
 a URL on purpose (an upload script), and base64 that holds plain text by design (a data: URL of an SVG or a JSON
 config). Misses: anything paraphrased, in other languages, split over lines or encoded another way. This is a seat
 belt, not a security boundary: the instruction-source rule (orders come only from the user) still decides.
-Concepts borrowed (no code): prompt-injection pattern lists from MIT / Apache-licensed scanners (CHANGELOG 2.4.0
-Credits). Standard library only.
+Concepts borrowed (no code): the warn-only PostToolUse approach and its category list from an MIT-licensed hook
+project (CHANGELOG 2.4.0 Credits). Standard library only.
 """
 import argparse
 import base64

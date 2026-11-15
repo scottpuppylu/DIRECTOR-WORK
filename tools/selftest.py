@@ -10796,6 +10796,78 @@ def test_spec_review_wording_240(tmp):
     check("no doc says the spec review is for Strict only", hits == [], ", ".join(hits))
 
 
+def test_completion_deps_240(tmp):
+    """2.4.0 (L10): completion.py depends_on: READY_NOW lists the items not at 100 whose dependencies are all counted
+    100 (a capped 100 does not unblock); BLOCKED says what each waits for; an unknown ID and a cycle warn; a table
+    without the column prints what 2.3.0 printed; JSON lists work. Mutation tested."""
+    c = "completion.py"
+    folder = tmp / "completion_deps_240"
+    folder.mkdir()
+    _write_text(folder / "ev.txt", "captured\n")
+    table = _write_text(folder / "d.md", "| ID | item | score | evidence | 依賴 |\n|---|---|---|---|---|\n"
+                        "| A | base | 100 | ev.txt | |\n| B | uses A | 50 | | A |\n| C | uses B | 0 | | B; A |\n"
+                        "| D | capped | 100 | | |\n| E | needs D | 0 | | D |\n| F | loop1 | 0 | | G |\n"
+                        "| G | loop2 | 0 | | F |\n| H | ghost | 25 | | Z |\n")
+    expect("completion deps: READY_NOW and BLOCKED", c, 0, table,
+           says=["| depends_on |", "| C | uses B | 0 |  | B, A |", "READY_NOW: B (50), D (75)",
+                 "BLOCKED C (0): waits for B", "BLOCKED E (0): waits for D", "BLOCKED H (25): waits for Z",
+                 "WARN dependency cycle: F -> G -> F", "WARN H: depends on Z, not in this table"],
+           lacks=["BLOCKED B", "BLOCKED A"])
+    expect("completion deps: --strict fails on a cycle or an unknown ID", c, 1, table, "--strict", says="WARN H:")
+    plain = _write_text(folder / "p.md", "| ID | score |\n|---|---|\n| A | 50 |\n")
+    expect("completion deps: no column, no new output", c, 0, plain,
+           says="| ID | item | score | critical | evidence | note |", lacks=["READY_NOW", "depends_on", "BLOCKED"])
+    data = _write_text(folder / "d.json", json.dumps([{"id": "J1", "score": 100, "evidence": "ev.txt"},
+                                                      {"id": "J2", "score": 0, "depends_on": ["J1"]},
+                                                      {"id": "J3", "score": 0, "depends_on": "J2 J1"}]))
+    expect("completion deps: a JSON list and space-separated IDs", c, 0, data,
+           says=["READY_NOW: J2 (0)", "BLOCKED J3 (0): waits for J2"])
+    done = _write_text(folder / "all.md", "| ID | score | evidence | depends_on |\n|---|---|---|---|\n"
+                       "| A | 100 | ev.txt | |\n| B | 100 | ev.txt | A |\n")
+    expect("completion deps: everything at 100", c, 0, done, says="READY_NOW: all items at 100")
+    expect("completion deps: --help names the column", c, 0, "--help", says=["depends_on", "READY_NOW", "beads"])
+    mod = load_tool_240("completion")
+    rows, _, _ = mod.score_items(mod.load_items(table), folder)
+    ready, _, warns = mod.readiness(rows)
+    check("completion deps: the real module gives B, D and the cycle",
+          [r["id"] for r in ready] == ["B", "D"] and any("cycle" in w for w in warns), [ready, warns])
+    for name, old, new in (
+            ("no dependency check", '        waiting = [d for d in r["depends_on"] if scores.get(d, -1) < 100]\n',
+             "        waiting = []\n"),
+            ("unknown counts as done", "scores.get(d, -1) < 100", "scores.get(d, 100) < 100"),
+            ("no cycle warning", '    warnings = [f"dependency cycle: {c} (no order can finish these; fix the table)" for c in cycles]\n',
+             "    warnings = []\n")):
+        module = mutant(TOOLS / c, [(old, new)], f"completion_deps_240_{name.replace(' ', '_')}")
+        if module is None:
+            continue
+        ready, _, warns = module.readiness(rows)
+        killed(f"completion deps {name}", [r["id"] for r in ready] != ["B", "D"] or not any("cycle" in w for w in warns))
+
+
+def test_precommit_samples_240(tmp):
+    """2.4.0 (L8): the pre-commit and gitleaks samples exist, say they are samples and download nothing (local
+    hooks only); secret_mask --check takes several files, as a pre-commit hook passes them, and still refuses
+    several files without --check."""
+    root = TOOLS.parent
+    pre = (root / "templates" / ".pre-commit-config.yaml").read_text(encoding="utf-8")
+    leaks = (root / "templates" / ".gitleaks.toml").read_text(encoding="utf-8")
+    check("pre-commit sample: marked SAMPLE ONLY", pre.startswith("# SAMPLE ONLY"), pre[:80])
+    repos = re.findall(r"^\s*-\s*repo:\s*(\S+)", pre, re.M)
+    check("pre-commit sample: local hooks only (nothing downloaded)", repos == ["local"], repos)
+    check("pre-commit sample: runs the secret scan and the selftest",
+          "tools/secret_mask.py --check" in pre and "tools/selftest.py" in pre and "stages: [pre-push]" in pre)
+    check("gitleaks sample: marked SAMPLE ONLY, keeps the default rules",
+          leaks.startswith("# SAMPLE ONLY") and "useDefault = true" in leaks, leaks[:80])
+    folder = tmp / "precommit_240"
+    folder.mkdir()
+    clean = _write_text(folder / "a.txt", "nothing here\n")
+    dirty = _write_text(folder / "b.txt", "token " + "ghp_" + "Zz9" * 12 + "\n")  # synthetic, built at run time
+    expect("secret_mask --check: several files, one with a secret", "secret_mask.py", 1, "--check", clean, dirty,
+           says=["FOUND github_token", "SECRETS: 1 kind(s)"], lacks="Zz9Zz9")
+    expect("secret_mask --check: several clean files", "secret_mask.py", 0, "--check", clean, clean, says="SECRETS: 0 kind(s)")
+    expect("secret_mask: several files without --check is refused", "secret_mask.py", 2, clean, dirty, lacks="Zz9Zz9")
+
+
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="director_work_selftest_")).resolve()
@@ -10923,6 +10995,8 @@ def main():
         guarded(test_inject_scan_240, tmp)
         guarded(test_usage_loops_240, tmp)
         guarded(test_spec_review_wording_240, tmp)
+        guarded(test_completion_deps_240, tmp)
+        guarded(test_precommit_samples_240, tmp)
         guarded(test_help_any_console_230, tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

@@ -91,7 +91,28 @@
   讀 `c1` 的回應（categories、autoCompactThreshold、skills、memoryFiles）。**不呼叫模型。** 兩行之間要等 MCP 連上（工具預設等 20 秒），一啟動就問會漏掉 MCP 那幾列。`totalTokens` 不含 deferred 那幾列。
 - **絕對不要用 `claude -p "/context"` 量**：那會真的呼叫模型、花額度。
 - **歷史用量**：`tools/usage_report.py` 讀本機對話紀錄的 usage 欄位，只彙總數字，不印內容。紀錄格式不是官方介面，CLI 改版後可能讀不到；官方建議的是 OpenTelemetry 的 token 指標。
+- **交叉核對（2.4.0，選用，DW 不依賴它們）**：`usage_report.py` 讀的是本機紀錄，格式不是官方介面，數字可以用另外兩個來源對一次：
+  - **另一個本機計數器**：例如 ccusage（MIT，使用者自己裝；DW 沒有附它，也不呼叫它）。它也讀 `~/.claude/projects/` 的紀錄。用同一段日期，比總 token（輸入、輸出、快取讀、快取寫）是否大致一樣。它的欄位名稱和是否也去掉重複的 message id：NOT_VERIFIED（沒查到官方說明），差很多時先看兩邊算的範圍是否相同（專案、日期、含不含 subagent）。
+  - **Claude Code 的 OpenTelemetry 指標**（官方：https://code.claude.com/docs/en/monitoring-usage ，2026-11-15 查）：`CLAUDE_CODE_ENABLE_TELEMETRY=1`，`OTEL_METRICS_EXPORTER=console`（本機看）或 `otlp`（送到自己的收集器），可加 `OTEL_METRIC_EXPORT_INTERVAL=1000`。token 數在 `claude_code.token.usage`，屬性 `type` 是 `input` / `output` / `cacheRead` / `cacheCreation`（`input` 不含快取），另有 `model`；費用在 `claude_code.cost.usage`（USD，訂閱制下只是估算）。對照方式：`usage_report.py` 的每次呼叫上下文 = input + cache read + cache creation，對 OTel 是同一段時間三種 `type` 相加。這是官方指標，比讀紀錄可靠；要開它要改環境變數，屬於設定，照本專案規則先取得同意。
+  - 兩邊差超過一成：記下兩個數字和範圍，當成「量法不同」回報，不挑一個當真值。
 - **讀不到數字不等於 0，估計值不能當實測。** 拿不到就寫 `UNKNOWN`，估的就標 `ESTIMATED`。上下文變小也不等於額度省了：改完重量一次，用同樣的工具比前後的數字，才算省到。
+
+### 按需程序要不要改成 skill（2.4.0 實測，結論：不採用）
+
+問題：`docs/06b` 改成 skill 格式（`.claude/skills/<名稱>/SKILL.md`，平常只有一行說明常駐，內文用到才載入；格式依官方 skills 文件 https://code.claude.com/docs/en/skills ，2026-11-15 查）會不會讓每輪固定成本變小。
+
+用 `context_probe.py` 在同一台機器、同一個帳號量三種設定（各一個暫存資料夾，只差下面這一項，2026-11-15）：
+
+| 設定 | Memory files | Skills | 和現在比 |
+|---|---|---|---|
+| 現在：專案 CLAUDE.md 只放 `templates/CLAUDE_PROJECT_SECTION.md`（裡面一句指向 `docs/06b`） | 1261 | 9943 | 0 |
+| skill 版：同上，再加一個內文是 `docs/06b` 的 SKILL.md | 1261 | 9942（多一筆 101 token 的說明，清單已到上限，擠掉別的） | 每輪 +101 token（或擠掉一個別的 skill 的說明） |
+| 參考：`docs/06b` 整份放進 CLAUDE.md 常駐 | 3935 | 9943 | 每輪 +2674 token |
+
+- `docs/06b` 現在就是按需讀：每輪只付指向它的那一句，已經在 CLAUDE.md 裡，改成 skill 也不能拿掉（中斷後要照它做，這句是提醒）。所以 skill 版每輪多付一筆說明，淨省為負，**不採用**。
+- 要用到時，兩種做法載入的都是整份內文（約 2674 token），沒有差別。
+- 只有「把 06b 整份常駐」的專案改成 skill 才省（約 2573 token / 輪）；照本規則包做的專案不會那樣放。
+- Skills 那一列有總量上限：skill 很多時，多加一個不一定讓數字變大，而是擠掉別的 skill 的說明，這也是成本。要重量自己的專案，照上面三個資料夾的做法，用 `context_probe.py --cwd <資料夾>` 比 Memory files 和 Skills 兩列。
 
 ## 週期性複查
 

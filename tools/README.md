@@ -18,7 +18,7 @@ Python 3.9 以上，只用標準函式庫。一律用 `python -I -X utf8 <tool> 
 | `report_vs_audit.py`（1.3.0） | 用動作紀錄核對 TASK REPORT：報告說跑過的指令（`RAN:` 和 TESTS / EVIDENCE / DONE 裡的 selftest、Unity、Blender、雜湊檢查）紀錄裡有沒有、exit 和時間對不對；2.2.1 修截斷的長指令（引號、反斜線）比不到；2.2.3 比對多行腳本、省略寫法、多個 AC 編號，印 scope_check 時序 WARN；2.2.4 展開變數、`git -C`、字中 `...`、短 hex、HH:MM:SS、截斷覆蓋 | 不寫 | 不花 |
 | `transcript_audit.py`（2.2.1） | 沒裝 hook 時，從本機 Claude Code transcript（含 subagents）重建一份 hook 格式的動作紀錄，第 1 行標明是重建的 | 只寫 `--out`（已存在要 `--force`） | 不花 |
 | `ran_line.py`（2.2.5） | 從時鐘和指令本身的 exit code 產生 RAN 行（代跑或補記）和 `YYYY-MM-DD HH:MM` 時間戳，不手打；2.3.0 指令行照作業系統引號（POSIX 用單引號） | 只寫 `--to` 指定的檔 | 不花 |
-| `completion.py`（2.3.0） | 完成度表：每項只給 0/25/50/75/100，100 沒有實際行為的證據路徑算 75；加權總分、關鍵路徑、和上次快照比的變化；玩家看得到的項目延後要有決定 | 只寫 `--save` | 不花 |
+| `completion.py`（2.3.0） | 完成度表：每項只給 0/25/50/75/100，100 沒有實際行為的證據路徑算 75；加權總分、關鍵路徑、和上次快照比的變化；玩家看得到的項目延後要有決定；2.4.0 可加 `depends_on` 欄，印 READY_NOW（現在能開工的項目） | 只寫 `--save` | 不花 |
 | `sim_check.py`（2.3.0） | 送 TR 前：patch 和 CPU 模擬讀的設定（時間點、常數、目標）一致，且模擬重現上次實測（容差內） | 不寫 | 不花 |
 | `waiver.py`（2.3.0） | 豁免和延後：`--until` 寫解除的事件、`--watch` 盯的檔內容變了（或 snooze 時間到）才叫醒；存在 JSON 檔，重開讀得回來；整合卡住超過 N 小時建議改成預設關閉的開關先合 | 只寫 `--file` 那份 JSON（原子寫入） | 不花 |
 | `line_brief.py`（2.3.0） | 一條工作線的摘要一次印完：看板行、git 狀態和最後 commit、最新結果檔開頭、log 尾段 | 不寫 | 不花 |
@@ -38,7 +38,7 @@ Python 3.9 以上，只用標準函式庫。一律用 `python -I -X utf8 <tool> 
 | `doctor.py` | 2.3.0 `--licenses` 列出快到期的授權和持有的工具。報告一個 worktree 實際生效的防護：claude 版本（生效的那個和 PATH 上每一個）、各設定層合併後的 hook、動作紀錄、權限規則、`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`、隔離、worktree、各 worktree 最近有沒有 session 從那裡啟動；每項標 ENFORCED / CONFIGURED_NOT_VERIFIED / NOT_ENFORCED / MISSING | 不寫 | 不花：`claude --version` 只在本機印版本 |
 | `status_gen.py`（1.3.0） | 產生一支工作線的 `status.py`：log 尾段、雜湊、磁碟 GiB、git、最新輸出；總監版再加待決頁計數、未結案工單、未送出訊息、最近 1 小時的動作紀錄、常駐程序 | 只寫 `--out` 那一支（已存在要 `--force`）；產生的 `status.py` 不寫 | 不花 |
 | `poll_hint.py`（1.3.0） | PostToolUse hook：同一個 session 10 分鐘內讀同一份 log 第 3 次時，提示「等完成通知」，不擋；`report` 從動作紀錄算各 session 讀 log 的次數 | hook 只寫暫存資料夾的小狀態檔；`report` 不寫 | 不花 |
-| `secret_mask.py` | 把文字裡的私鑰、token、API key、JWT、`password=` 這類值換成 `[MASKED:種類]`；`--check` 只列出找到的種類 | 不寫 | 不花 |
+| `secret_mask.py` | 把文字裡的私鑰、token、API key、JWT、`password=` 這類值換成 `[MASKED:種類]`；`--check` 只列出找到的種類（2.4.0 起 `--check` 可給多個檔，給 pre-commit 用） | 不寫 | 不花 |
 | `pause_ctl.py` | 暫停開關：`on` / `off` 寫入或移除 `<DIRECTOR>/PAUSE` 並記進 `DIRECTOR_LOG.md`，`status` 印目前狀態；`procs` 依 CPU 增量列出停機後程序樹還剩哪些 | `on` / `off` 只寫旗標檔和 LOG 一行；`procs` 不寫、不結束任何程序 | 不花 |
 | `audit_log.py` | 動作紀錄：PostToolUse / PostToolUseFailure hook 把每個工具呼叫寫成一行有雜湊鏈的 JSONL；`verify` 檢查鏈和總監的錨點，`head` 印錨點，`cite` 印 TASK REPORT 引用的區段；`recover`（2.2.0）留複本後接著寫 | `append` 只寫紀錄檔和它的 `.lock`；其他不寫 | 不花 |
 | `guard_rules.json` | `hook_guard.py --rules` 的規則檔：每條規則的類別、worker / director 的結論、比對方式、正反例子和要寫進 settings 的權限規則 | — | — |
@@ -216,7 +216,10 @@ python -I -X utf8 pause_ctl.py procs --pids-file <檔案>                       
 ```text
 python -I -X utf8 secret_mask.py [FILE]          # 印出遮罩後的 FILE（沒給就讀 stdin），exit 0
 python -I -X utf8 secret_mask.py --check [FILE]  # 每種找到的機密印一行 FOUND kind，最後 SECRETS: n kind(s)；有找到就 exit 1
+python -I -X utf8 secret_mask.py --check A B C   # 2.4.0：多個檔一起查（pre-commit 一次傳多個檔）；不加 --check 只能給一個檔
 ```
+
+- 範例（2.4.0，選用，DW 不依賴）：`templates/.pre-commit-config.yaml`（本機 hook：commit 前跑 `secret_mask.py --check`、push 前跑 selftest，不下載任何東西）和 `templates/.gitleaks.toml`（保留 gitleaks 預設規則，加一條使用者家目錄路徑規則）。要用就自己裝 pre-commit／gitleaks，把檔案複製到專案根目錄。
 
 - 整段換成 `[MASKED:種類]`：私鑰區塊、AWS access key、GitHub token 和 fine-grained PAT、Anthropic / OpenAI key、Slack token、Google API key、npm token、JWT。
 - 保留前段、只遮值：`Authorization: Bearer` / `Basic` / `token` 後面的值、URL 裡的密碼（`https://user:密碼@host`）、名稱含 password、passphrase、token、secret、api_key、access_key、private_key、client_secret、auth 的 `名稱=值` 或 `名稱: 值`。
@@ -833,6 +836,7 @@ python -I -X utf8 completion.py <完成度表.md|.json> [--previous 上週.json]
 - 表要有 ID 欄和分數欄（`ID / 編號`、`score / 分數`），可加 `item / 項目`、`evidence / 證據`、`critical / 關鍵`、`weight / 權重`、`visibility / 可見度`、`phase / 階段`、`decision / 決定`。分數只能是 0 / 25 / 50 / 75 / 100。
 - 100 要有證據路徑（存在、非空），沒有就算 75 並印 WARN：分數背後要有實際行為的紀錄。`visibility` 高的項目寫延後（after alpha、延後、later）要有 `decision`，否則 WARN。
 - `--previous` 多印 `prev` 和 `delta` 欄；`--save` 寫快照（schema `completion-v1`）。不是每輪必讀：被問進度或每週跑。
+- 2.4.0（L10）：可加 `depends_on / 依賴 / 前置` 欄（ID 用 `;`、`,` 或空白分開；JSON 用 list）。有任何一列填了，就多印 `depends_on` 欄、`READY_NOW:`（還沒到 100、依賴全部算 100 的項目；被壓成 75 的 100 不算完成）和每個卡住項目一行 `BLOCKED <ID> (<分數>): waits for ...`。依賴的 ID 不在表裡、或依賴繞成一圈，印 WARN（`--strict` 會 exit 1）。沒有這一欄的舊表，輸出和 2.3.0 一模一樣。概念來自 steveyegge/beads（MIT），沒有複製程式碼。
 
 ## gate_check.py --feasibility（2.3.0，N2）
 

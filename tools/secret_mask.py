@@ -3,6 +3,7 @@ and passwords in URLs. Each one becomes [MASKED:<kind>], with no part of the sec
 
   python -I -X utf8 secret_mask.py [FILE]          print FILE (or stdin) masked; exit 0
   python -I -X utf8 secret_mask.py --check [FILE]  print only "FOUND kind" per kind and a SECRETS line; exit 1 when any
+                                                   (2.4.0: --check takes several FILEs, as a pre-commit hook passes them)
 
 Used as a module by the action log (mask before writing). It masks common formats only: a token in a format it has
 not seen goes through. A 40-character git SHA or a sha256 on its own is never masked.
@@ -99,11 +100,16 @@ def mask_tree(value, key=None):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("file", nargs="?", help="text file (default: stdin)")
+    ap.add_argument("file", nargs="*", help="text file(s) (default: stdin); several files only with --check")
     ap.add_argument("--check", action="store_true", help="only list the kinds found; exit 1 when any")
     a = ap.parse_args()
     sys.stdout.reconfigure(encoding="utf-8")
-    text = pathlib.Path(a.file).read_text(encoding="utf-8", errors="replace") if a.file else sys.stdin.read()
+    if len(a.file) > 1 and not a.check:
+        ap.error("several files only with --check")
+    if a.file:
+        text = "\n".join(pathlib.Path(f).read_text(encoding="utf-8", errors="replace") for f in a.file)
+    else:
+        text = sys.stdin.read()
     masked, kinds = mask(text)
     if a.check:
         for kind in kinds:

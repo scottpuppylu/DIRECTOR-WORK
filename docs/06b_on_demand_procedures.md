@@ -48,6 +48,7 @@ PO 手動停止後再讓它繼續，也要先完整跑一次這個程序：停�
 
 - stash 是所有 worktree 共用的，可能拿到別的 session 的修改。真的要 stash，用 `git stash push -u -m "<唯一標記>"`，記下 SHA，用 `git stash apply <sha>` 還原。
 - 可選：`tools/setup_project_settings.py --hooks` 裝 hook，提醒 `docs/08` 的 git 禁止事項和依名稱結束程序（`--guard-mode block` 才擋）；只是安全帶，規則照樣要守。
+- **hook 在 subagent 裡的限制（2.4.0）**：社群有回報說 subagent 的工具呼叫可能不經過 PreToolUse hook：NOT_VERIFIED（沒有實測；要另一個 CLI 登入才能測）。官方 hooks 文件（https://code.claude.com/docs/en/hooks ，2026-11-15 查）寫的是 PreToolUse / PostToolUse 在 subagent 裡也會觸發，輸入帶 `agent_id` / `agent_type`。兩者對不上，所以不要把 hook 當成 subagent 的唯一防線：派 subagent 的工作線，事後用 `tools/transcript_audit.py`（讀主 transcript 旁的 `subagents/*.jsonl`）重建 subagent 的動作，和動作紀錄對照；`loop_guard.py scan --transcript` 也會一起讀 subagent 的 transcript。
 - PO 授權了私人備份推送時，用一支會拒絕大檔與疑似秘密、只做一般 push、事後核對遠端 SHA 的腳本；腳本拒絕就停下回報，不繞過。
 
 ### 下載與開源工具（2.1.0 從 `docs/08` 移來）
