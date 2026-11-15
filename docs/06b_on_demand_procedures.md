@@ -69,6 +69,8 @@ PO 手動停止後再讓它繼續，也要先完整跑一次這個程序：停�
 - 同一個資料夾啟動的 session（總監、worker、清理員）共用同一份 settings。要依 session 給不同的防護，用 `setup_project_settings.py --session-map <sessions 檔>`（`templates/guard_sessions.json`），`hook_guard.py --sessions` 依 `session_id` 選 director / worker / cleaner；受保護清單對每個角色都有效。
 - settings 只從 session 啟動的資料夾讀。`tools/doctor.py` 列出各 worktree 最近啟動過幾個 session：`settings unread`（有防護、卻沒有 session 從那裡啟動）或 `launch folder unguarded`（session 從沒有防護的資料夾啟動）都要處理。
 - 每週用 `tools/poll_hint.py report --log <動作紀錄> --days 7` 看各線手動讀 log 的次數，次數高的線提醒它等完成通知（L-041）。
+- 單一工作線的摘要（2.3.0）：`tools/line_brief.py <線名> --config <status 設定>` 一次印那條線的看板行、git 狀態和最後一個 commit、最新結果檔的開頭、log 尾段；設定寫在 status 設定的 `"lines"`（`templates/status_director.json`）。要看某條線時跑它，不逐項查；不是每輪必讀。
+- 授權快到期（2.3.0）：`tools/doctor.py --licenses <授權清單>` 列出剩不到 3 天（`--license-days`）的授權和是哪個工具持有的；只檢查授權用 `--licenses-only`。清單是 JSON 或 Markdown 表（tool / license / expires）。
 
 ### 額度重置後的喚醒
 

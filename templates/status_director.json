@@ -1,4 +1,8 @@
 {
+  "lines": {
+    "line-a": {"board": "board/STATUS.md", "match": "line-a", "repo": "../line-a", "results": "../line-a/out",
+               "glob": "RESULT*.md", "log": "../line-a/run.log"}
+  },
   "schema_version": 1,
   "name": "director",
   "po_page": {

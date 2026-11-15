@@ -50,10 +50,12 @@ import sys
 
 KEYS = {"name": str, "logs": list, "log_lines": int, "hash_files": list, "checksum": list, "outputs": list,
         "output_count": int, "disk": str, "disk_min_gib": (int, float), "git": str, "max_lines": int, "width": int,
-        "po_page": dict, "orders": dict, "pending_sends": dict, "audit": dict, "processes": list}
+        "po_page": dict, "orders": dict, "pending_sends": dict, "audit": dict, "processes": list,
+        "lines": dict}  # 2.3.0: "lines" is read by line_brief.py; status.py ignores it
 DEFAULTS = {"name": "status", "logs": [], "log_lines": 8, "hash_files": [], "checksum": [], "outputs": [],
             "output_count": 5, "disk": None, "disk_min_gib": None, "git": None, "max_lines": 60, "width": 160,
-            "po_page": None, "orders": None, "pending_sends": None, "audit": None, "processes": []}
+            "po_page": None, "orders": None, "pending_sends": None, "audit": None, "processes": [],
+            "lines": None}
 DIRECTOR_KEYS = ("po_page", "orders", "pending_sends", "audit", "processes")
 CLOSED = r"(?im)^\s*(?:STATUS|狀態)\s*[:=：]\s*(?:CLOSED|DONE|ACCEPTED|結案)"
 UNSENT = r"^\s*[-*] \[ \]"

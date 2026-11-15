@@ -16,6 +16,7 @@ COORDINATOR: <已送 / 已取得的 TEST REQUEST、GO> 或 NONE
 PARTIAL_OUTPUTS_TO_DISCARD: <被中斷時要重做的輸出路徑> 或 NONE
 KEEP_AS_EVIDENCE: <要保留的證據路徑>（同一路徑不得同時出現在可回收清單）
 FIX_ROUNDS: <每個修過的缺陷一行：`- <缺陷>: round=<累計輪次> set=<組> study=<ROOT_CAUSE_STUDY.md 或 NONE>`> 或 NONE
+<研究檔每一節先放 `| 項目 | 測試條件 | 參考條件 |` 表（2.3.0）；宣告一組做完前，核對資料夾、程式、提示詞是同一組>
 OPEN_DECISIONS: <等總監 / PO 的決定> 或 NONE
 DO_NOT_REPEAT: <已失敗的方法，不要重試> 或 NONE
 <!-- 整份 ≤ 20 KiB、單行 ≤ 4 KiB；超過用 tools/resume_archive.py 把舊段落原文搬到 RESUME_HISTORY_<YYYYMMDD>.md（docs/06）。Before: 舊紀錄用 (MM-DD HH:MM) 開頭。 -->

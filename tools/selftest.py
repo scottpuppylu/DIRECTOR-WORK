@@ -92,6 +92,8 @@ VERDICT = """# GATE VERDICT
 {verdict}
 分面向：工程 PASS / 成品 未看 / PO 驗收：未做
 下一步：{step}
+自己查證的證據：
+- `python -I tools/selftest.py` exit=0 at=10:00
 
 ## F. 停止狀態
 NO MERGE / NO PUSH
@@ -129,6 +131,7 @@ GIT_GROUPS = {
     "test_trusted_isolation", "test_rerun_tree_modes_v220", "test_required_final_v220", "test_rerun_brief_v220",
     "test_release_222", "test_base_ref_222", "test_after_verdict_224",
     "test_report_vs_audit_225", "test_gate_order_225", "test_after_verdict_225", "test_scope_shared_225",
+    "test_line_brief_230",
 }
 
 
@@ -9674,6 +9677,645 @@ def test_base_ref_222(tmp):
     expect("BASE_REF 2.2.2: --repo must be a folder", g, 2, "--order", order, "--repo", base / "nope")
 
 
+# ---------------------------------------------------------------- 2.3.0 (WO-DW-230) ----------------------------------
+def test_completion_230(tmp):
+    """2.3.0 N1: completion.py scores items 0/25/50/75/100; 100 needs an existing evidence path, else it counts 75 with a
+    WARN; --save / --previous give the weekly delta; critical items not at 100 are listed; a bad score, a duplicate ID
+    fail (exit 1); --strict fails on a WARN; JSON tables work; an unreadable table is NOT_RUN (exit 2). Mutation tested."""
+    c = "completion.py"
+    folder = tmp / "completion_230"
+    (folder / "ev").mkdir(parents=True)
+    _write_text(folder / "ev" / "run.log", "captured\n")
+    (folder / "ev" / "empty.log").write_text("", encoding="utf-8")
+    table = _write_text(folder / "t.md", "# WO\n| ID | 項目 | 分數 | 證據 | 關鍵 |\n|---|---|---|---|---|\n"
+                        "| P1 | flow | 100 | ev/run.log | yes |\n| P2 | input | 100 | | yes |\n"
+                        "| P3 | ai | 50 | | |\n| P4 | ui | 100 | ev/empty.log | |\n")
+    snap = folder / "week1.json"
+    expect("completion: 100 without evidence counts 75", c, 0, table, "--save", snap,
+           says=["| P1 | flow | 100 | yes | ev/run.log |  |", "| P2 | input | 75 | yes |  | capped at 75: no evidence path |",
+                 "WARN P2: written 100, counted 75", "TOTAL: 75.0 items=4 capped=2", "CRITICAL_PATH: P2 (75)",
+                 "capped at 75: evidence not found: ev/empty.log"])
+    total_ok = snap.is_file() and json.loads(snap.read_text(encoding="utf-8")).get("items", {}).get("P2") == 75
+    check("completion: --save writes the counted scores", total_ok, snap.read_text(encoding="utf-8") if snap.is_file() else "none")
+    _write_text(table, table.read_text(encoding="utf-8").replace("| P3 | ai | 50 |", "| P3 | ai | 75 |"))
+    expect("completion: --previous gives the delta", c, 0, table, "--previous", snap,
+           says=["| P3 | ai | 75 | 50 | +25 |", "TOTAL: 81.2 (prev 75.0, delta +6.2)"])
+    expect("completion: --strict fails on a capped item", c, 1, table, "--strict", says="WARN P2")
+    bad = _write_text(folder / "bad.md", "| ID | score |\n|---|---|\n| A | 60 |\n| A | 50 |\n| B | 25 |\n")
+    expect("completion: a score off the scale and a duplicate ID fail", c, 1, bad,
+           says=["FAIL A: score '60' is not one of 0/25/50/75/100", "FAIL A: duplicate ID", "TOTAL: 25.0 items=1"])
+    data = _write_text(folder / "t.json", json.dumps({"items": [
+        {"id": "J1", "score": 100, "evidence": ["ev/run.log"], "critical": True, "weight": 3},
+        {"id": "J2", "score": 0, "critical": True}]}))
+    expect("completion: a JSON table, weights and the critical path", c, 0, data,
+           says=["TOTAL: 75.0 items=2 capped=0", "CRITICAL_PATH: J2 (0)"])
+    expect("completion: a table without ID / score columns is NOT_RUN", c, 2,
+           _write_text(folder / "none.md", "| a | b |\n|---|---|\n| 1 | 2 |\n"), says="COMPLETION: NOT_RUN")
+    expect("completion: --previous that is not a snapshot is NOT_RUN", c, 2, table, "--previous", data,
+           says="not a completion-v1 snapshot")
+    expect("completion: --help", c, 0, "--help", says="0 / 25 / 50 / 75 / 100")
+    rows = [{"id": "X", "score": "100", "evidence": ""}]
+    for name, swaps in (("no cap", [("        if written == 100 and (not paths or missing):\n",
+                                     "        if False:\n")]),
+                        ("any number", [("        if written not in LEVELS:\n", "        if written is None:\n")])):
+        module = mutant(TOOLS / c, swaps, f"completion_230_{name.replace(' ', '_')}")
+        if module is None:
+            continue
+        got, problems, _ = module.score_items(rows + [{"id": "Y", "score": "60"}], folder)
+        killed(f"completion {name}", got[:1] != [] and got[0]["score"] != 75 or not problems)
+def test_feasibility_230(tmp):
+    """2.3.0 N2: gate_check --feasibility: a record with FEASIBLE_COUNT > 0, an existing SCRIPT and RESULT and every
+    threshold with a real-world source passes; no record, a count of 0, a missing script, a RESULT JSON that disagrees
+    and a threshold with neither source nor `reference` fail; a `reference` threshold is listed as not a gate;
+    --warn exits 0. Mutation tested."""
+    g = "gate_check.py"
+    folder = tmp / "feasibility_230"
+    folder.mkdir()
+    _write_text(folder / "search.py", "print('search')\n")
+    _write_text(folder / "result.json", json.dumps({"feasible_count": 4}))
+    good = ("FEASIBILITY: elbow fix set 2\nFEASIBLE_COUNT: 4\nSCRIPT: search.py\nRESULT: result.json\nTHRESHOLDS:\n"
+            "- elbow_max: 35 deg source=video:clip 17 frame 220\n- swing_time: 0.15 s source=mocap:take 3\n"
+            "- wrist: 5 deg reference\n")
+    record = _write_text(folder / "FEAS.md", good)
+    expect("feasibility: a complete record passes", g, 0, "--feasibility", record,
+           says=["OK   feasibility", "~ REFERENCE wrist: no real-world source; a reference number, not a gate",
+                 "~ THRESHOLDS: 2 gate number(s) with a real-world source"])
+    expect("feasibility: no record fails", g, 1, "--feasibility", folder / "missing.md", says="no feasibility record")
+    cases = (("a count of 0", good.replace("FEASIBLE_COUNT: 4", "FEASIBLE_COUNT: 0"), "FEASIBLE_COUNT 0: the search found no solution"),
+             ("a missing script", good.replace("search.py", "gone.py"), "SCRIPT: gone.py not found"),
+             ("a RESULT that disagrees", good.replace("FEASIBLE_COUNT: 4", "FEASIBLE_COUNT: 7"), "FEASIBLE_COUNT 7 but result.json says feasible_count 4"),
+             ("a threshold without a source", good + "- knee: 10 deg\n", "threshold knee: no real-world source"),
+             ("a source that is not real-world", good.replace("source=mocap:take 3", "source=guess:mine"), "threshold swing_time: no real-world source"),
+             ("an empty field", good.replace("SCRIPT: search.py", "SCRIPT:"), "SCRIPT: missing or empty"),
+             ("a count that is not a number", good.replace("FEASIBLE_COUNT: 4", "FEASIBLE_COUNT: many"), "is not a whole number"))
+    for name, text, says in cases:
+        expect(f"feasibility: {name} fails", g, 1, "--feasibility", _write_text(folder / "bad.md", text), says=says)
+    expect("feasibility: --warn exits 0", g, 0, "--feasibility", _write_text(folder / "bad.md", good + "- knee: 1\n"),
+           "--warn", says="WARN feasibility")
+    for name, old, new in (("no source check", "        if FEAS_SOURCE.search(rest):\n", "        if True:\n"),
+                           ("zero allowed", "            if count <= 0:\n", "            if count < 0:\n")):
+        module = mutant(TOOLS / g, [(old, new)], f"gate_feas_230_{name.replace(' ', '_')}")
+        if module is None:
+            continue
+        wrong = not module.feasibility_problems(_write_text(folder / "m.md", good + "- knee: 1\n"), []) \
+            or not module.feasibility_problems(_write_text(folder / "m.md", good.replace("COUNT: 4", "COUNT: 0").replace(
+                "RESULT: result.json", "RESULT: search.py")), [])
+        killed(f"feasibility {name}", wrong)
+
+
+def test_completion_visibility_230(tmp):
+    """2.3.0 N1 (re-review addition): a high player-visibility item marked "after alpha" without a recorded owner
+    decision gets a WARN (--strict: exit 1); with a decision, or at medium / low visibility, no WARN; a visibility
+    word off the list fails. Mutation tested."""
+    c = "completion.py"
+    folder = tmp / "completion_vis_230"
+    folder.mkdir()
+    head = "| ID | score | 可見度 | phase | decision |\n|---|---|---|---|---|\n"
+    table = _write_text(folder / "v.md", head + "| H1 | 25 | high | after alpha | |\n| H2 | 25 | 高 | 延後 | DD-12 |\n"
+                        "| M1 | 25 | medium | after alpha | |\n| L1 | 0 | low | alpha |  |\n")
+    expect("completion visibility: high + after alpha without a decision warns", c, 0, table,
+           says=["WARN H1: high player visibility marked 'after alpha' without a recorded owner decision",
+                 "| H1 |  | 25 |  | high |"], lacks=["WARN H2", "WARN M1", "WARN L1"])
+    expect("completion visibility: --strict fails it", c, 1, table, "--strict", says="WARN H1")
+    expect("completion visibility: a word off the list fails", c, 1,
+           _write_text(folder / "w.md", head + "| X | 25 | huge | | |\n"), says="FAIL X: visibility 'huge'")
+    module = mutant(TOOLS / c, [('        if seen_by == "high" and DEFERRED.search(str(item.get("phase") or "")) and blank(item.get("decision")):\n',
+                                 '        if False:\n')], "completion_vis_230_mutant")
+    if module is not None:
+        _, _, warns = module.score_items([{"id": "H", "score": "0", "visibility": "high", "phase": "after alpha"}], folder)
+        killed("completion visibility warning", not warns)
+
+
+def test_sim_check_230(tmp):
+    """2.3.0 N3: sim_check.py: the patch's named parameters must equal the simulation's (dotted names, numbers, text);
+    a parameter one side lacks or a different value fails "fix the simulation first"; the simulation must reproduce
+    the last measured run within tolerance (relative --tol, --key-tol, --abs-tol); no measured run fails unless
+    --first-run; one shared file passes by construction; bad JSON is NOT_RUN. Mutation tested."""
+    s = "sim_check.py"
+    folder = tmp / "sim_check_230"
+    folder.mkdir()
+    params = {"timing": {"release_frame": 42, "follow_frames": 12}, "gain": 0.8, "target": "min_jerk"}
+    patch = _write_text(folder / "patch.json", json.dumps(params))
+    sim = _write_text(folder / "sim.json", json.dumps(params))
+    measured = _write_text(folder / "measured.json", json.dumps({"peak_speed": 30.0, "contact_frame": 44, "note": "x"}))
+    out = _write_text(folder / "out.json", json.dumps({"peak_speed": 31.0, "contact_frame": 44}))
+    expect("sim_check: equal params and a reproduced run pass", s, 0, "--patch-config", patch, "--sim-config", sim,
+           "--measured", measured, "--sim-output", out,
+           says=["OK       timing.release_frame = 42", "OK       peak_speed: measured 30.0, simulated 31.0",
+                 "SIM_CHECK: PASS params=4 mismatched=0 measured=2 off=0"])
+    expect("sim_check: one shared file says so", s, 0, "--patch-config", patch, "--sim-config", patch, "--first-run",
+           says=["the patch and the simulation read the same file (intended)", "REPRODUCE: SKIP --first-run"])
+    expect("sim_check: no measured run fails", s, 1, "--patch-config", patch, "--sim-config", sim,
+           says=["REPRODUCE: MISSING", "fix the simulation first"])
+    changed = dict(params, timing={"release_frame": 40, "follow_frames": 12}, target="spline")
+    expect("sim_check: a different timing point and algorithm fail", s, 1, "--patch-config", patch, "--sim-config",
+           _write_text(folder / "sim2.json", json.dumps(changed)), "--first-run",
+           says=["MISMATCH timing.release_frame: patch 42, simulation 40", "MISMATCH target: patch 'min_jerk', simulation 'spline'",
+                 "fix the simulation first", "mismatched=2"])
+    lacking = {k: v for k, v in params.items() if k != "gain"}
+    expect("sim_check: a parameter the simulation lacks fails", s, 1, "--patch-config", patch, "--sim-config",
+           _write_text(folder / "sim3.json", json.dumps(lacking)), "--first-run",
+           says="MISMATCH gain: patch 0.8, not in the simulation config")
+    far = _write_text(folder / "far.json", json.dumps({"peak_speed": 36.0}))
+    expect("sim_check: a run the simulation does not reproduce fails", s, 1, "--patch-config", patch, "--sim-config",
+           sim, "--measured", measured, "--sim-output", far,
+           says=["OFF      peak_speed: measured 30.0, simulated 36.0 (20.0 % > 5 %)",
+                 "OFF      contact_frame: measured 44, the simulation gives nothing", "off=2"])
+    expect("sim_check: --key-tol widens one name", s, 1, "--patch-config", patch, "--sim-config", sim, "--measured",
+           measured, "--sim-output", far, "--key-tol", "peak_speed=0.25", says="off=1",
+           lacks="OFF      peak_speed")
+    expect("sim_check: bad JSON is NOT_RUN", s, 2, "--patch-config", _write_text(folder / "bad.json", "{"),
+           "--sim-config", sim, says="SIM_CHECK: NOT_RUN")
+    expect("sim_check: --help", s, 0, "--help", says="fix the simulation first")
+    module = mutant(TOOLS / s, [("        elif not same(patch[name], sim[name], abs_tol):\n", "        elif False:\n")],
+                    "sim_check_230_params")
+    if module is not None:
+        killed("sim_check params compare", not module.compare_params({"a": 1}, {"a": 2}, [], 0)[1])
+    module = mutant(TOOLS / s, [("        if math.isclose(got, want, rel_tol=rel, abs_tol=abs_tol):\n", "        if True:\n")],
+                    "sim_check_230_run")
+    if module is not None:
+        killed("sim_check reproduce compare", not module.compare_run({"a": 10.0}, {"a": 20.0}, 0.05, {}, 0)[1])
+
+
+def test_waiver_230(tmp):
+    """2.3.0 N4: waiver.py: a waiver names what lifts it (until) and a watch file; check says WAIVED / do not wake
+    while the watch file is unchanged and WAKE once it changes or a snooze ran out; the file is re-read by each new
+    process (a restarted watcher keeps the waivers); a waiver without until warns; a branch blocking integration
+    longer than --block-hours says "merge it behind a default-off flag". Mutation tested."""
+    s = "waiver.py"
+    folder = tmp / "waiver_230"
+    folder.mkdir()
+    store = str(folder / "waivers.json")
+    watch = _write_text(folder / "license.txt", "expires 2026-01-01\n")
+    expect("waiver: add with a watch file", s, 0, "add", "--file", store, "--lane", "lane-a", "--until",
+           "the license is renewed", "--watch", "license.txt", says="ADD lane-a until: the license is renewed")
+    expect("waiver: a restarted check reads it back; unchanged means do not wake", s, 0, "check", "--file", store,
+           says=["WAIVED lane-a until: the license is renewed (license.txt unchanged; do not wake)",
+                 "WAIVERS: lanes=1 wake=0 blocked_long=0"])
+    expect("waiver: --wake-only prints nothing to wake", s, 0, "check", "--file", store, "--wake-only",
+           says="wake=0", lacks="WAIVED")
+    _write_text(watch, "expires 2027-01-01\n")
+    expect("waiver: a changed watch file wakes the lane", s, 0, "check", "--file", store, "--wake-only",
+           says=["WAKE lane-a: license.txt changed since the waiver", "wake=1"])
+    expect("waiver: snooze needs minutes", s, 2, "snooze", "--file", store, "--lane", "lane-b", "--until", "x",
+           says="snooze needs --minutes")
+    expect("waiver: add needs until", s, 2, "add", "--file", store, "--lane", "lane-b", says="needs --until")
+    data = json.loads(pathlib.Path(store).read_text(encoding="utf-8"))
+    data["waivers"].append({"lane": "lane-b", "until": "the build lands", "snooze_until": "2000-01-01T00:00:00+00:00"})
+    data["waivers"].append({"lane": "lane-c", "until": ""})
+    data["blocks"] = [{"branch": "feature-x", "since": "2000-01-01T00:00:00+00:00", "note": "waits on review"}]
+    _write_text(pathlib.Path(store), json.dumps(data))
+    expect("waiver: snooze ran out, no until, long block", s, 0, "check", "--file", store,
+           says=["WAKE lane-b: the snooze ran out", "~ WARN NO_UNTIL lane-c",
+                 "~ INTEGRATION_BLOCKED feature-x", "merge it behind a default-off flag", "blocked_long=1"])
+    expect("waiver: block and lift", s, 0, "block", "--file", store, "--branch", "feature-y", says="BLOCK feature-y since")
+    expect("waiver: a fresh block is under the limit", s, 0, "check", "--file", store, "--block-hours", "8",
+           says="BLOCK feature-y 0.0h (limit 8h)")
+    expect("waiver: lift removes the lane", s, 0, "lift", "--file", store, "--lane", "lane-a", says="LIFT lane-a: removed")
+    expect("waiver: a file of another schema is NOT_RUN", s, 2, "check", "--file",
+           _write_text(folder / "other.json", '{"schema": "x"}'), says="WAIVERS: NOT_RUN")
+    module = mutant(TOOLS / s, [("            if now_digest != item.get(\"watch_sha256\"):\n", "            if False:\n")],
+                    "waiver_230_watch")
+    if module is not None:
+        import datetime as _dt
+        now = _dt.datetime.now(_dt.timezone.utc)
+        lines, wake, _ = module.evaluate({"waivers": [{"lane": "a", "until": "u", "watch": "gone.txt",
+                                                       "watch_sha256": "0"}]}, str(folder), now, 8)
+        killed("waiver watch change wakes", wake == 0)
+    module = mutant(TOOLS / s, [("        if hours > block_hours:\n", "        if False:\n")], "waiver_230_block")
+    if module is not None:
+        import datetime as _dt
+        now = _dt.datetime.now(_dt.timezone.utc)
+        killed("waiver long block flagged", module.evaluate({"blocks": [{"branch": "b", "since": "2000-01-01T00:00:00+00:00"}]},
+                                                            str(folder), now, 8)[2] == 0)
+
+
+def test_run_closing_230(tmp):
+    """2.3.0 N5: templates/run_closing.py: run writes ACK first and DONE in a finally block (also when the command
+    fails), with the command's exit code; go waits for ACK, re-notifies once, and says NO_ACK after two notices; a
+    DONE or RESULT file found first is DONE_WITHOUT_ACK, not NO_ACK (go and check). Mutation tested."""
+    s = "../templates/run_closing.py"
+    folder = tmp / "run_closing_230"
+    board = folder / "board"
+    folder.mkdir()
+    expect("run_closing: ACK first, DONE after a failing command", s, 3, "run", "--board", board, "--id", "tr1", "--",
+           sys.executable, "-c", "import sys; sys.exit(3)", says=["ACK tr1", "exit=3"])
+    lines = (board / "tr1.DONE").read_text(encoding="utf-8")
+    check("run_closing: DONE file written", lines.startswith("DONE tr1 ") and "exit=3" in lines, lines)
+    check("run_closing: ACK file written", (board / "tr1.ACK").is_file())
+    expect("run_closing: check says DONE", s, 0, "check", "--board", board, "--id", "tr1", says="DONE tr1")
+    expect("run_closing: go without any ACK is NO_ACK after a second notice", s, 1, "go", "--board", board, "--id",
+           "tr2", "--wait", "0.2", "--poll", "0.05", says=["GO tr2", "RENOTIFY tr2", "NO_ACK tr2"])
+    expect("run_closing: check GO past grace is NO_ACK", s, 1, "check", "--board", board, "--id", "tr2", "--grace", "0",
+           says="NO_ACK tr2")
+    result = _write_text(folder / "RESULT_tr2.md", "PASS\n")
+    expect("run_closing: a RESULT file is looked at before NO_ACK", s, 0, "check", "--board", board, "--id", "tr2",
+           "--grace", "0", "--result", result, says="DONE_WITHOUT_ACK tr2", lacks="NO_ACK")
+    expect("run_closing: go finds the RESULT before re-notifying", s, 0, "go", "--board", board, "--id", "tr2",
+           "--wait", "0.1", "--poll", "0.05", "--result", result, says="DONE_WITHOUT_ACK tr2", lacks="RENOTIFY")
+    helper = _write_text(folder / "ack_second.py", "import pathlib, sys\n"
+                         "flag = pathlib.Path(sys.argv[1]) / 'notified'\n"
+                         "if flag.exists():\n    (pathlib.Path(sys.argv[1]) / (sys.argv[2] + '.ACK')).write_text('ACK')\n"
+                         "else:\n    flag.write_text('1')\n")
+    expect("run_closing: the second notice gets the ACK", s, 0, "go", "--board", board, "--id", "tr3", "--wait", "0.3",
+           "--poll", "0.05", "--notify", f'"{sys.executable}" "{helper}" "{board}" tr3',
+           says=["RENOTIFY tr3", "ACK_SEEN tr3"], lacks="NO_ACK")
+    module = mutant(TEMPLATES / "run_closing.py", [("    elif finished(a.board, a.id, a.result):\n        state = \"DONE_WITHOUT_ACK\"",
+                                                    "    elif False:\n        state = \"DONE_WITHOUT_ACK\"")], "run_closing_230_check")
+    if module is not None:
+        import argparse as _ap
+        import contextlib, io
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = module.cmd_check(_ap.Namespace(board=str(board), id="tr2", grace=0.0, result=str(result)))
+        killed("run_closing result before NO_ACK", code == 1)
+
+
+def test_doctor_licenses_230(tmp):
+    """2.3.0 N6: doctor.py --licenses: fewer than 3 days left warns and names the tool that holds the license; past
+    the date and an unreadable date warn too; 3 days left is fine; JSON and Markdown tables; --licenses-only needs no
+    worktree. Mutation tested."""
+    s = "doctor.py"
+    folder = tmp / "licenses_230"
+    folder.mkdir()
+    data = json.dumps([{"tool": "image-editor", "license": "trial", "expires": "2026-11-17"},
+                       {"tool": "renderer", "license": "edu", "expires": "2026-11-18"},
+                       {"tool": "old-tool", "license": "key", "expires": "2026-11-01"}])
+    lic = _write_text(folder / "licenses.json", data)
+    expect("doctor licenses: 2 days left warns with the tool, 3 days is fine, past is expired", s, 1, "--licenses", lic,
+           "--licenses-only", "--today", "2026-11-15",
+           says=["WARN                     license expiring: trial (held by image-editor) expires 2026-11-17, 2 day(s) left",
+                 "INFO                     license: edu (held by renderer)", "license expired: key (held by old-tool)",
+                 "LICENSES: ok=1 expiring=1 expired=1 bad=0"])
+    table = _write_text(folder / "licenses.md", "| tool | license | expires |\n|---|---|---|\n"
+                        "| capture-app | pro trial | 2026-12-31 |\n| upscaler | key | someday |\n")
+    expect("doctor licenses: Markdown table, bad date", s, 1, "--licenses", table, "--licenses-only", "--today",
+           "2026-11-15", says=["license date unreadable: key (held by upscaler)", "LICENSES: ok=1 expiring=0 expired=0 bad=1"])
+    ok = _write_text(folder / "ok.json", json.dumps({"licenses": [{"tool": "a", "expires": "2026-12-01"}]}))
+    expect("doctor licenses: all fine exits 0", s, 0, "--licenses", ok, "--licenses-only", "--today", "2026-11-15",
+           says="LICENSES: ok=1 expiring=0 expired=0 bad=0")
+    expect("doctor licenses: --license-days widens the window", s, 1, "--licenses", ok, "--licenses-only", "--today",
+           "2026-11-15", "--license-days", "30", says="license expiring: a (held by a)")
+    expect("doctor licenses: unreadable file is NOT_RUN", s, 2, "--licenses", _write_text(folder / "bad.json", "{"),
+           "--licenses-only", says="LICENSES: NOT_RUN")
+    module = mutant(TOOLS / s, [("        elif left < days:\n", "        elif False:\n")], "doctor_230_licenses")
+    if module is not None:
+        import datetime as _dt
+        killed("doctor license expiring", all(f[0] != "expiring" for f in module.license_items(lic, _dt.date(2026, 11, 15))))
+
+
+def test_line_brief_230(tmp):
+    """2.3.0 N7: line_brief.py: one call prints the line's board lines, git status -sb and last commit, the newest
+    RESULT file's head and the log tail; paths come from the "lines" section of a status_gen config (relative to the
+    config) and status_gen accepts that section; a configured part that is missing exits 1; an unknown line is
+    NOT_RUN."""
+    s = "line_brief.py"
+    folder = tmp / "line_brief_230"
+    repo = folder / "line-a"
+    repo.mkdir(parents=True)
+    rel_git(repo, "init", "-q")
+    rel_git(repo, "config", "user.email", "t@example.com")
+    rel_git(repo, "config", "user.name", "t")
+    _write_text(repo / "a.txt", "1\n")
+    rel_git(repo, "add", "a.txt")
+    rel_git(repo, "commit", "-q", "-m", "first brief commit")
+    _write_text(repo / "b.txt", "untracked\n")
+    out = repo / "out"
+    out.mkdir()
+    _write_text(out / "RESULT_old.md", "OLD RESULT\n")
+    time.sleep(0.05)
+    newest = _write_text(out / "RESULT_new.md", "VERDICT: PASS\nline two\n")
+    os.utime(out / "RESULT_old.md", (time.time() - 3600, time.time() - 3600))
+    _write_text(repo / "run.log", "".join(f"log line {i}\n" for i in range(40)))
+    board = folder / "board"
+    board.mkdir()
+    _write_text(board / "STATUS.md", "| line-a | RUNNING | GO 10:00 |\n| line-b | IDLE | - |\n")
+    conf = _write_text(folder / "status.json", json.dumps({"schema_version": 1, "name": "t", "logs": ["line-a/run.log"], "lines": {
+        "line-a": {"board": "board/STATUS.md", "repo": "line-a", "results": "line-a/out", "log": "line-a/run.log"}}}))
+    expect("line_brief: all four parts in one call", s, 0, "line-a", "--config", conf, "--log-lines", "3",
+           says=["| line-a | RUNNING | GO 10:00 |", "?? b.txt", "first brief commit", "RESULT_new.md", "| VERDICT: PASS",
+                 "| log line 39", "LINE_BRIEF: line-a board=1 git=ok result=RESULT_new.md log=ok"],
+           lacks=["line-b", "log line 36", "OLD RESULT"])
+    expect("line_brief: flags without a config; unset parts say not configured", s, 0, "line-b", "--board",
+           board / "STATUS.md", says=["| line-b | IDLE | - |", "not configured", "git=- result=- log=-"])
+    expect("line_brief: a missing log exits 1", s, 1, "line-a", "--config", conf, "--log", folder / "nope.log",
+           says=["MISSING", "log=MISSING"])
+    expect("line_brief: an unknown line is NOT_RUN", s, 2, "line-z", "--config", conf, says=["LINE_BRIEF: NOT_RUN", "line-a"])
+    expect("status_gen accepts the lines section", "status_gen.py", 0, "--config", conf, "--out", folder / "status.py")
+    check("line_brief: newest result file was used", newest.is_file())
+
+
+def test_pre_tr_230(tmp):
+    """2.3.0 N8: pre_tr.py: the classes the changed files touch run all their CPU checks; a failing check or a touched
+    class without a check blocks the TR; a class with "checks": [] and a why is fine; unclassified files warn (block
+    with --strict); --classes and --dry-run; the example config in templates/ loads. Mutation tested."""
+    s = "pre_tr.py"
+    folder = tmp / "pre_tr_230"
+    folder.mkdir()
+    _write_text(folder / "ok.py", "print('contact ok')\n")
+    _write_text(folder / "bad.py", "import sys\nprint('label mismatch at frame 12')\nsys.exit(1)\n")
+    conf = _write_text(folder / "pre_tr.json", json.dumps({"schema": "pre-tr-v1", "classes": {
+        "collision": {"paths": ["src/physics/*"], "checks": [{"name": "contact test", "cmd": ["{python}", "ok.py"]}]},
+        "determinism": {"paths": ["src/sim/*"], "checks": [{"name": "hash compare", "cmd": ["{python}", "bad.py"]}]},
+        "ui": {"paths": ["src/ui/*"]},
+        "docs": {"paths": ["*.md"], "checks": [], "why": "text only"}}}))
+    expect("pre_tr: a touched class with a passing check passes", s, 0, "--config", conf, "--changed",
+           "src/physics/body.py", "README.md", says=["CLASS collision: src/physics/body.py", "PASS collision: contact test",
+                                                     "~ no CPU check by design: text only", "PRE_TR: PASS classes=2 checks=1"])
+    expect("pre_tr: a failing check blocks with its output", s, 1, "--config", conf, "--changed", "src/sim/step.py",
+           says=["FAIL determinism: hash compare", "| label mismatch at frame 12", "PRE_TR: BLOCK", "failed=1"])
+    expect("pre_tr: a touched class without a check blocks", s, 1, "--config", conf, "--changed", "src/ui/hud.py",
+           says=["MISSING ui: no CPU check", "missing=1"])
+    expect("pre_tr: an unclassified file warns", s, 0, "--config", conf, "--changed", "tools/x.py",
+           says=["~ UNCLASSIFIED tools/x.py", "unclassified=1"])
+    expect("pre_tr: --strict blocks an unclassified file", s, 1, "--config", conf, "--changed", "tools/x.py",
+           "--strict", says="PRE_TR: BLOCK")
+    expect("pre_tr: --classes runs a class by name", s, 1, "--config", conf, "--classes", "determinism",
+           says="FAIL determinism: hash compare")
+    expect("pre_tr: --dry-run lists, runs nothing", s, 0, "--config", conf, "--classes", "determinism", "--dry-run",
+           says=["WOULD RUN determinism: hash compare", "(dry run)"], lacks="FAIL")
+    expect("pre_tr: unknown class is NOT_RUN", s, 2, "--config", conf, "--classes", "nope", says="PRE_TR: NOT_RUN")
+    expect("pre_tr: the example config loads", s, 0, "--config", TEMPLATES / "pre_tr.json", "--changed", "docs/a.md",
+           "--dry-run", says="~ no CPU check by design")
+    module = mutant(TOOLS / s, [("    blocked = failed or missing or (a.strict and free)\n",
+                                 "    blocked = failed or (a.strict and free)\n")], "pre_tr_230_missing")
+    if module is not None:
+        import contextlib, io
+        with contextlib.redirect_stdout(io.TextIOWrapper(io.BytesIO(), encoding="utf-8")):
+            code = module.main(["--config", str(conf), "--changed", "src/ui/hud.py"])
+        killed("pre_tr missing check blocks", code == 0)
+
+
+def _png_230(path, width, height):
+    """A PNG header with this size (enough for pack_check's size read)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"\x89PNG\r\n\x1a\n" + (13).to_bytes(4, "big") + b"IHDR" + width.to_bytes(4, "big")
+                     + height.to_bytes(4, "big") + b"\x08\x02\x00\x00\x00" + b"\x00" * 4)
+    return path
+
+
+def test_pack_check_230(tmp):
+    """2.3.0 F1 + F5: pack_check.py: an event frame not sampled, a step longer than half the shortest phase and a
+    step that is a multiple of the motion period fail; a subject leaving the frame (size from the PNG header), a
+    close-up whose part is outside or too small, a version code in a file name, a file not in the manifest, a render
+    setting that makes false defects (motion blur, lossy format, a key unlike the reference) and a README that does
+    not list the pack's real files fail; readme writes the list from the files. Mutation tested."""
+    s = "pack_check.py"
+    pack = tmp / "pack_230"
+    good = {"schema": "review-pack-v1", "fps": 30, "sampled_frames": [42, 43, 44, 45], "events": {"contact": 44},
+            "min_phase_frames": 4,
+            "images": [{"file": "img/cam_a_0044.png", "camera": "cam_a", "frame": 44, "subject_bbox": [100, 50, 900, 700]},
+                       {"file": "img/cam_b_0044.png", "camera": "cam_b", "frame": 44, "subject_bbox": [10, 10, 500, 600],
+                        "part": "glove", "part_bbox": [100, 100, 400, 400]}],
+            "render": {"motion_blur": False, "resolution_percent": 100, "file_format": "PNG", "view": "Standard"},
+            "reference_render": {"view": "Standard"}}
+    _png_230(pack / "img" / "cam_a_0044.png", 1000, 800)
+    _png_230(pack / "img" / "cam_b_0044.png", 1000, 800)
+    manifest = pack / "manifest.json"
+    _write_text(manifest, json.dumps(good))
+    expect("pack_check: a good pack passes", s, 0, "check", pack, says="PACK_CHECK: PASS images=2 findings=0")
+    expect("pack_check: readme lists the real files", s, 0, "readme", pack, says="README written")
+    readme = (pack / "README.md").read_text(encoding="utf-8")
+    check("pack_check: README lists every image with its size", "| img/cam_b_0044.png |" in readme and "1000x800" in readme,
+          readme[:300])
+    expect("pack_check: a generated README passes", s, 0, "check", pack, says="PACK_CHECK: PASS")
+    _write_text(pack / "README.md", readme + "| img/cam_c_0044.png | 1 |  |  |  |\n")
+    expect("pack_check: a README listing a missing file fails", s, 1, "check", pack,
+           says="README: lists img/cam_c_0044.png, which the pack does not hold")
+    (pack / "README.md").unlink()
+    bad = json.loads(json.dumps(good))
+    bad["sampled_frames"] = [32, 40, 48]
+    bad["images"][0]["subject_bbox"] = [600, 50, 1100, 700]
+    bad["images"][1]["part_bbox"] = [100, 100, 120, 120]
+    bad["render"].update(motion_blur=True, file_format="JPEG", view="Filmic")
+    _write_text(manifest, json.dumps(bad))
+    _png_230(pack / "img" / "cam_a_0044_v3.png", 1000, 800)
+    expect("pack_check: every defect class is found", s, 1, "check", pack,
+           says=["event contact at frame 44 is not sampled (nearest sample 40)", "largest step 8 frames > half",
+                 "subject [600, 50, 1100, 700] leaves the 1000x800 image", "covers 0.1 % of the image",
+                 "motion_blur is on", "file_format JPEG is lossy", "view = 'Filmic', the reference used 'Standard'",
+                 "names: img/cam_a_0044_v3.png carries a version", "files: img/cam_a_0044_v3.png is in the pack but not in the manifest"])
+    (pack / "img" / "cam_a_0044_v3.png").unlink()
+    alias = json.loads(json.dumps(good))
+    alias.update(sampled_frames=[0, 12, 24, 36, 48], events={}, min_phase_frames=None, period_frames=12)
+    _write_text(manifest, json.dumps(alias))
+    expect("pack_check: a step that is a multiple of the period is aliasing", s, 1, "check", pack,
+           says="uniform step 12 is a multiple of the motion period 12")
+    nobox = json.loads(json.dumps(good))
+    del nobox["images"][0]["subject_bbox"]
+    del nobox["render"]
+    _write_text(manifest, json.dumps(nobox))
+    expect("pack_check: no subject box and no render settings fail", s, 1, "check", pack,
+           says=["no subject_bbox", "render: no render settings"])
+    expect("pack_check: no manifest is NOT_RUN", s, 2, "check", tmp, says="PACK_CHECK: NOT_RUN")
+    module = mutant(TOOLS / s, [("        if not any(abs(f - int(frame)) <= 1 for f in frames):\n", "        if False:\n")],
+                    "pack_check_230_events")
+    if module is not None:
+        killed("pack_check event sampling", not module.sampling({"sampled_frames": [10, 20], "events": {"c": 15}, "images": []}))
+    module = mutant(TOOLS / s, [("        elif not inside(box, width, height, margin):\n", "        elif False:\n")],
+                    "pack_check_230_inside")
+    if module is not None:
+        _write_text(manifest, json.dumps(bad))
+        killed("pack_check subject in frame", not any("leaves the" in f for f in module.image_findings(pack, bad, 0, 0.02)))
+
+
+def test_hash_check_230(tmp):
+    """2.3.0 F2 + F3 + F4: hash_check.py: compare fails a missing expected case (never a skip), a different hash and
+    (by default) an extra case; fresh compares source contents with the stamp and says STALE on a changed, added or
+    removed source even when the build's file time is newer; show prints path and SHA-256; templates/CPU_REPRO.md
+    says to turn off the default compile glob and print the assembly hash, and holds the collision-label line (F8).
+    Mutation tested."""
+    s = "hash_check.py"
+    folder = tmp / "hash_check_230"
+    folder.mkdir()
+    exp = _write_text(folder / "expected.json", json.dumps({"case_a": "aa11", "case_b": "bb22", "case_c": "cc33"}))
+    expect("hash compare: all same passes", s, 0, "compare", "--expected", exp, "--actual", exp,
+           says="HASH_COMPARE: PASS expected=3 same=3 differ=0 missing=0 extra=0")
+    act = _write_text(folder / "actual.json", json.dumps({"cases": {"case_a": "aa11", "case_b": "bb22"}}))
+    expect("hash compare: a missing expected case is FAIL", s, 1, "compare", "--expected", exp, "--actual", act,
+           says=["MISSING case_c", "FAIL, not a skip", "missing=1"])
+    act2 = _write_text(folder / "actual2.json", json.dumps({"case_a": "aa11", "case_b": "XX", "case_c": "cc33", "case_d": "d"}))
+    expect("hash compare: a different hash and an extra case fail", s, 1, "compare", "--expected", exp, "--actual", act2,
+           says=["DIFFER  case_b", "~ EXTRA case_d", "differ=1", "extra=1"])
+    src = folder / "src"
+    src.mkdir()
+    _write_text(src / "a.cs", "class A {}\n")
+    _write_text(src / "b.cs", "class B {}\n")
+    build = _write_text(folder / "app.dll", "binary-1")
+    stamp = folder / "stamp.json"
+    expect("hash stamp", s, 0, "stamp", "--sources", src, "--build", build, "--out", stamp, says="sources=2 build=1")
+    expect("hash fresh: unchanged passes", s, 0, "fresh", "--stamp", stamp, "--build", build, says="FRESH: PASS")
+    _write_text(src / "a.cs", "class A { int x; }\n")
+    os.utime(build, (time.time() + 3600, time.time() + 3600))  # the build looks newer by time; contents decide
+    _write_text(src / "c.cs", "class C {}\n")
+    (src / "b.cs").unlink()
+    expect("hash fresh: a changed / added / removed source is STALE although the build is newer", s, 1, "fresh",
+           "--stamp", stamp, says=["CHANGED", "a.cs", "ADDED", "c.cs", "REMOVED", "b.cs", "FRESH: STALE changed=1 added=1 removed=1"])
+    expect("hash show prints the path and hash", s, 0, "show", build,
+           says=["app.dll sha256=" + hashlib.sha256(b"binary-1").hexdigest(), "bytes=8"])
+    expect("hash compare: bad JSON is NOT_RUN", s, 2, "compare", "--expected", _write_text(folder / "bad.json", "["),
+           "--actual", exp, says="HASH_CHECK: NOT_RUN")
+    repro = (TEMPLATES / "CPU_REPRO.md").read_text(encoding="utf-8")
+    for needle in ("EnableDefaultCompileItems", "hash_check.py show", "flag <NAME> read = <VALUE>", "碰撞標籤",
+                   "DIRECTOR-WORK 沒有碰撞邏輯", "missing=0"):
+        check(f"CPU_REPRO template has {needle}", needle in repro)
+    module = mutant(TOOLS / s, [("        if case not in actual:\n", "        if case not in actual and False:\n")],
+                    "hash_check_230_missing")
+    if module is not None:
+        wrong = True
+        try:
+            wrong = not module.compare({"a": "1"}, {}, False)[2]
+        except KeyError:
+            wrong = True
+        killed("hash compare missing case", wrong)
+
+
+def test_flag_check_230(tmp):
+    """2.3.0 F6: flag_check.py: every requested switch needs a `flag NAME read = VALUE` line before the first frame
+    ends; an int switch logged as 1.0 is a TYPE error; a wrong value, a late line or a missing line is STOP.
+    Mutation tested."""
+    s = "flag_check.py"
+    folder = tmp / "flag_check_230"
+    folder.mkdir()
+    flags = _write_text(folder / "flags.json", json.dumps({"FEATURE_X": 1, "MODE": "fast", "SCALE": 0.5}))
+    log = _write_text(folder / "run.log", "start\nflag FEATURE_X read = 1\nflag MODE read = fast\nflag SCALE read = 0.5\n"
+                      "frame 1 done\nframe 2 done\n")
+    expect("flag_check: all read before the first frame", s, 0, "--flags", flags, "--log", log, "--before", r"frame 2\b",
+           says=["OK FEATURE_X read = 1", "FLAGS: PASS flags=3 ok=3"])
+    bad = _write_text(folder / "bad.log", "flag FEATURE_X read = 1.0\nflag MODE read = slow\nframe 1 done\nframe 2 done\n"
+                      "flag SCALE read = 0.5\n")
+    expect("flag_check: type, value and late lines stop the run", s, 1, "--flags", flags, "--log", bad, "--before",
+           r"frame 2\b", says=["TYPE FEATURE_X: read '1.0', not an int", "WRONG MODE: read slow", "LATE SCALE",
+                               "FLAGS: STOP flags=3 ok=0 wrong=3"])
+    none = _write_text(folder / "none.log", "frame 1 done\n")
+    expect("flag_check: a missing read line is STOP", s, 1, "--flags", flags, "--log", none,
+           says=["MISSING FEATURE_X", "do not judge it", "missing=3"])
+    expect("flag_check: empty flags is NOT_RUN", s, 2, "--flags", _write_text(folder / "e.json", "{}"), "--log", log,
+           says="FLAGS: NOT_RUN")
+    module = mutant(TOOLS / s, [("        if not re.fullmatch(r\"[+-]?\d+\", got):\n", "        if False:\n")],
+                    "flag_check_230_int")
+    if module is not None:
+        wrong = True
+        try:
+            wrong = module.typed_ok(1, "1.0")[1]
+        except ValueError:
+            wrong = True  # a crash instead of a TYPE line is wrong too
+        killed("flag_check int type", wrong)
+
+
+def test_ran_line_posix_230(tmp):
+    """2.3.0 F7: ran_line's command line is checked in both quotings on every OS: POSIX shlex single quotes
+    ('import sys; sys.exit(3)') and Windows double quotes both match the run-mode pattern, so a Linux CI and a
+    Windows run test the same thing."""
+    spec = importlib.util.spec_from_file_location("ran_line_for_230", TOOLS / "ran_line.py")
+    tool = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tool)
+    argv = ["/usr/bin/python3", "-c", "import sys; sys.exit(3)"]
+    pattern = r"^.+ -c [\"']?import sys; sys\.exit\(3\)[\"']?$"
+    posix = tool.command_text(argv, posix=True)
+    windows = tool.command_text(argv, posix=False)
+    check("ran_line POSIX quoting uses single quotes", posix == "/usr/bin/python3 -c 'import sys; sys.exit(3)'", posix)
+    check("ran_line Windows quoting uses double quotes", windows == '/usr/bin/python3 -c "import sys; sys.exit(3)"', windows)
+    check("ran_line POSIX line matches the run-mode pattern", re.search(pattern, posix) is not None, posix)
+    check("ran_line Windows line matches the run-mode pattern", re.search(pattern, windows) is not None, windows)
+    check("ran_line default follows the OS", tool.command_text(argv) == (windows if os.name == "nt" else posix))
+    spaced = tool.command_text(["/opt/my tools/py", "-c", "print('it''s')"], posix=True)
+    check("ran_line POSIX quoting keeps an embedded single quote", spaced.startswith("'/opt/my tools/py' -c ")
+          and shlex.split(spaced)[2] == "print('it''s')", spaced)
+
+
+def test_verdict_self_check_230(tmp):
+    """2.3.0 rule: a PASS-type verdict names at least one check its writer ran, as ran_line.py writes it
+    (`- `<command>` exit=<n> at=<HH:MM>`); a placeholder command or no line means it cannot be PASS. Other verdicts
+    (FAIL, HOLD, ...) do not need it."""
+    d = tmp / "verdict_self_230"
+    d.mkdir()
+    proof = "自己查證的證據：\n- `python -I tools/selftest.py` exit=0 at=10:00\n"
+    bare = VERDICT.replace(proof, "")
+    check("verdict fixture carries the self-check line", proof in VERDICT and proof not in bare)
+    for verdict in ("PASS", "PASS_WITH_WARNINGS", "CONDITIONAL_PASS"):
+        gate(d, f"self_check_missing_{verdict}", "verdict", bare.format(verdict=verdict, step="ACCEPT_AND_CLOSE"), 1,
+             "evidence I checked myself")
+    gate(d, "self_check_present", "verdict", VERDICT.format(verdict="PASS", step="ACCEPT_AND_CLOSE"), 0)
+    gate(d, "self_check_placeholder", "verdict", bare.format(verdict="PASS", step="ACCEPT_AND_CLOSE").replace(
+        "下一步：ACCEPT_AND_CLOSE\n", "下一步：ACCEPT_AND_CLOSE\n- `<指令>` exit=0 at=10:00\n"), 1, "evidence I checked myself")
+    gate(d, "self_check_no_time", "verdict", bare.format(verdict="PASS", step="ACCEPT_AND_CLOSE").replace(
+        "下一步：ACCEPT_AND_CLOSE\n", "下一步：ACCEPT_AND_CLOSE\n- `pytest` exit=0\n"), 1, "evidence I checked myself")
+    gate(d, "self_check_not_needed_for_fail", "verdict", bare.format(verdict="FAIL", step="CONTINUE_SAME_WORKER"), 0)
+    gate(d, "self_check_not_needed_for_hold", "verdict", bare.format(verdict="HOLD", step="STOP_AND_REPORT_BLOCKER"), 0)
+    template = (TEMPLATES / "GATE_VERDICT.md").read_text(encoding="utf-8")
+    check("GATE_VERDICT template asks for the self-check line", "自己查證的證據" in template
+          and "- `<指令>` exit=<n> at=<HH:MM>" in template and "ran_line.py" in template)
+    tool = mutant(TOOLS / "gate_check.py", [("if lines and lines[0] in SELF_CHECK_VERDICTS and not SELF_CHECKED.search(text):",
+                                             "if False:")], "gate_check_no_self_check")
+    if tool is not None:
+        problems = tool.check_verdict(bare.format(verdict="PASS", step="ACCEPT_AND_CLOSE"), [])
+        killed("gate_check without the self-check rule", not any("evidence I checked myself" in p for p in problems))
+
+
+def test_round_conditions_230(tmp):
+    """2.3.0 rule: each root-cause study section starts with a test-conditions-vs-reference-conditions table;
+    round_check warns (not fails, in 2.3.0) when a section lacks it."""
+    d = tmp / "round_conditions_230"
+    d.mkdir()
+    resume = d / "RESUME_STATE.md"
+    resume.write_text("PROGRESS: x\n\nFIX_ROUNDS:\n- hair: round=4 set=2 study=STUDY.md\nOPEN_DECISIONS: NONE\n",
+                      encoding="utf-8")
+    body = "WHERE: the input clip, not the solver\nALTERNATIVES: a ready asset\nDECISION: re-capture\n"
+    table = ("| item | test conditions | reference conditions |\n|---|---|---|\n"
+             "| frame rate | 30 fps | 60 fps |\n\n")
+    (d / "STUDY.md").write_text("## SET 1\n" + table + body, encoding="utf-8")
+    expect("round_check study with a conditions table", "round_check.py", 0, "--resume", resume,
+           says="ROUNDS: PASS", lacks="NO_CONDITIONS_TABLE")
+    (d / "STUDY.md").write_text("## SET 1\n" + body, encoding="utf-8")
+    expect("round_check study without a conditions table warns", "round_check.py", 0, "--resume", resume,
+           says=["~ WARN NO_CONDITIONS_TABLE STUDY.md SET 1", "ROUNDS: PASS"])
+    (d / "STUDY.md").write_text("## SET 1\n| 項目 | 測試條件 | 參考條件 |\n|---|---|---|\n\n" + body, encoding="utf-8")
+    expect("round_check a conditions table with no rows warns", "round_check.py", 0, "--resume", resume,
+           says="~ WARN NO_CONDITIONS_TABLE")
+    (d / "STUDY.md").write_text("## SET 1\n| 項目 | 測試條件 | 參考條件 |\n|---|---|---|\n| 輸入 | 舊片段 | 真實影片 |\n\n"
+                                + body, encoding="utf-8")
+    expect("round_check a Chinese conditions table counts", "round_check.py", 0, "--resume", resume,
+           lacks="NO_CONDITIONS_TABLE")
+    tool = mutant(TOOLS / "round_check.py", [("        if not has_conditions_table(sections[n]):\n",
+                                              "        if False:\n")], "round_check_no_conditions")
+    if tool is not None:
+        killed("round_check without the conditions check",
+               not any("NO_CONDITIONS_TABLE" in p for p in tool.check_defect("hair", {"round": "4", "set": "2",
+                                                                                      "study": "STUDY.md"}, d)))
+
+
+RULES_230 = [
+    ("docs/02_work_orders_gates.md", "先用 DW 現有的工具（2.3.0）"),
+    ("docs/07_quality_gates.md", "**先放一張「測試條件 vs 參考條件」表**"),
+    ("docs/07_quality_gates.md", "放寬量測標準之前（2.3.0）：先做一次盲測"),
+    ("docs/07_quality_gates.md", "核對資料夾、程式和提示詞是同一組"),
+    ("docs/07_quality_gates.md", "涵蓋**每一種情境類型**"),
+    ("docs/07_quality_gates.md", "在成品裡（遊戲內）和真實影片**並排**"),
+    ("docs/07_quality_gates.md", "呈現方式也比對（2.3.0）：HUD、每個階段選哪個鏡頭、切鏡時機、重播"),
+    ("docs/07_quality_gates.md", "不複製任何轉播單位或其他產品的素材、標誌"),
+    ("docs/07_quality_gates.md", "裁決要有「自己查證的證據」（2.3.0）"),
+    ("templates/WORK_ORDER.md", "先用 DW 現有工具（2.3.0）"),
+    ("templates/WORK_ORDER.md", "「測試條件 vs 參考條件」表"),
+    ("templates/WORK_ORDER.md", "放寬量測標準前先做一次盲測"),
+    ("templates/WORK_ORDER.md", "核對資料夾、程式、提示詞是同一組"),
+    ("templates/WORK_ORDER.md", "呈現方式（HUD、各階段鏡頭、切鏡時機、重播）"),
+    ("templates/RESUME_STATE.md", "| 項目 | 測試條件 | 參考條件 |"),
+    ("templates/GATE_VERDICT.md", "自己查證的證據"),
+    ("templates/CPU_REPRO.md", "DIRECTOR-WORK 沒有碰撞邏輯"),
+]
+
+
+def test_rules_docs_230(tmp=None):
+    """2.3.0: the rule lines are in the docs and templates (generic wording)."""
+    root = TOOLS.parent
+    for rel, wanted in RULES_230:
+        text = (root / rel).read_text(encoding="utf-8")
+        check(f"2.3.0 rule in {rel}: {wanted[:30]}", wanted in text)
+
+
+# ---------------------------------------------------------------- end 2.3.0 ------------------------------------------
+
+
 def guarded(test, *args):
     """Run one test group. Without git on PATH, a group that dies on a missing git program is a named skip, not a crash."""
     global total
@@ -9794,6 +10436,22 @@ def main():
         guarded(test_after_verdict_225, tmp)
         guarded(test_final_225, tmp)
         guarded(test_scope_shared_225, tmp)
+        guarded(test_completion_230, tmp)
+        guarded(test_feasibility_230, tmp)
+        guarded(test_completion_visibility_230, tmp)
+        guarded(test_sim_check_230, tmp)
+        guarded(test_waiver_230, tmp)
+        guarded(test_run_closing_230, tmp)
+        guarded(test_doctor_licenses_230, tmp)
+        guarded(test_line_brief_230, tmp)
+        guarded(test_pre_tr_230, tmp)
+        guarded(test_pack_check_230, tmp)
+        guarded(test_hash_check_230, tmp)
+        guarded(test_flag_check_230, tmp)
+        guarded(test_ran_line_posix_230, tmp)
+        guarded(test_verdict_self_check_230, tmp)
+        guarded(test_round_conditions_230, tmp)
+        guarded(test_rules_docs_230, tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     for failure in failures:

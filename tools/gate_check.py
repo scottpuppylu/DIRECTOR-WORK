@@ -151,6 +151,15 @@ Lines starting with `~` are notes for the newer format (v0.10): they never fail 
              DECISION_REGISTER.md table of DD rows without a 驗收案例 column, and each DD row (not SUPERSEDED) whose
              驗收案例 cell is empty: `~ WARN DD_CASE`.
 
+2.3.0 (N2, feasibility before a fix set or a frozen gate):
+  --feasibility RECORD [RECORD ...]
+             before a fix set opens, or a gate's numbers are frozen, a CPU feasibility search must have run. The record
+             holds `FEASIBILITY:` (what it is for), `FEASIBLE_COUNT:` (solutions found; 0 fails: do not open the set),
+             `SCRIPT:` and `RESULT:` (paths from the record's folder that must exist; a JSON RESULT with
+             "feasible_count" must agree) and, for a gate, `THRESHOLDS:` lines `- <name>: <value> source=<video|mocap|
+             measurement|dataset>:<what>`. A threshold without a real-world source fails unless it is marked
+             `reference`; then it is listed `~ REFERENCE` (a reference number, not a gate). No record fails.
+
 Bringing in a project that already has files in another format:
   --warn          print WARN instead of FAIL and exit 0, so old files do not block work
   --since DATE    SKIP files dated before DATE (YYYY-MM-DD): ISSUED_BY of an order, UPDATED of a RESUME_STATE, the
@@ -1753,6 +1762,82 @@ def sequence_problems(order_text, order_path, log_text, log_path, repo, notes):
 E2E_ENTRY = re.compile(r"^[ \t]*ENTRY_POINT[ \t]*[:=][ \t]*\S", re.M)
 
 
+FEAS_FIELD = re.compile(r"^[ \t]*(FEASIBILITY|FEASIBLE_COUNT|SCRIPT|RESULT)[ \t]*[:=][ \t]*(.*?)[ \t]*$", re.M)
+FEAS_THRESHOLD = re.compile(r"^[ \t]*[-*][ \t]+(?P<name>[^:\n]+?)[ \t]*:[ \t]*(?P<rest>.+?)[ \t]*$")
+FEAS_SOURCE = re.compile(r"\bsource[ \t]*=[ \t]*(?P<kind>video|mocap|measurement|dataset)[ \t]*:[ \t]*(?P<what>\S.*)$", re.I)
+FEAS_REFERENCE = re.compile(r"(?:^|\s)(?:reference|參考)(?:\s|$)", re.I)
+
+
+def feasibility_problems(path, notes):
+    """2.3.0 (N2): a feasibility record, written before a fix set opens or a gate threshold is frozen.
+
+    FEASIBILITY: <the fix set or gate it is for>
+    FEASIBLE_COUNT: <how many solutions the CPU search found; 0 = none: do not open the set>
+    SCRIPT: <the search script, a path>
+    RESULT: <its output, a path; a JSON with "feasible_count" must agree>
+    THRESHOLDS:
+    - <name>: <value> source=<video|mocap|measurement|dataset>:<what was measured>
+    - <name>: <value> reference        (no real-world source: a reference number, never a gate)
+    """
+    record = pathlib.Path(path)
+    text = read_or_none(record) if record.is_file() else None
+    if text is None:
+        return [f"no feasibility record ({path} not found or not UTF-8 text): run the CPU feasibility search first and "
+                "write FEASIBILITY / FEASIBLE_COUNT / SCRIPT / RESULT"]
+    fields = {m.group(1): m.group(2) for m in FEAS_FIELD.finditer(text)}
+    problems = [f"{key}: missing or empty" for key in ("FEASIBILITY", "FEASIBLE_COUNT", "SCRIPT", "RESULT")
+                if blank(fields.get(key, "")) or PLACEHOLDER.search(fields.get(key, "") or "")]
+    count = None
+    if "FEASIBLE_COUNT" in fields and not blank(fields["FEASIBLE_COUNT"]):
+        try:
+            count = int(fields["FEASIBLE_COUNT"].split()[0])
+        except ValueError:
+            problems.append(f"FEASIBLE_COUNT: {fields['FEASIBLE_COUNT']!r} is not a whole number")
+        else:
+            if count <= 0:
+                problems.append("FEASIBLE_COUNT 0: the search found no solution inside these limits; do not open the "
+                                "fix set (change the limits, the method or the design first)")
+    for key in ("SCRIPT", "RESULT"):
+        value = (fields.get(key) or "").strip().strip("`")
+        if blank(value) or PLACEHOLDER.search(value):
+            continue
+        target = pathlib.Path(value) if pathlib.Path(value).is_absolute() else record.parent / value
+        if not target.is_file():
+            problems.append(f"{key}: {value} not found (relative to the record's folder)")
+        elif key == "RESULT" and target.suffix.lower() == ".json" and count is not None:
+            try:
+                data = json.loads(target.read_text(encoding="utf-8-sig"))
+            except (OSError, ValueError):
+                notes.append(f"NOT_CHECKED RESULT {value}: not readable JSON")
+                continue
+            got = data.get("feasible_count") if isinstance(data, dict) else None
+            if got is not None and got != count:
+                problems.append(f"FEASIBLE_COUNT {count} but {value} says feasible_count {got}")
+    lines = text.splitlines()
+    start = next((i for i, line in enumerate(lines) if re.match(r"^[ \t]*THRESHOLDS[ \t]*:", line)), None)
+    gates = 0
+    if start is None:
+        notes.append("THRESHOLDS: none listed (a record for a fix set alone; a frozen gate lists its numbers here)")
+        return problems
+    for line in lines[start + 1:]:
+        if not line.strip():
+            continue
+        row = FEAS_THRESHOLD.match(line)
+        if not row:
+            break
+        name, rest = row.group("name").strip(), row.group("rest")
+        if FEAS_SOURCE.search(rest):
+            gates += 1
+        elif FEAS_REFERENCE.search(rest):
+            notes.append(f"REFERENCE {name}: no real-world source; a reference number, not a gate")
+        else:
+            problems.append(f"threshold {name}: no real-world source; write source=video:<clip and frame> / "
+                            "mocap:<take> / measurement:<what> / dataset:<name>, or mark it `reference` (then it is "
+                            "not a gate)")
+    notes.append(f"THRESHOLDS: {gates} gate number(s) with a real-world source")
+    return problems
+
+
 def final_problems(folder, notes):
     """2.2.5 (B5): final acceptance of a DIRECTOR folder (or a folder holding DIRECTOR/)."""
     base = pathlib.Path(folder)
@@ -1794,6 +1879,12 @@ def final_problems(folder, notes):
     return problems
 
 
+# 2.3.0: a PASS-type verdict names at least one check its writer ran: the command and its result, as ran_line.py writes
+# them (`- `<command>` exit=<n> at=<HH:MM>`); a placeholder command does not count.
+SELF_CHECK_VERDICTS = ("PASS", "PASS_WITH_WARNINGS", "CONDITIONAL_PASS")
+SELF_CHECKED = re.compile(r"^\s*-\s*`(?![^`]*<[^`]*>)[^`]+`\s+exit=\d+\s+at=\d\d:\d\d", re.M)
+
+
 def check_verdict(text, notes):
     problems = []
     section = re.search(r"^##\s*A\b.*?$(.*?)(?=^##\s|\Z)", text, re.M | re.S)
@@ -1810,6 +1901,9 @@ def check_verdict(text, notes):
     stop = re.search(r"^##\s*F\b.*?$(.*?)(?=^##\s|\Z)", text, re.M | re.S)
     if not stop or blank(stop.group(1)):
         problems.append("section F (stop state): missing or empty")
+    if lines and lines[0] in SELF_CHECK_VERDICTS and not SELF_CHECKED.search(text):
+        problems.append("evidence I checked myself: a PASS verdict needs at least one line `- `<command>` exit=<n> "
+                        "at=<HH:MM>` (written by ran_line.py) for a check its writer ran; a worker's word is not one")
     return problems
 
 
@@ -2090,6 +2184,9 @@ def main():
                     "approval before the first commit, a spec review per order, reviews from another session")
     ap.add_argument("--final", metavar="DIR", help="2.2.5: final acceptance of a DIRECTOR folder: evidence/E2E/ and the "
                     "DD 驗收案例 column")
+    ap.add_argument("--feasibility", nargs="+", default=[], metavar="RECORD", help="2.3.0: the feasibility record a fix "
+                    "set or a frozen gate needs (FEASIBLE_COUNT, SCRIPT, RESULT; each threshold with a real-world source "
+                    "or marked reference)")
     ap.add_argument("--strict", action="store_true", help="2.2.2: with --resume, RESUME_SIZE fails instead of a shadow note; "
                     "with --after-verdict, the default since 2.2.5 (kept for old commands)")
     ap.add_argument("--config", metavar="director_work.json", help="2.2.2: with --resume, read resume.max_bytes / "
@@ -2171,11 +2268,18 @@ def main():
         print(f"{('WARN' if a.warn else 'FAIL') if problems else 'OK  '} final {a.final}")
         for line in [f"  - {p}" for p in problems] + [f"  ~ {n}" for n in notes]:
             print(line)
-    if not jobs and (a.hash or a.brief or a.after_verdict or a.sequence or a.final) and not a.preflight:
+    for path in a.feasibility:  # 2.3.0 (N2)
+        notes = []
+        problems = feasibility_problems(path, notes)
+        late_failed += bool(problems) and not a.warn
+        print(f"{('WARN' if a.warn else 'FAIL') if problems else 'OK  '} feasibility {path}")
+        for line in [f"  - {p}" for p in problems] + [f"  ~ {n}" for n in notes]:
+            print(line)
+    if not jobs and (a.hash or a.brief or a.after_verdict or a.sequence or a.final or a.feasibility) and not a.preflight:
         return 1 if missing or brief_failed or late_failed else 0
     if not jobs and not a.preflight:
         ap.error("give at least one of --resume / --order / --report / --verdict / --test-request / --po-acceptance / "
-                 "--match / --preflight / --hash / --brief / --after-verdict / --sequence / --final")
+                 "--match / --preflight / --hash / --brief / --after-verdict / --sequence / --final / --feasibility")
     if a.repo and not (a.preflight or a.order or a.after_verdict or a.sequence):
         ap.error("--repo works with --preflight, --order, --after-verdict or --sequence")
     if a.strict and not (a.resume or a.after_verdict):

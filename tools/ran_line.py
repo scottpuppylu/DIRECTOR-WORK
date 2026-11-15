@@ -29,7 +29,7 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = "2.2.5"
+VERSION = "2.3.0"
 RAN_FIELD = re.compile(r"^[ \t]*RAN[ \t]*:")
 RAN_ITEM = re.compile(r"^[ \t]*-[ \t]+`")
 CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
@@ -54,8 +54,10 @@ def clean(text):
     return CONTROL.sub("", re.sub(r"\r?\n", "; ", text)).strip()
 
 
-def command_text(argv):
-    text = subprocess.list2cmdline(argv) if os.name == "nt" else shlex.join(argv)
+def command_text(argv, posix=None):
+    """The command as one line: Windows quoting on Windows, POSIX (shlex) quoting elsewhere; posix= forces one (tests)."""
+    posix = os.name != "nt" if posix is None else posix
+    text = shlex.join(argv) if posix else subprocess.list2cmdline(argv)
     return clean(text)
 
 

@@ -1,0 +1,29 @@
+{
+  "schema": "pre-tr-v1",
+  "_note": "Example for tools/pre_tr.py. Map each defect class to the paths that can cause it and the CPU checks that catch it. Paths are fnmatch patterns relative to the worktree; commands are argv lists run in this file's folder; {python} = the running Python, {repo} = --repo.",
+  "classes": {
+    "collision": {
+      "paths": ["src/physics/*", "*collider*", "config/contact*.json"],
+      "checks": [
+        {"name": "contact / collision-label unit test", "cmd": ["{python}", "{repo}/tests/test_contact_labels.py"]}
+      ]
+    },
+    "determinism": {
+      "paths": ["src/sim/*", "src/rules/*"],
+      "checks": [
+        {"name": "match hash compare", "cmd": ["{python}", "{repo}/tools/hash_check.py", "compare", "--expected", "{repo}/baselines/hashes.json", "--actual", "{repo}/out/hashes.json"]}
+      ]
+    },
+    "timing-config": {
+      "paths": ["config/timing*.json", "src/anim/*"],
+      "checks": [
+        {"name": "simulation matches the patch", "cmd": ["{python}", "{repo}/tools/sim_check.py", "--patch-config", "{repo}/config/timing.json", "--sim-config", "{repo}/sim/timing.json", "--first-run"]}
+      ]
+    },
+    "docs": {
+      "paths": ["docs/*", "*.md"],
+      "checks": [],
+      "why": "text only; no test run depends on it"
+    }
+  }
+}

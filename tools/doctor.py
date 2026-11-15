@@ -44,6 +44,13 @@ transcripts are not opened). WARN "settings unread": a worktree has a hook_guard
 WARN "launch folder unguarded": sessions start in a worktree without one while another worktree has one. With a
 hook_guard --sessions file (setup_project_settings.py --session-map) the permission check takes the mildest decision of
 the profiles that file can give, as setup writes it.
+
+2.3.0 (N6) --licenses FILE: tool licenses and trials that run out. A tool stopped working mid-week because its license
+had expired and nobody had looked at the date. FILE is JSON (a list of {"tool", "license", "expires": "YYYY-MM-DD"},
+or {"licenses": [...]}) or a Markdown table with tool / license / expires columns. Fewer than --license-days (default
+3) days left is `WARN license expiring: <license> (held by <tool>) expires <date>, <n> day(s) left`; past the date is
+`WARN license expired`; an unreadable date is a WARN too. --licenses-only runs just this check (no git worktree
+needed) and ends with `LICENSES: ok=n expiring=n expired=n bad=n`; exit 1 when any is expiring, expired or bad.
 """
 import argparse
 import datetime
@@ -286,6 +293,51 @@ def in_container(root):
         return False
 
 
+def license_rows(path):
+    """[(tool, license, expires text)] from a JSON list / {"licenses": [...]} or a Markdown table."""
+    text = pathlib.Path(path).read_text(encoding="utf-8-sig")
+    if pathlib.Path(path).suffix.lower() == ".json":
+        data = json.loads(text)
+        rows = data.get("licenses") if isinstance(data, dict) else data
+        if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
+            raise ValueError("a JSON license file is a list of objects or {\"licenses\": [...]}")
+        return [(str(r.get("tool") or "?"), str(r.get("license") or r.get("tool") or "?"), str(r.get("expires") or ""))
+                for r in rows]
+    lines, out = text.splitlines(), []
+    for i, line in enumerate(lines[:-1]):
+        cells = [c.strip().strip("`*").lower() for c in line.strip().strip("|").split("|")]
+        if "tool" in cells and "expires" in cells and re.match(r"^\s*\|?\s*:?-{2,}", lines[i + 1]):
+            for row in lines[i + 2:]:
+                if not row.strip().startswith("|"):
+                    break
+                got = [c.strip().strip("`*") for c in row.strip().strip("|").split("|")]
+                get = lambda name: got[cells.index(name)] if name in cells and cells.index(name) < len(got) else ""
+                out.append((get("tool") or "?", get("license") or get("tool") or "?", get("expires")))
+            return out
+    raise ValueError("no Markdown table with tool and expires columns")
+
+
+def license_items(path, today, days=3):
+    """[(status word, name, detail)] for every license: ok / expiring / expired / bad."""
+    out = []
+    for tool, name, expires in license_rows(path):
+        try:
+            end = datetime.date.fromisoformat(expires.strip()[:10])
+        except ValueError:
+            out.append(("bad", "license date unreadable", f"{name} (held by {tool}): expires {expires!r} is not YYYY-MM-DD"))
+            continue
+        left = (end - today).days
+        if left < 0:
+            out.append(("expired", "license expired", f"{name} (held by {tool}) expired {end}, {-left} day(s) ago: renew "
+                        "it or move the work to another tool"))
+        elif left < days:
+            out.append(("expiring", "license expiring", f"{name} (held by {tool}) expires {end}, {left} day(s) left: "
+                        "renew it now"))
+        else:
+            out.append(("ok", "license", f"{name} (held by {tool}) expires {end}, {left} day(s) left"))
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--repo", help="the worktree to check (default: current folder)")
@@ -299,7 +351,25 @@ def main():
     ap.add_argument("--fs-root", default="/", help=argparse.SUPPRESS)  # tests: where /.dockerenv is looked for
     ap.add_argument("--egress", default="example.com:443", help=argparse.SUPPRESS)  # tests: a host:port that must fail
     ap.add_argument("--dns-name", default="example.com", help=argparse.SUPPRESS)  # tests: a name that must not resolve
+    ap.add_argument("--licenses", metavar="FILE", help="tool licenses / trials with an expiry date (JSON or Markdown)")
+    ap.add_argument("--license-days", type=int, default=3, help="warn when fewer days than this are left (default 3)")
+    ap.add_argument("--licenses-only", action="store_true", help="run only the --licenses check (no worktree needed)")
+    ap.add_argument("--today", help=argparse.SUPPRESS)  # tests: the date to count from
     a = ap.parse_args()
+    today = datetime.date.fromisoformat(a.today) if a.today else datetime.date.today()
+    if a.licenses_only:
+        if not a.licenses:
+            ap.error("--licenses-only needs --licenses FILE")
+        try:
+            found = license_items(a.licenses, today, a.license_days)
+        except (OSError, ValueError) as error:
+            print(f"LICENSES: NOT_RUN {type(error).__name__}: {str(error)[:200]}")
+            return 2
+        for status, name, detail in found:
+            print(f"{'INFO' if status == 'ok' else 'WARN':24} {name}: {detail}")
+        n = {k: sum(f[0] == k for f in found) for k in ("ok", "expiring", "expired", "bad")}
+        print(f"LICENSES: ok={n['ok']} expiring={n['expiring']} expired={n['expired']} bad={n['bad']}")
+        return 1 if n["expiring"] or n["expired"] or n["bad"] else 0
     setup = load("setup_project_settings")
     counts = {"ENFORCED": 0, "CONFIGURED_NOT_VERIFIED": 0, "NOT_ENFORCED": 0, "MISSING": 0, "WARN": 0}
 
@@ -526,6 +596,15 @@ def main():
             elif n and not guarded[tree] and any(guarded.values()):
                 item("WARN", "launch folder unguarded", f"{n} session(s) started in {tree.as_posix()}, whose settings have "
                      "no hook_guard entry, while another worktree has one (setup_project_settings.py --session-map)")
+    if a.licenses:
+        try:
+            for status, name, detail in license_items(a.licenses, today, a.license_days):
+                if status == "ok":
+                    print(f"INFO                     {name}: {detail}")
+                else:
+                    item("WARN", name, detail)
+        except (OSError, ValueError) as error:
+            item("WARN", "licenses", f"{a.licenses} not read: {type(error).__name__}: {str(error)[:200]}")
     c = counts
     print(f"DOCTOR: enforced={c['ENFORCED']} not_verified={c['CONFIGURED_NOT_VERIFIED']} not_enforced={c['NOT_ENFORCED']} "
           f"missing={c['MISSING']} warn={c['WARN']}")
