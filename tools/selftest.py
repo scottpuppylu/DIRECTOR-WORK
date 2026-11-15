@@ -10340,12 +10340,20 @@ def test_round_conditions_230(tmp):
                                 + body, encoding="utf-8")
     expect("round_check a Chinese conditions table counts", "round_check.py", 0, "--resume", resume,
            lacks="NO_CONDITIONS_TABLE")
+    # 2.4.0 (L6): the mutation used to run on the last STUDY.md written above, which HAS a table, so the real tool
+    # and the mutant both printed no warning and "killed" was true either way. It now runs on a study without the
+    # table, where the real tool must warn (control) and the mutant must not.
+    (d / "STUDY.md").write_text("## SET 1\n" + body, encoding="utf-8")
+    fields = {"round": "4", "set": "2", "study": "STUDY.md"}
+    real = mutant(TOOLS / "round_check.py", [], "round_check_real_240")  # no swaps: the real tool
+    if real is not None:
+        check("round_check control: the real tool warns on a study without a table",
+              any("NO_CONDITIONS_TABLE" in p for p in real.check_defect("hair", fields, d)))
     tool = mutant(TOOLS / "round_check.py", [("        if not has_conditions_table(sections[n]):\n",
                                               "        if False:\n")], "round_check_no_conditions")
     if tool is not None:
         killed("round_check without the conditions check",
-               not any("NO_CONDITIONS_TABLE" in p for p in tool.check_defect("hair", {"round": "4", "set": "2",
-                                                                                      "study": "STUDY.md"}, d)))
+               not any("NO_CONDITIONS_TABLE" in p for p in tool.check_defect("hair", fields, d)))
 
 
 RULES_230 = [
