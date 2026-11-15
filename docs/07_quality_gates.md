@@ -85,7 +85,7 @@
 - 審查系統本身沒驗證、審查失敗、或沒跑，都要照實寫，不可以說檢查通過。
 - PO 的回覆要綁到 PO 看的那個成品：候選 ID、commit、入口檔、manifest SHA-256 和訊息編號，寫成 `PO_PRODUCT_REVIEW` 或 `PO_ACCEPTANCE.json`（`docs/02`）。綁不到的回覆不能拿來說「PO 看過這一版」。初衷卡改過之後，舊版的「看過」不算看過新條件。
 - 「綁到成品」是指成品檔現在還在、內容和紀錄的雜湊相同（2.2）。只寫了雜湊、沒有檔可以核對的回覆是「成品待核對」，不是已驗收。
-- 裁決要有「自己查證的證據」（2.3.0）：每份裁決（`templates/GATE_VERDICT.md` A 節）至少一行寫裁決的人自己跑的檢查，`- `<指令>` exit=<n> at=<HH:MM>`，用 `ran_line.py` 印；沒有這一行，判定不能是 PASS / PASS_WITH_WARNINGS / CONDITIONAL_PASS，`gate_check.py --verdict` 判 FAIL。worker 報告裡的指令不算。
+- 裁決要有「自己查證的證據」（2.3.0）：每份裁決（`templates/GATE_VERDICT.md` A 節）至少一行寫裁決的人自己跑的檢查，`- `<指令>` exit=<n> at=<HH:MM>`，用 `ran_line.py` 印；沒有這一行，判定不能是 PASS / PASS_WITH_WARNINGS / CONDITIONAL_PASS。`gate_check.py --verdict` 照專案設定 `director_work.json` 的 `"verdict_self_check"`：`"warn"`（2.3.x 預設：印 `~ WARN SELF_CHECK`，exit code 不變）或 `"fail"`（判 FAIL）；要擋就設 `"fail"`，3.0 可能改成預設 `"fail"`。worker 報告裡的指令不算。
 - worker 自己寫的 PASS 和證據紀錄只是自述（2.2）。說「這版驗證過」要四樣都有：worker 自述、合格的證據紀錄、鎖定的初衷卡、總監自己重跑通過（DIRECTOR_LOG 的 `EVIDENCE_RERUN` 行）。重跑時加 `--brief` 發現初衷卡條件變了（行尾 `brief=stale` 或 `brief=unconfirmed`），這次重跑不算。
 - `PO_PRODUCT_REVIEW` 只認整行紀錄，這是刻意的設計（2.2 說明），和 `DISPATCH`、`EVIDENCE_EQUIVALENT`、`EVIDENCE_RERUN` 一樣：一行從頭就是這個紀錄（前面可以有「日期 |」，後面可以有「| 備註」）。用 `>` 引用的、縮排的、在 ``` 區塊裡的、夾在別的句子中間的，都只是資料，不算 PO 回覆。理由：LOG 裡常會貼 worker 報告、聊天內容或範例；如果引用的字也算，貼一段文字就能假造「PO 看過」。總監記 PO 回覆時，自己另起一行寫完整的紀錄。
 - 整行的 `PO_PRODUCT_REVIEW` 只綁 commit 和 manifest（沒有候選 ID、入口檔和它的雜湊），所以只算「對該 commit 的歷史回覆」，不等於這一份候選成品已驗收。要說「已驗收」，用 `PO_ACCEPTANCE.json`：它綁完整的候選身分（candidate_id、commit、entry、entry_sha256、manifest_sha256），工具也會核對檔案還在、內容沒變（`docs/02`）。

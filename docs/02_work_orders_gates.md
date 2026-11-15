@@ -50,7 +50,7 @@
 - 證據等級：`VERIFIED_LOCAL / VERIFIED_REMOTE / REPORTED / SUPPORTED / ESTIMATED / ASSUMPTION / UNKNOWN / NOT_TESTED / INVALID`。
 - 狀態分開寫：工程、功能、成品、效能、穩定性、整合、PO 驗收，不用一個 PASS 蓋過其他。
 - 跳過的測試不算 PASS；既有失敗維持原樣寫 `NO_NEW_REGRESSION`，不是 ALL PASS。
-- 裁決的「自己查證的證據」（2.3.0）：A 節至少一行裁決者自己跑的 `- `<指令>` exit=<n> at=<HH:MM>`（`ran_line.py` 印），沒有就不能判 PASS 類；`gate_check.py --verdict` 檢查（`docs/07` 第 6 節）。
+- 裁決的「自己查證的證據」（2.3.0）：A 節至少一行裁決者自己跑的 `- `<指令>` exit=<n> at=<HH:MM>`（`ran_line.py` 印），沒有就不能判 PASS 類；`gate_check.py --verdict` 檢查，嚴重度看 `director_work.json` 的 `verdict_self_check`（`warn` 預設 / `fail`；`docs/07` 第 6 節）。
 - 交接時用 `RESUME_STATE.md`（`docs/06`）；原 worker 先停在安全狀態，接手者先核對 repo 和交接資料一致，不重做已通過的工作。
 - TASK REPORT 可以加 `SESSION_ID:` 和 `RAN:`（一行一個實際跑過的指令，寫 exit 和時間）。總監用 `tools/report_vs_audit.py --report 報告 --log <動作紀錄>` 核對：報告說跑過的 selftest、Unity、Blender、雜湊檢查，動作紀錄裡有沒有、結果和時間對不對得上。它只核對有沒有跑，不代表跑的內容對。
 - RAN 行和時間戳（2.2.5）：RAN 行用 `tools/ran_line.py` 產生（代跑指令或剛跑完補記），裁決表頭和 DIRECTOR_LOG 的時間用 `ran_line.py --stamp`，不手打。報告的 `WORKTREE:` 行照抄 `scope_check.py` 印的那一行（依 `git worktree list` 判斷隔離 worktree 或共用 checkout）。共用 checkout 裡用 `scope_check.py --shared` 只算這張工單自己的 commit。

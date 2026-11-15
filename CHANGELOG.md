@@ -35,7 +35,7 @@ MINOR（版本號照工單 WO-DW-230）：一週試跑學到的事做成工具�
 - 根因研究每一節先放「測試條件 vs 參考條件」表；`round_check.py` 沒找到印 `~ WARN NO_CONDITIONS_TABLE`（`docs/07` 第 4 節、`templates/RESUME_STATE.md`）。
 - 放寬量測標準前先做一次盲測，確認前舊標準照用；宣告一組做完前核對資料夾、程式、提示詞是同一組（`docs/07`、`templates/WORK_ORDER.md`）。
 - 和真實影片對照涵蓋每一種情境類型，在成品內並排看；呈現方式（HUD、各階段鏡頭、切鏡時機、重播）也和真實轉播並排；設計原創，不複製轉播單位或其他產品的素材、標誌（`docs/07` 第 1 節）。
-- 每份裁決要有「自己查證的證據」：A 節至少一行 `- `<指令>` exit=<n> at=<HH:MM>`（`ran_line.py` 印）。沒有這一行，`gate_check.py --verdict` 不讓判定是 PASS／PASS_WITH_WARNINGS／CONDITIONAL_PASS（`templates/GATE_VERDICT.md`、`docs/02`、`docs/07` 第 6 節）。
+- 每份裁決要有「自己查證的證據」：A 節至少一行 `- `<指令>` exit=<n> at=<HH:MM>`（`ran_line.py` 印）。沒有這一行就不該判 PASS／PASS_WITH_WARNINGS／CONDITIONAL_PASS；`gate_check.py --verdict` 的嚴重度看專案設定 `"verdict_self_check"`：`"warn"`（2.3.x 預設，印 `~ WARN SELF_CHECK`，exit code 不變）或 `"fail"`（判 FAIL）（`director_work.example.json`、`templates/GATE_VERDICT.md`、`docs/02`、`docs/07` 第 6 節）。
 
 ### 查過的現成做法
 
@@ -47,11 +47,11 @@ MINOR（版本號照工單 WO-DW-230）：一週試跑學到的事做成工具�
 - `pack_check.py` 的 bbox 要渲染腳本寫進 manifest，工具不從圖片猜；只讀 PNG 的尺寸，其他格式要在 manifest 寫 width／height。
 - `waiver.py` 只叫醒有 `--watch` 檔或 snooze 時間的豁免；只寫 until 文字的豁免要有人照事件 `lift`。
 - `flag_check.py` 只看 log 有沒有印讀取行和值，不證明程式之後真的用了它。
-- 條件表在 2.3.0 只警告，不擋。
+- 條件表在 2.3.0 只警告，不擋；裁決自己查證的那一行預設也只警告，專案設 `"verdict_self_check": "fail"` 才擋。
 
 ### 遷移
 
-- 裁決：新寫的 PASS 類裁決在 A 節加一行自己跑的檢查（`ran_line.py` 印，範本已有）。**舊的 PASS 類裁決沒有這一行，再跑 `gate_check.py --verdict`（或讀到它的 `--match`）會 FAIL**：照定義這是 MAJOR 性質的改變，版本號照工單標 MINOR。處理：已經結案的舊裁決不必重跑；要重跑就補一行當時自己查證的 `- `指令` exit=<n> at=<HH:MM>`，沒有查證過的照實改判定，不要補假的。FAIL、HOLD 這類判定不受影響。
+- 裁決：新寫的 PASS 類裁決在 A 節加一行自己跑的檢查（`ran_line.py` 印，範本已有）。預設 `"verdict_self_check": "warn"`：舊的 PASS 類裁決沒有這一行只多印 `~ WARN SELF_CHECK`，exit code 不變，向下相容。要擋的專案在 `director_work.json` 自己加 `"verdict_self_check": "fail"`（選擇加入）；3.0 可能把預設改成 `"fail"`。改成 fail 之前：已經結案的舊裁決不必重跑；要重跑就補一行當時自己查證的 `- `指令` exit=<n> at=<HH:MM>`，沒有查證過的照實改判定，不要補假的。FAIL、HOLD 這類判定不受影響。`--config` 現在也可以和 `--verdict` 一起用。
 - `round_check.py` 在研究節沒有條件表時多印 `~ WARN` 行，exit code 不變。
 - status 設定可以加 `"lines"`（給 `line_brief.py`）；舊設定不用改。
 - 其他都是新工具、新選項和範本，舊檔案、舊指令照樣通過。
@@ -59,14 +59,14 @@ MINOR（版本號照工單 WO-DW-230）：一週試跑學到的事做成工具�
 ### 數字
 
 - 每輪必讀（`docs/01`、`03`、`06`、`08`）：本版沒有改這四份，也沒有新增每輪必讀的檔案或步驟。
-- `selftest.py`：2.2.5 的 2,741 項 → 本版 2,904 項（+163：N1–N8、F1–F8 各工具的案例與 mutation、裁決「自己查證的證據」案例與 mutation、round_check 條件表案例與 mutation、規則文字檢查）。Python 3.11 全過；skipped=1 是這台機器不能建 symlink。既有測試只改了一處：共用的裁決範例 `VERDICT` 補上自己查證的那一行。
+- `selftest.py`：2.2.5 的 2,741 項 → 本版 2,915 項（+174：N1–N8、F1–F8 各工具的案例與 mutation、裁決「自己查證的證據」案例（預設 warn、warn、fail、`--config`、錯的值）與 mutation、setup_check 的 `verdict_self_check` 案例、round_check 條件表案例與 mutation、規則文字檢查）。Python 3.11 全過；skipped=1 是這台機器不能建 symlink。既有測試只改了一處：共用的裁決範例 `VERDICT` 補上自己查證的那一行。
 
 對齊初衷：
 1. 幫到誰：總監（完成度不再靠自報、裁決要自己查過、一條線一次看完、授權到期前提醒）、worker（送 TR 前先在 CPU 上擋掉、DONE 由腳本自己發、build 和開關有沒有真的生效看得到）、審查者（審查包不會漏掉階段、不會被檔名或渲染設定誤導）。依據：工單 WO-DW-230 列的一週試跑事故（自報 100%、錯過短階段的抽格、檔案時間誤判 build、開關沒讀到、GO 沒人 ACK、豁免一直被叫醒、整合卡 10 小時以上）。
 2. Desktop：都是本機命令列工具和範本，Desktop Code 分頁的 session 照常用；沒有新的每輪步驟。
 3. 服務：初衷 5（成品要真的對）：完成度要證據、真實影片並排比對、審查包檢查、裁決要自己查證；初衷 2（省額度）：TR 前 CPU 檢查、豁免不亂叫醒、一條線一次摘要；初衷 4（中斷不丟進度）：豁免存在檔案、重開讀回；初衷 7（零成本）：只用標準庫。
 4. 核心：每輪必讀沒有變長；沒有新的 hook 或常駐程序；沒有加額度上限或節奏限制；git 只讀。
-5. 舊檔案和舊指令：舊 PASS 類裁決沒有自己查證的那一行會不通過（遷移段寫明怎麼處理）；其他照樣通過，條件表只警告。
+5. 舊檔案和舊指令：照樣通過。舊 PASS 類裁決沒有自己查證的那一行，預設只警告（專案設 `"verdict_self_check": "fail"` 才擋）；條件表只警告。
 
 ## 2.2.5 — 2026-11-15
 

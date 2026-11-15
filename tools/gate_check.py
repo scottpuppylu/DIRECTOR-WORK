@@ -159,6 +159,11 @@ Lines starting with `~` are notes for the newer format (v0.10): they never fail 
              "feasible_count" must agree) and, for a gate, `THRESHOLDS:` lines `- <name>: <value> source=<video|mocap|
              measurement|dataset>:<what>`. A threshold without a real-world source fails unless it is marked
              `reference`; then it is listed `~ REFERENCE` (a reference number, not a gate). No record fails.
+  --verdict, self-check line: a PASS / PASS_WITH_WARNINGS / CONDITIONAL_PASS verdict names at least one check its
+             writer ran (`- `<command>` exit=<n> at=<HH:MM>`, written by ran_line.py). Severity from the project
+             config key "verdict_self_check": "warn" (default in 2.3.x: a `~ WARN SELF_CHECK` note, exit code
+             unchanged) or "fail" (the verdict fails). Config: --config, else director_work.json in the verdict's
+             folder or the one above it.
 
 Bringing in a project that already has files in another format:
   --warn          print WARN instead of FAIL and exit 0, so old files do not block work
@@ -1885,7 +1890,33 @@ SELF_CHECK_VERDICTS = ("PASS", "PASS_WITH_WARNINGS", "CONDITIONAL_PASS")
 SELF_CHECKED = re.compile(r"^\s*-\s*`(?![^`]*<[^`]*>)[^`]+`\s+exit=\d+\s+at=\d\d:\d\d", re.M)
 
 
-def check_verdict(text, notes):
+SELF_CHECK_LEVELS = ("warn", "fail")
+SELF_CHECK_DEFAULT = "warn"  # 2.3.x default; projects opt into "fail" (it may become the default in 3.0)
+SELF_CHECK_MESSAGE = ("evidence I checked myself: a PASS verdict needs at least one line `- `<command>` exit=<n> "
+                      "at=<HH:MM>` (written by ran_line.py) for a check its writer ran; a worker's word is not one")
+
+
+def self_check_level(verdict_path, config_path, notes):
+    """2.3.0: "verdict_self_check" ("warn" or "fail") from --config, else director_work.json in the verdict's folder
+    or the one above it; default "warn". A bad value or an unreadable file is a note and keeps the default."""
+    folder = pathlib.Path(verdict_path).resolve().parent
+    found = [pathlib.Path(config_path)] if config_path else [f / "director_work.json" for f in (folder, folder.parent)]
+    path = next((f for f in found if f.is_file()), None)
+    if path is None:
+        return SELF_CHECK_DEFAULT
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as error:
+        notes.append(f"{path.name}: cannot read ({error}); verdict_self_check {SELF_CHECK_DEFAULT} used")
+        return SELF_CHECK_DEFAULT
+    value = data.get("verdict_self_check", SELF_CHECK_DEFAULT) if isinstance(data, dict) else SELF_CHECK_DEFAULT
+    if value not in SELF_CHECK_LEVELS:
+        notes.append(f"{path.name} verdict_self_check: \"warn\" or \"fail\", got {value!r}; {SELF_CHECK_DEFAULT} used")
+        return SELF_CHECK_DEFAULT
+    return value
+
+
+def check_verdict(text, notes, self_check=SELF_CHECK_DEFAULT):
     problems = []
     section = re.search(r"^##\s*A\b.*?$(.*?)(?=^##\s|\Z)", text, re.M | re.S)
     lines = [line.strip() for line in section.group(1).splitlines() if line.strip()] if section else []
@@ -1902,8 +1933,10 @@ def check_verdict(text, notes):
     if not stop or blank(stop.group(1)):
         problems.append("section F (stop state): missing or empty")
     if lines and lines[0] in SELF_CHECK_VERDICTS and not SELF_CHECKED.search(text):
-        problems.append("evidence I checked myself: a PASS verdict needs at least one line `- `<command>` exit=<n> "
-                        "at=<HH:MM>` (written by ran_line.py) for a check its writer ran; a worker's word is not one")
+        if self_check == "fail":
+            problems.append(SELF_CHECK_MESSAGE)
+        else:
+            notes.append("WARN SELF_CHECK " + SELF_CHECK_MESSAGE + " (verdict_self_check: warn; set \"fail\" to enforce)")
     return problems
 
 
@@ -2191,7 +2224,8 @@ def main():
                     "with --after-verdict, the default since 2.2.5 (kept for old commands)")
     ap.add_argument("--config", metavar="director_work.json", help="2.2.2: with --resume, read resume.max_bytes / "
                     "resume.max_line_bytes (default: director_work.json beside the RESUME_STATE, else 20480 / 4096); "
-                    "with --order, read base_ref.check / fetch / strict")
+                    "with --order, read base_ref.check / fetch / strict; with --verdict (2.3.0), read verdict_self_check "
+                    "(warn | fail; default: director_work.json in the verdict's folder or the one above, else warn)")
     ap.add_argument("--strict-base", action="store_true", help="2.2.2: with --order, a BASE_REF commit that is missing "
                     "or behind its remote branch, or a fetch that fails, fails (default: a WARN note)")
     ap.add_argument("--warn", action="store_true", help="report problems as WARN and exit 0")
@@ -2284,8 +2318,8 @@ def main():
         ap.error("--repo works with --preflight, --order, --after-verdict or --sequence")
     if a.strict and not (a.resume or a.after_verdict):
         ap.error("--strict works with --resume or --after-verdict")
-    if a.config and not (a.resume or a.order):
-        ap.error("--config works with --resume or --order")
+    if a.config and not (a.resume or a.order or a.verdict):
+        ap.error("--config works with --resume, --order or --verdict")
     if a.strict_base and not a.order:
         ap.error("--strict-base works with --order")
     if a.repo and not pathlib.Path(a.repo).is_dir():
@@ -2366,7 +2400,8 @@ def main():
             problems = check_po_acceptance(text, notes, candidate, pathlib.Path(a.artifact_root) if a.artifact_root
                                            else files[0].resolve().parent)
         else:
-            problems = CHECKS[kind](text, notes)
+            problems = (check_verdict(text, notes, self_check_level(files[0], a.config, notes)) if kind == "verdict"
+                        else CHECKS[kind](text, notes))
             if kind == "verdict" and (a.match or candidate):
                 problems += verdict_binding(text, matched, candidate, notes, pairs)
             if kind == "resume":  # 2.2.2: size, shadow unless --strict

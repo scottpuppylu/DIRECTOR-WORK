@@ -841,7 +841,8 @@ python -I -X utf8 gate_check.py --feasibility <可行性紀錄.md> [...]
 
 ## 裁決的「自己查證的證據」（2.3.0）
 
-- `gate_check.py --verdict`（和 `--match` 讀裁決時）：判定是 PASS / PASS_WITH_WARNINGS / CONDITIONAL_PASS，就要至少一行 `- `<指令>` exit=<n> at=<HH:MM>`（`ran_line.py` 印的格式）；只有範例佔位（`<…>`）不算。FAIL、HOLD 這類不需要。
+- `gate_check.py --verdict`：判定是 PASS / PASS_WITH_WARNINGS / CONDITIONAL_PASS，就要至少一行 `- `<指令>` exit=<n> at=<HH:MM>`（`ran_line.py` 印的格式）；只有範例佔位（`<…>`）不算。FAIL、HOLD 這類不需要。
+- 嚴重度：專案設定的 `"verdict_self_check"`。`"warn"`（2.3.x 預設）：缺這一行印 `~ WARN SELF_CHECK`，exit code 不變；`"fail"`：裁決 FAIL。設定從 `--config director_work.json` 讀，沒給就找裁決所在資料夾或上一層的 `director_work.json`；值不是 warn / fail 會印一行說明並用 warn。範例見 `director_work.example.json`。
 
 ## sim_check.py（2.3.0，N3）
 

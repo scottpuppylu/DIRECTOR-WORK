@@ -7987,7 +7987,12 @@ SETUP_CONFIG_CASES = [
     ("base_ref strict as text", '{"base_ref": {"strict": "yes"}}', True),
     ("release unknown key (release.py refuses it)", '{"release": {"remot": "origin"}}', True),
     ("release gh_repo without owner", '{"release": {"gh_repo": "director-work"}}', True),
-    ("release branch empty", '{"release": {"branch": " "}}', True)]
+    ("release branch empty", '{"release": {"branch": " "}}', True),
+    # 2.3.0: verdict_self_check (gate_check --verdict severity)
+    ("verdict_self_check warn", '{"verdict_self_check": "warn"}', False),
+    ("verdict_self_check fail", '{"verdict_self_check": "fail"}', False),
+    ("verdict_self_check strict is not a level", '{"verdict_self_check": "strict"}', True),
+    ("verdict_self_check true is not a level", '{"verdict_self_check": true}', True)]
 
 
 def setup_221_wrong(module):
@@ -10225,31 +10230,90 @@ def test_ran_line_posix_230(tmp):
 
 def test_verdict_self_check_230(tmp):
     """2.3.0 rule: a PASS-type verdict names at least one check its writer ran, as ran_line.py writes it
-    (`- `<command>` exit=<n> at=<HH:MM>`); a placeholder command or no line means it cannot be PASS. Other verdicts
-    (FAIL, HOLD, ...) do not need it."""
+    (`- `<command>` exit=<n> at=<HH:MM>`); a placeholder command or no line does not count. Severity comes from the
+    project config key "verdict_self_check": "warn" (the 2.3.x default: a `~ WARN SELF_CHECK` note, exit unchanged) or
+    "fail". Other verdicts (FAIL, HOLD, ...) never need the line."""
     d = tmp / "verdict_self_230"
     d.mkdir()
     proof = "自己查證的證據：\n- `python -I tools/selftest.py` exit=0 at=10:00\n"
     bare = VERDICT.replace(proof, "")
     check("verdict fixture carries the self-check line", proof in VERDICT and proof not in bare)
+    msg = "evidence I checked myself"
+    # default (no director_work.json anywhere near): warn, exit 0
     for verdict in ("PASS", "PASS_WITH_WARNINGS", "CONDITIONAL_PASS"):
-        gate(d, f"self_check_missing_{verdict}", "verdict", bare.format(verdict=verdict, step="ACCEPT_AND_CLOSE"), 1,
-             "evidence I checked myself")
+        gate(d, f"self_check_default_warns_{verdict}", "verdict", bare.format(verdict=verdict, step="ACCEPT_AND_CLOSE"),
+             0, ["~ WARN SELF_CHECK", msg])
     gate(d, "self_check_present", "verdict", VERDICT.format(verdict="PASS", step="ACCEPT_AND_CLOSE"), 0)
-    gate(d, "self_check_placeholder", "verdict", bare.format(verdict="PASS", step="ACCEPT_AND_CLOSE").replace(
-        "下一步：ACCEPT_AND_CLOSE\n", "下一步：ACCEPT_AND_CLOSE\n- `<指令>` exit=0 at=10:00\n"), 1, "evidence I checked myself")
-    gate(d, "self_check_no_time", "verdict", bare.format(verdict="PASS", step="ACCEPT_AND_CLOSE").replace(
-        "下一步：ACCEPT_AND_CLOSE\n", "下一步：ACCEPT_AND_CLOSE\n- `pytest` exit=0\n"), 1, "evidence I checked myself")
-    gate(d, "self_check_not_needed_for_fail", "verdict", bare.format(verdict="FAIL", step="CONTINUE_SAME_WORKER"), 0)
-    gate(d, "self_check_not_needed_for_hold", "verdict", bare.format(verdict="HOLD", step="STOP_AND_REPORT_BLOCKER"), 0)
+    expect("self_check_present has no warning", "gate_check.py", 0, "--verdict", d / "self_check_present.md",
+           lacks="SELF_CHECK")
+
+    def project(name, value):
+        folder = d / name
+        (folder / "verdicts").mkdir(parents=True)
+        if value is not None:
+            (folder / "director_work.json").write_text(json.dumps({"schema_version": 1, "verdict_self_check": value}),
+                                                       encoding="utf-8")
+        return folder
+
+    def verdict_in(folder, name, text):
+        file = folder / "verdicts" / f"{name}.md"
+        file.write_text(text, encoding="utf-8")
+        return file
+
+    missing = bare.format(verdict="PASS", step="ACCEPT_AND_CLOSE")
+    fail_dir, warn_dir, bad_dir = project("cfg_fail", "fail"), project("cfg_warn", "warn"), project("cfg_bad", "strict")
+    expect("verdict_self_check fail (director_work.json one folder up): missing line fails", "gate_check.py", 1,
+           "--verdict", verdict_in(fail_dir, "missing", missing), says=["FAIL verdict", msg], lacks="~ WARN SELF_CHECK")
+    expect("verdict_self_check fail: a present line passes", "gate_check.py", 0, "--verdict",
+           verdict_in(fail_dir, "present", VERDICT.format(verdict="PASS", step="ACCEPT_AND_CLOSE")), lacks=msg)
+    expect("verdict_self_check fail: a placeholder line fails", "gate_check.py", 1, "--verdict",
+           verdict_in(fail_dir, "placeholder", missing.replace("下一步：ACCEPT_AND_CLOSE\n",
+                                                               "下一步：ACCEPT_AND_CLOSE\n- `<指令>` exit=0 at=10:00\n")), says=msg)
+    expect("verdict_self_check fail: a line without at= fails", "gate_check.py", 1, "--verdict",
+           verdict_in(fail_dir, "no_time", missing.replace("下一步：ACCEPT_AND_CLOSE\n",
+                                                           "下一步：ACCEPT_AND_CLOSE\n- `pytest` exit=0\n")), says=msg)
+    expect("verdict_self_check fail: FAIL needs no line", "gate_check.py", 0, "--verdict",
+           verdict_in(fail_dir, "fail_verdict", bare.format(verdict="FAIL", step="CONTINUE_SAME_WORKER")), lacks=msg)
+    expect("verdict_self_check fail: HOLD needs no line", "gate_check.py", 0, "--verdict",
+           verdict_in(fail_dir, "hold_verdict", bare.format(verdict="HOLD", step="STOP_AND_REPORT_BLOCKER")), lacks=msg)
+    expect("verdict_self_check warn: missing line warns, exit 0", "gate_check.py", 0, "--verdict",
+           verdict_in(warn_dir, "missing", missing), says=["OK   verdict", "~ WARN SELF_CHECK", msg])
+    expect("verdict_self_check fail via --config", "gate_check.py", 1, "--verdict", verdict_in(warn_dir, "explicit", missing),
+           "--config", fail_dir / "director_work.json", says=msg, lacks="~ WARN SELF_CHECK")
+    expect("verdict_self_check warn via --config beats a fail file nearby", "gate_check.py", 0, "--verdict",
+           verdict_in(fail_dir, "explicit_warn", missing), "--config", warn_dir / "director_work.json",
+           says="~ WARN SELF_CHECK")
+    expect("verdict_self_check bad value: note, default warn", "gate_check.py", 0, "--verdict",
+           verdict_in(bad_dir, "missing", missing), says=["verdict_self_check: \"warn\" or \"fail\", got 'strict'",
+                                                          "~ WARN SELF_CHECK"])
+    beside = project("cfg_beside", None)
+    (beside / "verdicts" / "director_work.json").write_text(json.dumps({"verdict_self_check": "fail"}), encoding="utf-8")
+    expect("verdict_self_check: director_work.json beside the verdict counts", "gate_check.py", 1, "--verdict",
+           verdict_in(beside, "missing", missing), says=msg)
+    example = json.loads((TOOLS.parent / "director_work.example.json").read_text(encoding="utf-8"))
+    check("director_work.example.json shows verdict_self_check warn",
+          example.get("verdict_self_check") == "warn" and "verdict_self_check" in example.get("_comment", ""))
     template = (TEMPLATES / "GATE_VERDICT.md").read_text(encoding="utf-8")
     check("GATE_VERDICT template asks for the self-check line", "自己查證的證據" in template
-          and "- `<指令>` exit=<n> at=<HH:MM>" in template and "ran_line.py" in template)
-    tool = mutant(TOOLS / "gate_check.py", [("if lines and lines[0] in SELF_CHECK_VERDICTS and not SELF_CHECKED.search(text):",
-                                             "if False:")], "gate_check_no_self_check")
+          and "- `<指令>` exit=<n> at=<HH:MM>" in template and "ran_line.py" in template
+          and "verdict_self_check" in template)
+    tool = mutant(TOOLS / "gate_check.py", [("        if self_check == \"fail\":\n            problems.append(SELF_CHECK_MESSAGE)\n",
+                                             "        if False:\n            problems.append(SELF_CHECK_MESSAGE)\n")],
+                  "gate_check_no_self_check_fail")
     if tool is not None:
-        problems = tool.check_verdict(bare.format(verdict="PASS", step="ACCEPT_AND_CLOSE"), [])
-        killed("gate_check without the self-check rule", not any("evidence I checked myself" in p for p in problems))
+        killed("gate_check whose fail level never fails", not any(msg in p for p in tool.check_verdict(missing, [], "fail")))
+    tool = mutant(TOOLS / "gate_check.py", [("SELF_CHECK_DEFAULT = \"warn\"", "SELF_CHECK_DEFAULT = \"fail\"")],
+                  "gate_check_self_check_default_fail")
+    if tool is not None:
+        killed("gate_check whose default is fail", tool.self_check_level(d / "self_check_present.md", None, []) == "fail"
+               or any(msg in p for p in tool.check_verdict(missing, [])))
+    tool = mutant(TOOLS / "gate_check.py", [("        else:\n            notes.append(\"WARN SELF_CHECK \"",
+                                             "        elif False:\n            notes.append(\"WARN SELF_CHECK \"")],
+                  "gate_check_self_check_silent_warn")
+    if tool is not None:
+        notes = []
+        tool.check_verdict(missing, notes, "warn")
+        killed("gate_check whose warn level says nothing", not any("SELF_CHECK" in n for n in notes))
 
 
 def test_round_conditions_230(tmp):

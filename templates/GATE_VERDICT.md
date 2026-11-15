@@ -12,7 +12,7 @@ SESSION_ID: <寫這份裁決的 session id；要和 TASK REPORT 的不同，相�
 下一步：<ACCEPT_AND_CLOSE | CONTINUE_SAME_WORKER | SWITCH_TO_OTHER_WORKER | REQUEST_INDEPENDENT_REVIEW | REQUEST_OWNER_AUTHORIZATION | STOP_AND_REPORT_BLOCKER>
 自己查證的證據（寫這份裁決的人自己跑的檢查：指令 + 結果，用 `ran_line.py` 印，不手打；2.3.0）：
 - `<指令>` exit=<n> at=<HH:MM>
-沒有這一行（或只有範例佔位），判定不能寫 PASS / PASS_WITH_WARNINGS / CONDITIONAL_PASS；`gate_check.py --verdict` 判 FAIL。worker 報告裡的指令不算。
+沒有這一行（或只有範例佔位），判定不能寫 PASS / PASS_WITH_WARNINGS / CONDITIONAL_PASS。`gate_check.py --verdict` 依專案設定 `verdict_self_check`：`warn`（2.3.x 預設，印 WARN）或 `fail`（判 FAIL）。worker 報告裡的指令不算。
 
 ## B. 已證實成果
 | 項目 | 證據路徑 | 證據等級（VERIFIED_LOCAL / REPORTED / …） | 依 worker 報告？ |
