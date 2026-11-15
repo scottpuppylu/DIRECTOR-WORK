@@ -17,6 +17,12 @@ optionally item / 項目, evidence / 證據, critical / 關鍵, weight / 權重;
   visibility  (2.3.0) how much a player sees the item: high / medium / low (高 / 中 / 低). A high item whose phase
             says it is deferred ("after alpha", 延後, later) needs a recorded owner decision in decision / 決定
             (a decision ID or a file); without one it gets a WARN: what the player sees is not pushed out unasked
+  depends_on  (2.4.0) the IDs this item waits for (depends on / 依賴 / 前置; separated by `;`, `,` or spaces; a JSON
+            list). When any row has one, a depends_on column and a READY_NOW line are added: the items not at 100 whose
+            dependencies are all counted 100 (a capped 100 does not unblock), so "what can start now" is read off the
+            table instead of guessed. A dependency not in the table or a cycle gets a WARN; an item that waits
+            for an ID not in the table is never ready. A table without the column prints exactly what 2.3.0 printed. Idea from steveyegge/beads (MIT),
+            concept only: no code copied.
 
 --previous reads a snapshot written by --save (an earlier run, e.g. last week's) and adds a `prev` and `delta` column
 and the total's delta. --save writes this run's snapshot (schema completion-v1: date, counted score per ID, total).
@@ -37,7 +43,8 @@ CAP = 75
 HEADERS = {"id": ("id", "編號", "#"), "item": ("item", "項目", "內容", "name"), "score": ("score", "分數", "完成度"),
            "evidence": ("evidence", "證據"), "critical": ("critical", "關鍵", "關鍵路徑"), "weight": ("weight", "權重"),
            "visibility": ("visibility", "player visibility", "可見度", "玩家可見度"),
-           "phase": ("phase", "when", "scope", "階段", "時程"), "decision": ("decision", "owner decision", "決定")}
+           "phase": ("phase", "when", "scope", "階段", "時程"), "decision": ("decision", "owner decision", "決定"),
+           "depends_on": ("depends_on", "depends on", "depends", "dependencies", "依賴", "前置")}
 VISIBILITY = {"high": "high", "medium": "medium", "low": "low", "高": "high", "中": "medium", "低": "low", "": ""}
 DEFERRED = re.compile(r"after\s*-?\s*alpha|post\s*-?\s*alpha|alpha\s*(?:後|之後)|延後|deferred|later", re.I)
 YES = {"yes", "y", "true", "x", "✓", "✔", "是", "1", "critical"}
@@ -106,6 +113,20 @@ def evidence_paths(value):
             and p.strip().strip("`").upper() not in ("NONE", "-", "—", "N/A")]
 
 
+def dep_ids(value):
+    """The IDs in a depends_on cell (`;`, `,` or spaces between them) or a JSON list."""
+    if isinstance(value, list):
+        parts = [str(v) for v in value]
+    else:
+        parts = re.split(r"[;,\s]+", str(value or ""))
+    out = []
+    for part in parts:
+        ident = part.strip().strip("*`").strip()
+        if ident and ident.upper() not in ("NONE", "-", "—", "N/A", "無") and ident not in out:
+            out.append(ident)
+    return out
+
+
 def present(path):
     """A non-empty file, or a folder holding at least one file."""
     if path.is_file():
@@ -157,8 +178,58 @@ def score_items(items, root):
             warnings.append(f"{ident}: high player visibility marked {str(item.get('phase')).strip()!r} without a "
                             "recorded owner decision (write the decision ID or file in decision / 決定)")
         rows.append({"id": ident, "visibility": seen_by, "item": str(item.get("item") or "").strip(), "written": written, "score": counted,
-                     "weight": weight, "critical": flag(item.get("critical")), "evidence": paths, "note": note})
+                     "weight": weight, "critical": flag(item.get("critical")), "evidence": paths, "note": note,
+                     "depends_on": dep_ids(item.get("depends_on"))})
     return rows, problems, warnings
+
+
+def cycle_members(rows):
+    """IDs on a dependency cycle (among the IDs in the table), and one cycle per start, as text."""
+    graph = {r["id"]: [d for d in r["depends_on"] if d != r["id"]] for r in rows}
+    on_cycle, cycles, state = set(), [], {}
+
+    def visit(node, stack):
+        state[node] = 1
+        stack.append(node)
+        for nxt in graph.get(node, []):
+            if nxt not in graph:
+                continue
+            if state.get(nxt) == 1:
+                loop = stack[stack.index(nxt):] + [nxt]
+                if not set(loop) <= on_cycle:
+                    cycles.append(" -> ".join(loop))
+                on_cycle.update(loop)
+            elif nxt not in state:
+                visit(nxt, stack)
+        stack.pop()
+        state[node] = 2
+
+    for node in graph:
+        if node not in state:
+            visit(node, [])
+    for r in rows:
+        if r["id"] in r["depends_on"]:
+            on_cycle.add(r["id"])
+            cycles.append(f"{r['id']} -> {r['id']}")
+    return on_cycle, cycles
+
+
+def readiness(rows):
+    """(ready rows, blocked [(row, waiting-for IDs)], warnings) for the items not at 100."""
+    scores = {r["id"]: r["score"] for r in rows}
+    _, cycles = cycle_members(rows)
+    warnings = [f"dependency cycle: {c} (no order can finish these; fix the table)" for c in cycles]
+    for r in rows:
+        unknown = [d for d in r["depends_on"] if d not in scores]
+        if unknown:
+            warnings.append(f"{r['id']}: depends on {', '.join(unknown)}, not in this table (never ready until fixed)")
+    ready, blocked = [], []
+    for r in rows:
+        if r["score"] >= 100:
+            continue
+        waiting = [d for d in r["depends_on"] if scores.get(d, -1) < 100]
+        (blocked.append((r, waiting)) if waiting else ready.append(r))
+    return ready, blocked, warnings
 
 
 def total_of(rows):
@@ -172,15 +243,17 @@ def cell(text):
 
 def render(rows, previous):
     seen = any(r["visibility"] for r in rows)
+    deps = any(r["depends_on"] for r in rows)
     head = ["ID", "item", "score"] + (["prev", "delta"] if previous is not None else []) + ["critical"] + (
-        ["visibility"] if seen else []) + ["evidence", "note"]
+        ["visibility"] if seen else []) + (["depends_on"] if deps else []) + ["evidence", "note"]
     out = ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
     for r in rows:
         cells = [r["id"], r["item"], r["score"]]
         if previous is not None:
             before = previous.get("items", {}).get(r["id"])
             cells += ["new" if before is None else before, "" if before is None else f"{r['score'] - before:+d}"]
-        cells += ["yes" if r["critical"] else ""] + ([r["visibility"]] if seen else []) + ["; ".join(r["evidence"]), r["note"]]
+        cells += ["yes" if r["critical"] else ""] + ([r["visibility"]] if seen else []) + (
+            [", ".join(r["depends_on"])] if deps else []) + ["; ".join(r["evidence"]), r["note"]]
         out.append("| " + " | ".join(cell(c) for c in cells) + " |")
     return out
 
@@ -219,6 +292,13 @@ def main(argv=None):
     open_critical = [r for r in rows if r["critical"] and r["score"] < 100]
     print("CRITICAL_PATH: " + (" -> ".join(f"{r['id']} ({r['score']})" for r in open_critical) if open_critical
                                else "all critical items at 100" if any(r["critical"] for r in rows) else "none marked"))
+    if any(r["depends_on"] for r in rows):
+        ready, blocked, dep_warnings = readiness(rows)
+        warnings += dep_warnings
+        print("READY_NOW: " + (", ".join(f"{r['id']} ({r['score']})" for r in ready) if ready
+                               else "none" if blocked else "all items at 100"))
+        for r, waiting in blocked:
+            print(f"BLOCKED {r['id']} ({r['score']}): waits for {', '.join(waiting)}")
     for w in warnings:
         print(f"WARN {w}")
     for p in problems:

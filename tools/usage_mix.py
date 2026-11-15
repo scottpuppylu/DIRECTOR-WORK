@@ -38,10 +38,15 @@ A pattern is a regular expression OR-ed with the default one; `groups` moves a f
 
 Times are UTC: --since / --until take YYYY-MM-DD or an ISO time (2026-11-06T10:00, offsets allowed).
 The transcript format is not an official interface; when nothing is read the result is NO_DATA, never a measured 0.
+
+LOOPS (2.4.0) is one line from loop_guard.py over the same transcript files: how many loops of each kind (the same
+call again, the same error again, A B A B, a poll with no progress, rejected arguments, a failed subagent call left
+unhandled); `loop_guard.py scan --transcript FILE` shows which. --no-loops leaves it out (it reads the files again).
 """
 import argparse
 import collections as C
 import datetime as D
+import importlib.util
 import json
 import os
 import pathlib
@@ -453,6 +458,19 @@ def render(res):
     return "\n".join(lines)
 
 
+def loops_line(root, project_dirs, since=None, sids=None):
+    """2.4.0: the LOOPS line of loop_guard.py over the transcript files read here; never raises."""
+    try:
+        spec = importlib.util.spec_from_file_location("loop_guard", pathlib.Path(__file__).with_name("loop_guard.py"))
+        loop = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loop)
+        files = [pathlib.Path(path) for path, sid, _ in transcript_files(root, project_dirs)
+                 if not (since and os.path.getmtime(path) < since.timestamp()) and (sids is None or sid in sids)]
+        return loop.summary_line(loop.events_from_transcripts(files)) if files else "LOOPS NOT_CHECKED (no transcript file)"
+    except Exception as error:  # noqa: BLE001 - one line, the rest of the report stands
+        return f"LOOPS NOT_CHECKED ({type(error).__name__}: {error})"
+
+
 def main(argv=None):
     sys.stdout.reconfigure(encoding="utf-8")  # before parse_args: --help prints during parsing
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -470,6 +488,7 @@ def main(argv=None):
                     help="one line per session: share, calls, quota, group shares, costliest fine categories")
     ap.add_argument("--json", action="store_true", help="print JSON instead of text")
     ap.add_argument("--check", action="store_true", help="exit 1 when a DD-049 target is missed")
+    ap.add_argument("--no-loops", action="store_true", help="leave out the LOOPS line (loop_guard.py over the same files)")
     a = ap.parse_args(argv)
     sys.stdout.reconfigure(encoding="utf-8")
     try:
@@ -490,7 +509,11 @@ def main(argv=None):
     res.update({"files": files, "sessions_read": len(sessions), "session": a.session,
                 "range": f"{a.since or 'start'}..{a.until or 'now'} UTC", "restart": restart_numbers(sessions, groups),
                 "weights": WEIGHTS})
-    print(json.dumps(res, ensure_ascii=False, indent=1) if a.json else render(res))
+    if not a.no_loops:
+        res["loops"] = loops_line(a.root, dirs, since, {s["sid"] for s in sessions} if a.session else None)
+    lines = render(res).split("\n")
+    text = "\n".join(lines[:-1] + [res["loops"], lines[-1]] if "loops" in res else lines)  # RESULT stays the last line
+    print(json.dumps(res, ensure_ascii=False, indent=1) if a.json else text)
     return 1 if a.check and res["result"] != "ON_TARGET" else 0
 
 

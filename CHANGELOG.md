@@ -6,6 +6,83 @@
 - **MINOR**：新增規則、文件、工具或選項，舊檔案照樣通過。
 - **PATCH**：修正文字、修 bug，規則不變。
 
+## 2.4.0 — 2026-11-15
+
+MINOR（工單 WO-DW-240）：把開源調查裡值得用的概念自己寫進 DW：找出原地打轉的呼叫、重開／壓縮後把 RESUME_STATE 表頭放回、讀進來的內容像在下指令時警告、完成度表加依賴和「現在能開工」清單、說「做完」前的紀律、用量交叉核對、pre-commit／gitleaks 範例。所有新 hook 都要自己選擇加入，只提醒或警告，不擋。只借概念，沒有複製程式碼；只用標準庫。
+
+### 新工具
+
+- `tools/loop_guard.py`（L1）：讀動作紀錄（`audit_log.py`）或 Claude Code transcript（含 subagent），找六類打轉：`repeat`（同工具同輸入，預設 3 次）、`retry_same_error`（同呼叫同錯誤，2 次）、`ping_pong`（A B A B，6 次）、`poll_no_progress`（輪詢結果不變，3 次）、`bad_args`（參數一直被拒，2 次；只有 transcript 有錯誤文字，只給動作紀錄時印 `~ NOT_CHECKED bad_args`）、`child_error_unhandled`（subagent 失敗後沒人處理；沒有 subagent 結果時印 `~ NOT_VERIFIED`）。只印工具名、雜湊、次數和序號，不印參數內容。合法的輪詢寫進設定的 `allow`。exit 0 沒有／1 有／2 輸入錯。偵測核心是純函式（事件清單進、結果出），別的宿主可以直接餵自己的事件。
+- `hook_guard.py --loop-guard`（L1，hook 模式）：每次呼叫前看動作紀錄尾段，到門檻提醒一次，之後在 2 倍、4 倍、8 倍……再提醒；`--loop-mode ask` 改成詢問；**從不擋**。環境有 `DW_LOOP_GUARD` 時不做事（和 `DW_HOOK_REVIEW` 同一種防遞迴）。
+- `usage_mix.py`：RESULT 前多一行 `LOOPS`（loop_guard 各類次數）；`--no-loops` 省掉。
+- `tools/resume_inject.py`（L2）：SessionStart hook，只在 `source` 是 resume 或 compact 時，印 RESUME_STATE 前四行和「未結」段落，上限 2 KB（`--max-bytes`），超過就整行截斷並註明完整檔在哪。每次開 session 最多一次，不是每輪。SessionStart 的欄位和 `source` 值照官方 hooks 文件（https://code.claude.com/docs/en/hooks ，2026-11-15 查）；實機行為 NOT_VERIFIED。
+- `tools/inject_scan.py`（L3）：PostToolUse hook，工具讀回來的內容（檔案、網頁、指令輸出、MCP）像在下指令時，用 `additionalContext` 警告：`override`（忽略前面的指示）、`role_rewrite`（你現在是……、`system:` 行）、`hidden`（零寬字元、Unicode tag、雙向控制字元）、`encoded`（解得出文字的長 base64）、`exfiltration`（送到網址、印出金鑰）。從不擋、不改、不藏工具輸出；不印比對到的文字。`scan FILE` 可以事後掃。已知誤報列在工具說明。
+- `setup_project_settings.py`：`--loop-guard`（要配 `--audit-log` 或 `--runtime-guard`）、`--loop-config`、`--resume-inject <RESUME_STATE>`、`--resume-max-bytes`、`--inject-scan`。預設都不裝；裝之前照樣先試跑。
+- 範例（L8，選用，DW 不依賴）：`templates/.pre-commit-config.yaml`（本機 hook：commit 前 `secret_mask.py --check`、push 前 selftest，不下載任何東西）、`templates/.gitleaks.toml`（保留 gitleaks 預設規則，加一條家目錄路徑規則；沒有用實際的 gitleaks 跑過，NOT_VERIFIED）。
+
+### 修正與新檢查
+
+- `completion.py`（L10）：可加 `depends_on`／`依賴`／`前置` 欄。有填就多印 `READY_NOW:`（還沒到 100、依賴全部算 100 的項目；被壓成 75 的 100 不算完成）和 `BLOCKED <ID>: waits for ...`；依賴的 ID 不在表裡或繞成一圈印 WARN。沒有這一欄的舊表輸出和 2.3.0 完全一樣。
+- `secret_mask.py --check` 可以一次給多個檔（pre-commit 會一次傳多個）；不加 `--check` 仍只能給一個檔。
+- selftest（L6）：2.3.0 的 `round_conditions_230` mutation 跑在一份「有」條件表的研究上，真工具和拿掉檢查的版本都不警告，所以怎樣都算抓到，等於沒測；現在改在沒有條件表的研究上跑，並加一項對照（真工具一定要警告）。用一個沒拿掉檢查的版本試過：舊測試照樣全過，新測試會失敗。
+- 規格審查的說法統一（L12）：`docs/02` 第 35 行說 2.2.5 起 Standard 等級派工前也要做規格審查，但第 115 行還寫「只在 Strict 必做」，兩處矛盾。以第 35 行為準，改了 `docs/02` 第 115 行、`docs/11` 第 29 行、`docs/12` 第 56 行；selftest 新增一項：`docs/` 裡不能再有「規格審查只在 Strict」的說法。上層 `README.md` 的「規格審查選用」已在 2.3.0 的白話改寫（PR #26）改成「派工前先做規格審查」。
+
+### 規則（文件）
+
+- `docs/07` 第 8 節（L5）：說「做完」之前重跑一次、貼出當下的指令和結果（`ran_line.py`）；沒重跑就寫 NOT_VERIFIED；`completion.py` 的 100 要證據。除錯：重現 → 一個假設 → 一處修改 → 重新驗證，記在 FIX_ROUNDS，三輪不成就做根因研究（`round_check.py`）。請人審查：給成品和怎麼重跑，不給自己的結論。
+- `docs/06b` git 細節（L7）：社群說 subagent 的工具呼叫可能不經過 PreToolUse hook：NOT_VERIFIED；官方 hooks 文件（2026-11-15 查）寫的是 subagent 裡也會觸發，輸入帶 `agent_id`／`agent_type`。不要把 hook 當 subagent 的唯一防線：事後用 `transcript_audit.py` 重建 subagent 的動作；`loop_guard.py scan --transcript` 也讀 subagent。原本要寫在 `docs/08`，但每輪必讀已是 9548／9550 bytes，PO 2026-11-14 也說不加每輪必讀，所以放在按需讀的 `docs/06b`。
+- `docs/04`（L9）：用量交叉核對（選用）：ccusage（MIT，使用者自己裝；欄位名稱 NOT_VERIFIED）和 Claude Code 的 OpenTelemetry 指標（`CLAUDE_CODE_ENABLE_TELEMETRY=1`、`claude_code.token.usage` 的 input／output／cacheRead／cacheCreation、`claude_code.cost.usage`，照官方 monitoring 文件，2026-11-15 查）。差超過 10% 先當成量法不同，不是錯。
+- `docs/04`（L4）：按需程序改成 skill 的實測，結論不採用（見「數字」）。
+
+### 查過的現成做法
+
+- 打轉偵測、提示注入警告、重開注入交接、完成度依賴：都有現成專案，但要 Node／Rust、常駐程序或另一套狀態來源；DW 只借概念，用標準庫寫，資料留在 DW 自己的動作紀錄和 transcript。
+- 不採用（照工單）：claude-squad、trufflehog、get-shit-done、claude-mem、claude-flow 整套、vibe-kanban、claude-code-action／security-review（要付費 API key）。destructive_command_guard、mcp_agent_mail（授權附加條款排除 Anthropic）、AGPL 和沒有授權的專案：沒有用。
+
+### 已知限制
+
+- `loop_guard.py` 的 transcript 雜湊沒有遮罩（快、不輸出），和動作紀錄的雜湊不能互相比。`bad_args` 要 transcript 才有錯誤文字。`child_error_unhandled` 只看 subagent 呼叫是不是那條串流的最後一個，Claude Code 自己的 subagent 失敗事件沒有查。
+- `inject_scan.py` 是安全帶，不是安全邊界：換句話說、拆行、別的語言、別的編碼都會漏；講提示注入的文件和測試會誤報。指令來源規則（只有使用者能下指令）照樣決定一切。
+- `resume_inject.py`、subagent 裡 hook 會不會觸發：照官方文件寫，沒有實機測（要另一個 CLI 登入）。
+- `templates/.gitleaks.toml` 照 gitleaks README 的格式寫，沒有實際跑過。
+
+### 遷移
+
+- 不用改任何東西：新 hook 都要自己用 `setup_project_settings.py` 選擇加入，預設不裝。
+- `completion.py` 舊表照樣通過，輸出不變；要用依賴就加一欄。
+- `usage_mix.py` 多一行 `LOOPS`；有程式讀它的輸出時，照舊讀 RESULT 行即可，或加 `--no-loops`。
+- 上層 `README.md` 加「2.4.0 新增的小幫手（選用）」一節（工具表、怎麼打開、兩張圖）、兩題常見問題、防護表三列，檔案地圖補上新工具；最上面的提示詞沒有改。
+
+### 數字
+
+- L4（`context_probe.py`，同一台機器、同一帳號，三個暫存資料夾，2026-11-15）：現在 Memory files 1261／Skills 9943 token；skill 版 1261／9942（多一筆 101 token 的說明，清單到上限擠掉別的），每輪 +101 token；06b 整份常駐 3935／9943，每輪 +2674。淨省為負，**不採用**。
+- L1 實測（一天的本機 transcript，約 69k 次呼叫）：讀檔約 24 秒，算事件約 8 秒（原本每個輸出都遮罩要約 40 秒，改成對原文雜湊）。`ping_pong` 預設從 4 改 6：4 的命中有一半是正常的兩個工具交替。找到：repeat 58、ping_pong 42（門檻 4 時 86）、poll_no_progress 19、retry_same_error 1。
+- 每輪必讀（`docs/01`、`03`、`06`、`08`）：本版沒有改，也沒有新增每輪必讀的檔案或步驟。
+- `selftest.py`：2.3.0 的 2,951 項 → 本版 3,086 項（+135：loop_guard 各類、hook 模式、allow、設定錯誤與 mutation；setup 選擇加入；resume_inject；inject_scan 正反樣本與 mutation；usage_mix LOOPS；規格審查說法；completion 依賴與 mutation；pre-commit／gitleaks 範例與 secret_mask 多檔；L6 的對照項）。Python 3.11 和 3.9 全過；skipped=1 是這台機器不能建 symlink。
+
+### Credits（借用的概念；都沒有複製程式碼）
+
+| 專案 | 授權 | 借了什麼 |
+|---|---|---|
+| claude-flow（tool-loop guardrail） | MIT | 工具迴圈護欄：對工具和參數雜湊、到門檻先提醒（L1） |
+| pydantic-deepagents（stuck-loop 文件） | MIT | 同工具同參數 3 次為預設門檻（L1） |
+| ralph-claude-code | MIT | circuit breaker：提醒間隔加倍，不無限重複（L1） |
+| OpenClaw loop detection 文件 | 授權 NOT_VERIFIED，只讀了概念說明 | repeat／poll_no_progress／ping_pong 這種分類方式（L1） |
+| thepushkarp/handoff、kylesnowschwartz/claude-handoff | MIT | 壓縮或重開後把交接狀態放回 context（L2） |
+| lasso-security/claude-hooks | MIT | PostToolUse 只警告的提示注入掃描與分類（L3） |
+| Claude Code 官方 skills 文件 | 文件 | SKILL.md 格式，只用來量 L4（不採用） |
+| obra/superpowers | MIT | verification-before-completion、systematic-debugging、requesting-code-review（L5） |
+| ccusage | MIT | 獨立的本機用量計數，用來交叉核對（L9，DW 不依賴） |
+| pre-commit、gitleaks | MIT | 範例設定的格式（L8，DW 不依賴） |
+| steveyegge/beads | MIT | 任務依賴與 ready 清單（L10） |
+
+對齊初衷：
+1. 幫到誰：總監和 worker（打轉早點被提醒、壓縮後馬上看到自己做到哪、讀進來的內容像在下指令時有警告、完成度表直接看出現在能開工的項目）、PO（每輪成本沒變大，按需程序改 skill 量過不划算就不做）。依據：工單 WO-DW-240 和開源調查。
+2. Desktop：都是本機命令列工具、選用 hook 和文件；Desktop Code 分頁照常用，沒有新的每輪步驟。
+3. 服務：初衷 2（省額度）：打轉早點停、L4 量過才決定、resume 注入有上限；初衷 4（中斷不丟進度）：resume_inject；初衷 5（成品要真的對）：說做完前重跑、完成度依賴；初衷 7（零成本）：只用標準庫，範例工具使用者自己選。
+4. 核心：每輪必讀沒有變長；新 hook 全部選擇加入、只提醒或警告、不擋；沒有加額度上限或節奏限制；git 只讀。
+5. 舊檔案和舊指令：照樣通過；`completion.py` 舊表輸出不變；`usage_mix.py` 多一行 LOOPS。
+
 ## 2.3.0 — 2026-11-15
 
 MINOR（版本號照工單 WO-DW-230）：一週試跑學到的事做成工具和規則：完成度要有證據、修正前先查可行性、模擬和 patch 讀同一份設定、豁免要寫解除條件、執行腳本自己發 ACK / DONE、授權到期提醒、一條線的摘要一次印完、送 TR 前依缺陷類別跑 CPU 檢查；審查包、雜湊比對、build 新鮮度、開關讀取各有檢查；規則補「先用 DW 工具」、根因研究的條件表、放寬標準前盲測、同一組核對、真實影片並排比對（含呈現方式）、裁決要有自己查證的證據。不加 OpenSpec／SDD、不加每輪必讀、不加任何每日／每小時／節奏類的額度上限。

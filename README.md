@@ -438,6 +438,66 @@ RESUMED <TASK_ID> at <checkpoint>; next=...; waiting=...; redo=...
 
 你核准過的事，AI 會直接做完，不會換個說法再問一次。核准是一次一件，不會推廣到別的事。
 
+## 2.4.0 新增的小幫手（選用）
+
+讀完這節，你會知道 2.4.0 多了哪幾個小幫手、它們做什麼、怎麼打開。這幾個都**預設不裝**，要你自己選擇開啟；不開，用起來和 2.3.0 一模一樣。
+
+| 工具 | 一句話 | 會不會擋 |
+|---|---|---|
+| `tools/loop_guard.py` | 發現 AI 在原地打轉（同一件事一直做、同一個錯一直重試、兩件事輪流來回、一直查但結果都一樣）就提醒 | 不擋，只提醒 |
+| `tools/resume_inject.py` | 對話被壓縮、或中斷後重開時，自動把 RESUME_STATE 的前四行和「還沒做完」的段落放回 AI 眼前（最多 2 KB） | 不擋 |
+| `tools/inject_scan.py` | AI 讀進來的網頁、檔案、指令輸出裡，有像是在對 AI 下命令的句子（例如「忽略前面的指示」），就在旁邊加一行警告 | 不擋，只警告 |
+| `completion.py` 的 `depends_on` 欄 | 完成度表可以寫「這項要等哪幾項先完成」，工具直接列出「現在就能開工」的項目 | 不擋 |
+| `templates/.pre-commit-config.yaml`、`templates/.gitleaks.toml` | 想在 commit 前自動掃秘密的人可以拿去用的範例 | DW 本身不用它們 |
+
+### 怎麼打開
+
+在 worker 的資料夾執行。先**不加** `--apply`，看一次它會改什麼：
+
+```text
+python -I -X utf8 <RULES>/tools/setup_project_settings.py --audit-log <動作紀錄.jsonl> --loop-guard
+python -I -X utf8 <RULES>/tools/setup_project_settings.py --resume-inject RESUME_STATE.md
+python -I -X utf8 <RULES>/tools/setup_project_settings.py --inject-scan
+```
+
+確認沒問題再加 `--apply`。三個可以只開其中一個。打轉提醒要有動作紀錄（`--audit-log`，或已經用 `--runtime-guard`）。
+
+### 打轉提醒怎麼運作
+
+```mermaid
+flowchart LR
+    A[AI 要呼叫一個工具] --> B{loop_guard 看最近 20 次呼叫}
+    B -->|沒有重複| C[照常執行]
+    B -->|同一件事第 3 次| D[照常執行，旁邊附一行提醒]
+    D --> E{還在重複?}
+    E -->|第 6、12、24 次| D
+    E -->|停了| C
+```
+
+- 提醒只說「哪個工具、做了幾次」，不會把指令內容印出來。
+- 合法的等待（例如每分鐘看一次 build 好了沒）可以寫進設定檔的 `allow`，就不會被提醒。
+- 事後也能查：`python -I -X utf8 <RULES>/tools/loop_guard.py scan --transcript <對話紀錄.jsonl>`；`usage_mix.py` 的報表也多一行 `LOOPS`。
+
+### 中斷後自動接回
+
+```mermaid
+sequenceDiagram
+    participant CC as Claude Code
+    participant RI as resume_inject.py
+    participant RS as RESUME_STATE.md
+    CC->>RI: 重開或壓縮後（SessionStart，source = resume / compact）
+    RI->>RS: 讀前四行和「未結」段落
+    RI-->>CC: 最多 2 KB 的文字，放進 AI 的 context
+    Note over CC: 一般開新對話（startup）不會做任何事
+```
+
+- 每次開 session 最多一次，不是每輪，所以不會讓每輪變貴。
+- 其他部分，AI 要用時自己去讀 RESUME_STATE 全文。
+
+### 提示注入警告
+
+AI 讀到的網頁或檔案，可能藏著「現在開始你要……」這種想騙 AI 的句子。`inject_scan.py` 看到這類句子，會在工具結果旁邊加一行警告；它不會擋、不會改，也不會把那句話再印一次。它會漏（換個說法就抓不到），也會誤報（例如講提示注入的文件本身）。真正的規則仍然是：只有使用者在對話裡說的才算指令。
+
 ## 常見問題
 
 讀完這節，你會知道新手最常卡住的地方怎麼辦。
@@ -515,6 +575,12 @@ worker 的分支、交件檢查都靠它；改壞了也能回到之前的存檔�
 
 **規格審查是什麼？** 派工前，總監先開一個只讀的小幫手（subagent）檢查工單寫得清不清楚、有沒有漏，避免做到一半才發現方向錯。結果只給總監參考，不增加你的工作。
 
+**按需程序要不要改成 skill？**
+量過了，不划算。`docs/06b` 現在只在 CLAUDE.md 放一句指向它，每輪幾乎不花；改成 skill，每輪反而多一筆約 101 token 的說明。數字在 `docs/04`「按需程序要不要改成 skill」。
+
+**能不能用別的工具核對 DW 算的用量？**
+可以，選用：ccusage（MIT，自己裝）或 Claude Code 內建的 OpenTelemetry 指標。兩邊差超過 10%，先當成算法不同。做法在 `docs/04`。
+
 **可以換模型或調思考程度嗎？**
 可以。開新工作線時，總監會照 `docs/05` 建議用哪個模型、思考程度（effort）多高，由你決定或照預設。
 
@@ -581,8 +647,8 @@ worker 的分支、交件檢查都靠它；改壞了也能回到之前的存檔�
 | `docs/10_lessons_learned.md` | 原專案的教訓；每輪必讀規則的理由 | 第一次；寫新規則前；判斷必讀規則的邊界情況時 |
 | `docs/11_claude_desktop.md` | 在 Claude Desktop 上開 worker、傳訊息、讀額度和上下文視窗用哪個工具 | 在 Desktop 上建置與操作時 |
 | `docs/12_chat_to_product.md` | 一般 / 小白模式、專案初衷卡、待決頁網頁（選擇題與成品截圖）、不做歪的檢查 | 建置時；談需求、開選擇題、寫工單時 |
-| `templates/` | CLAUDE.md 段落、工單、報告、RESUME_STATE、測試申請、決策登記、裁決、待決頁（本機帳和網頁 `choice_page.html`）、專案初衷卡、規格審查提示、DIRECTOR/ 其他檔案骨架；2.3.0 加 CPU 重現步驟（`CPU_REPRO.md`）、送 TR 前的缺陷類別檢查設定（`pre_tr.json`）、執行腳本收尾範本（`run_closing.py`） | 建置與派工時 |
-| `tools/` | 設定寫入、免費探測、用量統計和用量結構、記憶大小檢查；建置檢查（`setup_check`：待決頁網址和置頂）、交件檢查（格式、驗收對照、範圍、證據紀錄、報告對動作紀錄）、追溯表、修正輪數、每線狀態腳本 | 見 `tools/README.md` |
+| `templates/` | CLAUDE.md 段落、工單、報告、RESUME_STATE、測試申請、決策登記、裁決、待決頁（本機帳和網頁 `choice_page.html`）、專案初衷卡、規格審查提示、DIRECTOR/ 其他檔案骨架；2.3.0 加 CPU 重現步驟（`CPU_REPRO.md`）、送 TR 前的缺陷類別檢查設定（`pre_tr.json`）、執行腳本收尾範本（`run_closing.py`）；2.4.0 加 commit 前掃秘密的範例（`.pre-commit-config.yaml`、`.gitleaks.toml`） | 建置與派工時 |
+| `tools/` | 設定寫入、免費探測、用量統計和用量結構、記憶大小檢查；建置檢查（`setup_check`：待決頁網址和置頂）、交件檢查（格式、驗收對照、範圍、證據紀錄、報告對動作紀錄）、追溯表、修正輪數、每線狀態腳本；2.4.0 加打轉提醒（`loop_guard`）、中斷後自動接回（`resume_inject`）、提示注入警告（`inject_scan`）、完成度表的 `depends_on` | 見 `tools/README.md` |
 | `director_work.example.json` | 工具設定範例 | 建置時 |
 | `VERSION`、`CHANGELOG.md` | 版本號、各版改了什麼、升級怎麼遷移 | 建置時記版本；升級時 |
 
@@ -654,6 +720,9 @@ flowchart TD
 | 機密讀取 | **擋常見寫法** | 清單以外的檔名、間接讀法擋不到 |
 | 機密遮罩 | **擋常見格式** | 沒見過的 token 格式遮不到 |
 | 獨立審查 `--review` | **只會多擋**；NOT_VERIFIED | 預設關。selftest 只用假的 claude 測過，沒有用真的 `claude -p` 取樣；模型判斷不穩定，不能當主閘門 |
+| 打轉提醒（`hook_guard.py --loop-guard`，2.4.0） | **只提醒**（`--loop-mode ask` 改成詢問）；從不擋 | 看動作紀錄的尾段；到門檻提醒一次，之後到 2 倍、4 倍……再提醒 |
+| 提示注入警告（`inject_scan.py`，2.4.0） | **只警告** | 換句話說、拆行、別的語言、別的編碼都抓不到；講提示注入的文件會誤報 |
+| subagent 裡的 hook | **照官方文件會觸發**；NOT_VERIFIED | 社群有說 subagent 可能不經過 PreToolUse，沒有實測；事後用 `transcript_audit.py` 重建 subagent 的動作（`docs/06b` git 細節） |
 | Monitor 的指令 | 要 claude ≥ 2.1.314 才經過 hook；NOT_VERIFIED | 欄位格式照官方文件假設，沒有在真的 Monitor 上取樣。doctor 依版本報 |
 | worktree 隔離 | **檢查** | doctor 報告，不強制 |
 | OS 層隔離 | 原生 Windows：**沒有**（NOT_ENFORCED） | 指令和 Claude Code 同權限跑，能動到整台機器的檔案；也沒有網路出口管制。doctor 在原生 Windows 上永遠報這一項，所以一定 exit 1 |

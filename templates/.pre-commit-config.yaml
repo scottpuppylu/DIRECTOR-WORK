@@ -1,0 +1,35 @@
+# SAMPLE ONLY (DIRECTOR-WORK 2.4.0). DIRECTOR-WORK does not need pre-commit or gitleaks; nothing here runs unless
+# you install pre-commit yourself (https://pre-commit.com, MIT) and copy this file to your repo root as
+# .pre-commit-config.yaml, then run `pre-commit install`.
+# 範例檔：DW 不依賴 pre-commit。要用的話自己裝 pre-commit，把這個檔複製到專案根目錄，再跑 `pre-commit install`。
+#
+# Every hook below is `repo: local` + `language: system`: it runs a command already on your PC, downloads nothing,
+# and only reads the files being committed. Paths assume the DW tools sit in tools/ of the same repo; change them
+# if your copy lives elsewhere.
+repos:
+  - repo: local
+    hooks:
+      # Secret scan of the staged files with DW's own patterns. Exit 1 (commit stops) when any kind is found; it
+      # prints only the kind, never the value.
+      - id: dw-secret-mask
+        name: DW secret scan (secret_mask --check)
+        entry: python -I -X utf8 tools/secret_mask.py --check
+        language: system
+        types: [text]
+
+      # The DW selftest. It takes minutes, so it runs on `git push` only (pre-commit install --hook-type pre-push).
+      # Delete this hook if you do not keep the DW tools in this repo.
+      - id: dw-selftest
+        name: DW selftest
+        entry: python -I -X utf8 tools/selftest.py
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+
+      # Optional: gitleaks (MIT) when it is already installed and on PATH. Uncomment to use; the sample rules are
+      # in templates/.gitleaks.toml (copy it to the repo root as .gitleaks.toml).
+      # - id: gitleaks-staged
+      #   name: gitleaks (staged changes)
+      #   entry: gitleaks protect --staged --redact --no-banner
+      #   language: system
+      #   pass_filenames: false
