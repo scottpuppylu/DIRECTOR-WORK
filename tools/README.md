@@ -8,7 +8,7 @@ Python 3.9 以上，只用標準函式庫。一律用 `python -I -X utf8 <tool> 
 | `setup_project_settings.py` | 在一個 git repo 的每個 worktree 寫入壓縮門檻（`autoCompactWindow` + 環境變數）、要關掉的使用者 plugin，以及可選的 `hook_guard` hook；`--runtime-guard` 一次寫入整組執行期防護 | 只有加 `--apply` 才寫，只寫 `<worktree>/.claude/settings.local.json` | 不花 |
 | `context_probe.py` | 免費探測每輪固定成本：類別 token、`autoCompactThreshold`、記憶檔、skill | 不寫（`--json-out` 除外） | **不花**：只送 control request，不呼叫模型 |
 | `usage_report.py` | 從本機對話紀錄只彙總 usage 數字：呼叫數、上下文分佈、模型、快取重建、工具輸出量、圖片數 | 不寫（`--json-out` 除外） | 不花 |
-| `usage_mix.py`（1.3.0） | 額度花在哪：每次呼叫依它選的動作歸成五大類（讀和查、協調、看圖與審查、實際動手、等待），對照門檻，各 session 的比例，以及開新 session 划不划算（RESTART 行） | 不寫 | 不花；只印比例，不印訊息內容 |
+| `usage_mix.py`（1.3.0） | 額度花在哪：每次呼叫依它選的動作歸成五大類（讀和查、協調、看圖與審查、實際動手、等待），對照門檻，各 session 的比例，以及開新 session 划不划算（RESTART 行）；2.4.0 在 RESULT 前加一行 LOOPS（loop_guard 各類次數，`--no-loops` 省掉，大量 transcript 約多 30 秒） | 不寫 | 不花；只印比例，不印訊息內容 |
 | `memory_size_check.py` | 檢查記憶索引大小，超過門檻 exit 1；2.2.2 起 `--kind resume` 一次量多份 RESUME_STATE（`--file` 多次、`--glob`、`--workstreams`），每檔一行並印可搬 bytes | 不寫 | 不花 |
 | `resume_archive.py`（2.2.2） | RESUME_STATE 瘦身：把很多輪以前的段落和表頭 `Before:` 舊紀錄原文搬到同資料夾 `RESUME_HISTORY_<YYYYMMDD>.md`；近期、現況、未結不動；預設 dry-run | 只有 `--execute` 才寫：先寫 `.bak`，再改 RESUME_STATE 和歷史檔；驗證不過就還原 | 不花 |
 | `gate_check.py` | 檢查 RESUME_STATE（2.2.2 起含大小，shadow）、工單（2.2.2 起含 BASE_REF 新鮮度，會 `git fetch`）、TASK REPORT、裁決的欄位和用詞；`--match` 逐條對照報告和工單的驗收條件，加 `--evidence-dir` 再核對證據紀錄；`--hash` 印工單雜湊；2.2.4 `--after-verdict` 列出最後一份裁決之後動到 SCOPE 外程式碼的 commit（shadow） | 不寫 | 不花 |
@@ -26,6 +26,9 @@ Python 3.9 以上，只用標準函式庫。一律用 `python -I -X utf8 <tool> 
 | `pack_check.py`（2.3.0） | 審查包送出前：抽格（漏掉短階段、和週期同步）、主體在畫面內、近景真的拍到部位、檔名洩漏版本或結論、渲染設定會做出假缺陷、README 和實際檔案一致；`readme` 從實際檔案產生 README | 只有 `readme` 寫 README.md | 不花 |
 | `hash_check.py`（2.3.0） | 雜湊比對少一個案例就 FAIL；build 新不新用內容雜湊判斷（不看檔案時間）；印實際跑的組件路徑和雜湊 | 只有 `stamp` 寫 `--out` | 不花 |
 | `flag_check.py`（2.3.0） | 開關有沒有真的被讀到：log 第一個 frame 前每個開關一行 `flag X read = 值`，型別和值都對；缺行就停、不判定 | 不寫 | 不花 |
+| `loop_guard.py`（2.4.0） | 找出在原地打轉的呼叫：同一呼叫重複、同一錯誤重試、兩個呼叫輪流、輪詢結果不變、參數一直被拒、subagent 失敗沒人處理；`scan` 讀動作紀錄或 transcript，事後列出；`hook_guard.py --loop-guard` 在呼叫前提醒（不擋）；只印工具名、雜湊和次數 | 不寫 | 不花 |
+| `resume_inject.py`（2.4.0） | SessionStart hook（resume / compact）：把 RESUME_STATE 的表頭四行和未結事項放進上下文，上限 2 KB（`--max-bytes`）；`setup_project_settings.py --resume-inject FILE` 才裝 | 不寫 | 不花 |
+| `inject_scan.py`（2.4.0） | PostToolUse hook：工具帶回的文字裡有像在下指令的內容（忽略先前指示、改寫角色、隱藏字元、可讀的 base64、要你把金鑰送出去）時，在結果旁附警告，不擋、不改輸出；`scan` 掃檔案；`setup_project_settings.py --inject-scan` 才裝 | 不寫 | 不花 |
 | `trace_report.py` | 從工單、報告、裁決產生追溯表：需求 → 工單 → AC → 證據 → 裁決 | 不寫 | 不花 |
 | `metrics_report.py` | 從總監的檔案數出 `PURPOSE.md` 的成效數字：返工、中斷後重做、PO 介入、導入卡住，以及規格審查的花費；`--run` 另數接手演練的決策、重問、PO 操作和第一個可用預覽的時間 | 不寫 | 不花 |
 | `vocabulary.json` | 判定、下一步、RESULT、治理模式、證據等級等固定用詞的唯一來源；`gate_check.py` 讀它 | — | — |

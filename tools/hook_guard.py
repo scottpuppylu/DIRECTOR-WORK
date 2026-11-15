@@ -74,6 +74,12 @@ written never changes the decision: the deny stays a deny and no pause is writte
 With --audit FILE every deny, ask, remind and pause is also added to the action log FILE (audit_log.py) as a kind=decision
 line with the rule ID (G.., builtin for the checks above, PAUSE), so a blocked call is on the chain too. A log that
 cannot be written (lock busy for 5 s, broken last line) never changes the decision.
+With --loop-guard (2.4.0; needs --audit; setup_project_settings.py --loop-guard; off unless given) a call that no check
+above flags is compared with the tail of that action log by loop_guard.py: the same call again, the same error again,
+two calls in turn, a poll with an unchanged result. A loop gets a reminder (or an ask with --loop-mode ask; there is
+no block) at the threshold, 2x, 4x ...; --loop-config FILE sets thresholds and an allow list for planned polls. The
+reminder is logged as a decision line with rule LOOP:<category>. Nothing happens while DW_LOOP_GUARD is set (the
+--review child gets it, with DW_HOOK_REVIEW).
 With --review (needs --rules with a "review" section; off unless given) an ask whose rule category is in
 review.categories is first shown to a second model: CLAUDE_CODE_EXECPATH (the claude executable of this session; a
 .py path runs with this Python, for tests), else claude on PATH, run as
@@ -728,7 +734,7 @@ def review(conf, call, rule, reason):
     argv, source = review_command(conf["model"], prompt)
     if argv is None:
         return "unavailable", "no claude executable", source
-    env = dict(os.environ, DW_HOOK_REVIEW="1")
+    env = dict(os.environ, DW_HOOK_REVIEW="1", DW_LOOP_GUARD="1")
     try:
         done = subprocess.run(argv, capture_output=True, encoding="utf-8", errors="replace", timeout=conf["timeout_s"],
                               env=env, stdin=subprocess.DEVNULL)
@@ -1173,7 +1179,29 @@ def main():
                     "the protected list; --profile is the fallback for a session it does not name (needs --rules)")
     ap.add_argument("--mode", choices=MODES, default="remind", help="what a flagged call gets: remind (default; it "
                     "runs, with a one-line reminder), ask (the user decides) or block (exit 2; explicit opt-in)")
+    ap.add_argument("--loop-guard", action="store_true", help="2.4.0: before a call no rule flags, check the tail of the "
+                    "--audit log for a loop (loop_guard.py: the same call again, the same error again, A B A B, a poll "
+                    "with no progress) and remind; never blocks (needs --audit)")
+    ap.add_argument("--loop-config", help="loop_guard config JSON (thresholds, allow list for planned polls)")
+    ap.add_argument("--loop-mode", choices=("remind", "ask"), default="remind", help="what a loop gets: remind (default) "
+                    "or ask; there is no block mode")
     a = ap.parse_args()
+    loop = None
+    if (a.loop_config or a.loop_mode != "remind") and not a.loop_guard:
+        print("hook_guard: --loop-config / --loop-mode need --loop-guard", file=sys.stderr)
+        return 1
+    if a.loop_guard:
+        if not a.audit:
+            print("hook_guard: --loop-guard needs --audit (it reads the action log)", file=sys.stderr)
+            return 1
+        try:
+            spec = importlib.util.spec_from_file_location("loop_guard", pathlib.Path(__file__).with_name("loop_guard.py"))
+            loop = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(loop)
+            loop_conf = loop.load_config(a.loop_config)
+        except Exception as error:  # noqa: BLE001 - a bad config is reported like a bad rules file
+            print(f"hook_guard: bad loop config: {error}", file=sys.stderr)
+            return 1
     data = sessions = None
     if a.sessions and not a.rules:
         print("hook_guard: --sessions needs --rules", file=sys.stderr)
@@ -1273,6 +1301,18 @@ def main():
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "ask",
                                                  "permissionDecisionReason": f"[{ask[1]}] {ask[2]}{note}"}}))
         audit(a.audit, original, "ask", ask[1] + (f" review={reviewed[0]} via={reviewed[2]}" if reviewed else ""))
+        return 0
+    if loop is not None:
+        found = loop.hook_reminder(original, a.audit, loop_conf)
+        if found:
+            rule, text = f"LOOP:{found[0]}", found[1]
+            if a.loop_mode == "ask":
+                print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "ask",
+                                                         "permissionDecisionReason": text}}))
+            else:
+                print(json.dumps({"systemMessage": text, "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse", "additionalContext": text}}))
+            audit(a.audit, original, a.loop_mode, rule)
     return 0
 
 

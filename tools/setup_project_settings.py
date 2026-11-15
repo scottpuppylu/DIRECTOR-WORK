@@ -65,6 +65,18 @@ worker unless another profile is given, --audit-log <git common dir>/director-au
 unless another log is given, and env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB = "1" (subprocesses get no Anthropic / cloud
 credentials from the environment; GITHUB_TOKEN, GH_TOKEN, proxy credentials and GIT_CONFIG_* are kept by design). A missing one shows
 MISSING (env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB). doctor.py then reports what is really in force.
+2.4.0 opt-ins (all off unless asked; none of them blocks):
+--loop-guard (config loop_guard: true; needs --audit-log or --runtime-guard, implies --hooks) gives the hook_guard
+entry --loop-guard [--loop-config FILE (config loop_config)] and matcher * : before a call that repeats a loop
+pattern of the action log (loop_guard.py) the agent gets a reminder. Without --loop-guard an installed one is kept.
+The hook test also runs the allowed call with --loop-guard against an empty temp log (loop=0).
+--resume-inject FILE (config resume_inject; a relative FILE is taken in each worktree) adds a SessionStart hook,
+matcher resume|compact, that runs resume_inject.py --file FILE [--max-bytes N (--resume-max-bytes, 256..10000,
+default 2048)]: after a resume or a compaction the four header lines and the open items of FILE go into context.
+--inject-scan (config inject_scan: true) adds a PostToolUse hook (matcher Read|WebFetch|WebSearch|Bash|PowerShell|
+Grep|mcp__.*) that runs inject_scan.py hook: a warning next to a tool result that holds planted instructions.
+Missing ones show MISSING (hooks.SessionStart resume_inject.py / hooks.PostToolUse inject_scan.py); each is test-run
+on a sample input and must exit 0.
 """
 import argparse
 import datetime
@@ -78,6 +90,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 
 REL = pathlib.Path(".claude") / "settings.local.json"
 CONFIG_VERSION = 1  # director_work.json without schema_version counts as 1
@@ -87,6 +100,9 @@ GUARD = pathlib.Path(__file__).resolve().parent / "hook_guard.py"
 RULES = GUARD.parent / "guard_rules.json"
 AUDIT = GUARD.parent / "audit_log.py"
 POST_EVENTS = ("PostToolUse", "PostToolUseFailure")
+RESUME = GUARD.parent / "resume_inject.py"
+INJECT = GUARD.parent / "inject_scan.py"
+INJECT_MATCHER = "Read|WebFetch|WebSearch|Bash|PowerShell|Grep|mcp__.*"
 HOOK = {"matcher": "Bash|PowerShell", "hooks": [{"type": "command", "command":
         f'"{pathlib.Path(sys.executable).as_posix()}" -I -X utf8 "{GUARD.as_posix()}"'}]}
 PROFILES = ("worker", "director", "cleaner")
@@ -94,17 +110,24 @@ MODES = ("remind", "ask", "block")
 STRICTNESS = {"none": 0, "ask": 1, "deny": 2}
 
 
-def hook_entry(protect, profile=None, pause=None, audit=None, review=False, sessions=None, mode="remind"):
+def hook_entry(protect, profile=None, pause=None, audit=None, review=False, sessions=None, mode="remind", loop=False,
+               loop_config=None):
     """The PreToolUse entry wanted: the plain HOOK, one that also covers Write / Edit for a protected DIRECTOR,
     or, with a guard profile, one that checks every tool call against the rules file and blocks when it fails.
-    With audit, hook_guard also logs its decisions there. A mode other than remind adds --mode."""
+    With audit, hook_guard also logs its decisions there. A mode other than remind adds --mode. With loop (2.4.0,
+    needs audit) it also reminds of loops (--loop-guard) and sees every tool (matcher *)."""
     log = f' --audit "{audit.as_posix()}"' if audit else ""
+    if loop and audit:
+        log += " --loop-guard" + (f' --loop-config "{loop_config.as_posix()}"' if loop_config else "")
     base = HOOK["hooks"][0]["command"] + (f" --mode {mode}" if mode and mode != "remind" else "")
     if not protect and not profile:
-        return {"matcher": HOOK["matcher"], "hooks": [{"type": "command", "command": base + log}]} if base + log != HOOK["hooks"][0]["command"] else HOOK
+        if base + log == HOOK["hooks"][0]["command"]:
+            return HOOK
+        return {"matcher": "*" if "--loop-guard" in log else HOOK["matcher"], "hooks": [{"type": "command", "command": base + log}]}
     command = base + (f' --protect "{protect.as_posix()}"' if protect else "")
     if not profile:
-        return {"matcher": "Bash|PowerShell|Write|Edit", "hooks": [{"type": "command", "command": command + log}]}
+        return {"matcher": "*" if "--loop-guard" in log else "Bash|PowerShell|Write|Edit",
+                "hooks": [{"type": "command", "command": command + log}]}
     command += f' --rules "{RULES.as_posix()}" --profile {profile}' + (f' --pause-flag "{pause.as_posix()}"' if pause else "")
     command += f' --sessions "{sessions.as_posix()}"' if sessions else ""
     command += " --review" if review else ""
@@ -117,20 +140,26 @@ def post_entry(audit):
             f'"{pathlib.Path(sys.executable).as_posix()}" -I -X utf8 "{AUDIT.as_posix()}" append --log "{audit.as_posix()}"'}]}
 
 
-def audit_entries(data, event):
+def script_entries(data, event, script):
+    """The entries of event whose hooks run script (audit_log.py, resume_inject.py, inject_scan.py)."""
     entries = (data.get("hooks") or {}).get(event) or []
     return [e for e in entries if isinstance(e, dict) and any(
-        isinstance(h, dict) and "audit_log.py" in str(h.get("command", "")) for h in e.get("hooks") or [])]
+        isinstance(h, dict) and script in str(h.get("command", "")) for h in e.get("hooks") or [])]
 
 
-def install_post(data, event, want):
-    """Put want where the first audit_log entry of event was (or at the end); drop other audit_log hooks."""
+def audit_entries(data, event):
+    return script_entries(data, event, "audit_log.py")
+
+
+def install_script(data, event, want, script):
+    """Put want where the first entry of event running script was (or at the end); drop other hooks running it."""
     entries = data.setdefault("hooks", {}).setdefault(event, [])
+    ours = script_entries(data, event, script)
     at, kept = None, []
     for e in entries:
-        if isinstance(e, dict) and e in audit_entries(data, event):
+        if isinstance(e, dict) and e in ours:
             at = len(kept) if at is None else at
-            rest = [h for h in e.get("hooks") or [] if not (isinstance(h, dict) and "audit_log.py" in str(h.get("command", "")))]
+            rest = [h for h in e.get("hooks") or [] if not (isinstance(h, dict) and script in str(h.get("command", "")))]
             if rest:
                 kept.append(dict(e, hooks=rest))
         else:
@@ -139,8 +168,34 @@ def install_post(data, event, want):
     data["hooks"][event] = kept
 
 
+def install_post(data, event, want):
+    """Put want where the first audit_log entry of event was (or at the end); drop other audit_log hooks."""
+    install_script(data, event, want, "audit_log.py")
+
+
+def resume_entry(state, cap):
+    """2.4.0 (L2): the SessionStart entry (matcher resume|compact) that prints the RESUME_STATE header and open items."""
+    return {"matcher": "resume|compact", "hooks": [{"type": "command", "command":
+            f'"{pathlib.Path(sys.executable).as_posix()}" -I -X utf8 "{RESUME.as_posix()}" --file "{state.as_posix()}"'
+            + (f" --max-bytes {cap}" if cap else "")}]}
+
+
+def scan_entry():
+    """2.4.0 (L3): the PostToolUse entry that warns (never blocks) about instructions planted in what a tool read."""
+    return {"matcher": INJECT_MATCHER, "hooks": [{"type": "command", "command":
+            f'"{pathlib.Path(sys.executable).as_posix()}" -I -X utf8 "{INJECT.as_posix()}" hook'}]}
+
+
 def load_audit_log():
     spec = importlib.util.spec_from_file_location("audit_log", AUDIT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_tool(name):
+    """A neighbour tool module (loop_guard, resume_inject, inject_scan)."""
+    spec = importlib.util.spec_from_file_location(name, GUARD.parent / f"{name}.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -296,6 +351,15 @@ def sessions_arg(command):
     return found.group(1) if found else None
 
 
+def loop_arg(command):
+    return bool(re.search(r"(?:^| )--loop-guard(?= |$)", command))
+
+
+def loop_config_arg(command):
+    found = re.search(r'--loop-config "([^"]*)"', command)
+    return found.group(1) if found else None
+
+
 def guard_hook(entry):
     """The one hook_guard hook object of an entry; None when it has none or several."""
     guard = [h for h in entry.get("hooks") or [] if isinstance(h, dict) and "hook_guard.py" in str(h.get("command", ""))]
@@ -320,6 +384,7 @@ def hook_entry_matches(entry, want, exact=True):
             and pause_arg(command) == pause_arg(wanted) and audit_arg(command) == audit_arg(wanted)
             and review_arg(command) == review_arg(wanted) and sessions_arg(command) == sessions_arg(wanted)
             and mode_arg(command) == mode_arg(wanted)
+            and loop_arg(command) == loop_arg(wanted) and loop_config_arg(command) == loop_config_arg(wanted)
             and hook.get("onFailure") == want["hooks"][0].get("onFailure") and (not exact or command == wanted))
 
 
@@ -349,11 +414,17 @@ def hook_works(command, protect):
         argv = shlex.split(command)
     except ValueError as error:
         return False, f"command does not parse: {error}"
-    for option in ("--audit", "--pause-flag"):  # test calls: not in the action log, not counted toward an auto-pause
+    loop_argv = None
+    if "--loop-guard" in argv:  # 2.4.0: the loop check runs once more below, on an empty log of its own
+        loop_argv = [w for w in argv if w != "--review"]
+        if "--pause-flag" in loop_argv[:-1]:
+            at = loop_argv.index("--pause-flag")
+            del loop_argv[at:at + 2]
+    for option in ("--audit", "--pause-flag", "--loop-config"):  # test calls: not in the action log, not counted toward an auto-pause
         if option in argv[:-1]:
             at = argv.index(option)
             del argv[at:at + 2]
-    argv = [w for w in argv if w != "--review"]  # a test call never starts a second-model review
+    argv = [w for w in argv if w not in ("--review", "--loop-guard")]  # a test call never starts a second-model review
     flag = FLAGGED.get(mode_arg(command), 2)
     calls = [("allow", {"tool_name": "Bash", "tool_input": {"command": "git status"}}, 0),
              ("block", {"tool_name": "Bash", "tool_input": {"command": "git push"}}, flag)]
@@ -370,6 +441,18 @@ def hook_works(command, protect):
             got = type(error).__name__
         results.append(f"{name}={got}")
         ok = ok and got == code
+    if loop_argv is not None and "--audit" in loop_argv[:-1]:
+        # the loop guard loads its config and reads an empty log: an allowed call must still pass silently
+        with tempfile.TemporaryDirectory() as tmp:
+            loop_argv[loop_argv.index("--audit") + 1] = str(pathlib.Path(tmp) / "loop-test.jsonl")
+            try:
+                done = subprocess.run(loop_argv, input=json.dumps(calls[0][1]), capture_output=True, text=True,
+                                      encoding="utf-8", timeout=60)
+                got = answer(done)
+            except (OSError, subprocess.TimeoutExpired) as error:
+                got = type(error).__name__
+        results.append(f"loop={got}")
+        ok = ok and got == 0
     return ok, " ".join(results)
 
 
@@ -389,20 +472,47 @@ def install_hook(data, want):
     data["hooks"]["PreToolUse"] = kept
 
 
-def tested(wt, label, want):
+def extra_works(extra):
+    """2.4.0: run each opt-in hook (resume_inject, inject_scan) once on a harmless input: (ok, detail)."""
+    results, ok = [], True
+    samples = {"SessionStart": {"hook_event_name": "SessionStart", "source": "resume"},
+               "PostToolUse": {"hook_event_name": "PostToolUse", "tool_name": "Read", "tool_input": {"file_path": "x"},
+                               "tool_response": "plain text"}}
+    for event, entry, script in extra:
+        try:
+            done = subprocess.run(shlex.split(entry["hooks"][0]["command"]), input=json.dumps(samples[event]),
+                                  capture_output=True, text=True, encoding="utf-8", timeout=60)
+            got = done.returncode
+        except (OSError, subprocess.TimeoutExpired, ValueError) as error:
+            got = type(error).__name__
+        results.append(f"{script.split('.')[0]}={got}")
+        ok = ok and got == 0
+    return ok, " ".join(results)
+
+
+def tested(wt, label, want, extra=()):
     """Print the OK / SET line; with a hook, run it first (H04). Returns 1 when the hook does not work."""
-    if want is None:
+    if want is None and not extra:
         print(f"{label:11} {wt}")
         return 0
+    if want is None:
+        ok, detail = extra_works(extra)
+        print(f"{label:11} {wt} (hook test: {detail})" if ok else f"HOOK_FAIL   {wt} (hook test: {detail}; expected 0)")
+        return 0 if ok else 1
     command = want["hooks"][0]["command"]
     ok, detail = hook_works(command, protect_arg(command))
+    if extra:
+        more_ok, more = extra_works(extra)
+        ok, detail = ok and more_ok, f"{detail} {more}"
     print(f"{label:11} {wt} (hook test: {detail})" if ok else
           f"HOOK_FAIL   {wt} (hook test: {detail}; expected allow=0 block={FLAGGED.get(mode_arg(command), 2)})")
     return 0 if ok else 1
 
 
-def wanted_missing(data, window, plugins_off, hooks=False, want=None, perms=None, audit=None, scrub=False, ours=None):
-    miss = []
+def wanted_missing(data, window, plugins_off, hooks=False, want=None, perms=None, audit=None, scrub=False, ours=None,
+                   extra=()):
+    """What is not in place; extra: (event, entry, script) of the 2.4.0 opt-in hooks (resume_inject, inject_scan)."""
+    miss = [f"hooks.{event} {script}" for event, entry, script in extra if entry not in script_entries(data, event, script)]
     if data.get("autoCompactWindow") != window:
         miss.append("autoCompactWindow")
     if (data.get("env") or {}).get(ENV_KEY) != str(window):
@@ -453,6 +563,18 @@ def main():
     ap.add_argument("--runtime-guard", action="store_true", help="write the runtime guard set: worker profile (unless "
                     "--guard-profile), an action log per worktree (unless --audit-log) and env "
                     "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 (config: runtime_guard)")
+    ap.add_argument("--loop-guard", action="store_true", help="2.4.0: hook_guard also reminds of loops (loop_guard.py: "
+                    "the same call again, the same error again, A B A B, a poll with no progress); never blocks; needs "
+                    "an action log (--audit-log or --runtime-guard); config: loop_guard")
+    ap.add_argument("--loop-config", help="loop_guard config JSON for that hook: thresholds and an allow list for planned "
+                    "polls (config: loop_config)")
+    ap.add_argument("--resume-inject", metavar="FILE", help="2.4.0: SessionStart hook (resume / compact only) that prints "
+                    "FILE's first four lines and its open-items section, at most --resume-max-bytes; a relative FILE is "
+                    "taken in each worktree (config: resume_inject)")
+    ap.add_argument("--resume-max-bytes", type=int, help="cap for --resume-inject, 256-10000 (default 2048; config: "
+                    "resume_max_bytes)")
+    ap.add_argument("--inject-scan", action="store_true", help="2.4.0: PostToolUse hook that warns (never blocks) when "
+                    "what a tool read holds planted instructions (inject_scan.py; config: inject_scan)")
     ap.add_argument("--only-this", action="store_true", help="only the worktree given by --repo, not all worktrees")
     ap.add_argument("--skip", action="append", default=[], help="skip worktrees whose path contains this text (repeatable)")
     ap.add_argument("--apply", action="store_true", help="write; without it nothing is written")
@@ -506,7 +628,27 @@ def main():
     mode = a.guard_mode or cfg.get("guard_mode")
     if mode is not None and mode not in MODES:
         sys.exit(f"guard_mode {mode!r} is not one of {', '.join(MODES)}")
-    hooks = a.hooks or cfg.get("hooks") is True or protect is not None or profile is not None or bool(audit)
+    loop = a.loop_guard or cfg.get("loop_guard") is True
+    loop_config = a.loop_config or cfg.get("loop_config")
+    loop_config = pathlib.Path(loop_config).resolve() if loop_config else None
+    if loop_config and not loop:
+        sys.exit("--loop-config needs --loop-guard (config loop_guard: true)")
+    if loop and not audit:
+        sys.exit("--loop-guard needs an action log: --audit-log FILE or --runtime-guard (config audit_log / runtime_guard)")
+    if loop_config:
+        try:
+            load_tool("loop_guard").load_config(loop_config)
+        except Exception as error:  # noqa: BLE001 - one line, no traceback
+            sys.exit(f"loop_config: {error}")
+    resume = a.resume_inject or cfg.get("resume_inject")
+    resume_cap = a.resume_max_bytes or cfg.get("resume_max_bytes")
+    if resume_cap is not None and not (isinstance(resume_cap, int) and 256 <= resume_cap <= 10000):
+        sys.exit(f"resume_max_bytes {resume_cap!r} outside 256-10000")
+    if resume_cap and not resume:
+        sys.exit("--resume-max-bytes needs --resume-inject FILE")
+    resume_cap = None if resume_cap == 2048 else resume_cap
+    scan = a.inject_scan or cfg.get("inject_scan") is True
+    hooks = a.hooks or cfg.get("hooks") is True or protect is not None or profile is not None or bool(audit) or loop
 
     if a.backup_dir or cfg.get("backup_dir"):
         backup = pathlib.Path(a.backup_dir or cfg["backup_dir"])
@@ -517,7 +659,8 @@ def main():
           f"hooks={'on' if hooks else 'off'}{f' protect={protect.as_posix()}' if protect else ''}"
           f"{f' guard_profile={profile}' if profile else ''}"
           f"{f' session_map={smap.as_posix()} ({chr(44).join(map_profiles)})' if smap else ''}{f' pause_flag={pause.as_posix()}' if pause else ''}"
-          f"{f' audit_log={audit}' if audit else ''}{f' guard_mode={mode}' if mode else ''}{' guard_review=on' if review else ''}{' runtime_guard=on' if runtime else ''} "
+          f"{f' audit_log={audit}' if audit else ''}{f' guard_mode={mode}' if mode else ''}{' guard_review=on' if review else ''}{' runtime_guard=on' if runtime else ''}"
+          f"{' loop_guard=on' if loop else ''}{f' resume_inject={resume}' if resume else ''}{' inject_scan=on' if scan else ''} "
           f"mode={'APPLY' if a.apply else 'REPORT'}")
     home = pathlib.Path.home().resolve()
     targets = [repo] if a.only_this else list(worktrees(repo))
@@ -556,6 +699,15 @@ def main():
         kept_audit = audit_arg(installed) if installed else None
         wt_audit_arg = wt_audit or (pathlib.Path(kept_audit) if kept_audit else None)
         wt_mode = mode or (mode_arg(installed) if installed else "remind")
+        wt_loop = loop or bool(installed and loop_arg(installed))  # without --loop-guard an installed one is kept
+        kept_loop_config = loop_config_arg(installed) if installed else None
+        wt_loop_config = loop_config or (pathlib.Path(kept_loop_config) if kept_loop_config and not loop else None)
+        extra = []
+        if resume:
+            state = pathlib.Path(resume.replace("{worktree}", wt.name))
+            extra.append(("SessionStart", resume_entry(state if state.is_absolute() else wt / state, resume_cap), "resume_inject.py"))
+        if scan:
+            extra.append(("PostToolUse", scan_entry(), "inject_scan.py"))
         want = None
         if protect is not None or wt_profile:
             wt_protect = None if is_director else protect
@@ -563,20 +715,21 @@ def main():
                 wt_protect = pathlib.Path(protect_arg(installed))
             wt_pause = pause or (wt_protect / "PAUSE" if wt_protect else None) if wt_profile == "worker" else None
             want = hook_entry(wt_protect, wt_profile, wt_pause, wt_audit_arg, review or bool(installed and review_arg(installed)),
-                              smap, wt_mode)
+                              smap, wt_mode, wt_loop, wt_loop_config)
         if hooks and want is None:  # without --protect-director / --guard-profile the installed entry keeps both
             kept = protect_arg(installed) if installed else None
             kept_profile = profile_arg(installed) if installed else None
             kept_pause = pause_arg(installed) if installed else None
             want = hook_entry(pathlib.Path(kept) if kept else None, kept_profile if kept_profile in PROFILES else None,
                               pathlib.Path(kept_pause) if kept_pause else None, wt_audit_arg,
-                              review or bool(installed and review_arg(installed)), mode=wt_mode)
+                              review or bool(installed and review_arg(installed)), mode=wt_mode, loop=wt_loop,
+                              loop_config=wt_loop_config)
         perms = (wanted_permissions(rules, sorted(set(map_profiles) | {wt_profile}) if smap else wt_profile, wt_mode)
                  if wt_profile else None)
         ours = rule_permissions(rules) if rules else None
-        miss = wanted_missing(data, window, plugins_off, hooks, want, perms, wt_audit, runtime, ours)
+        miss = wanted_missing(data, window, plugins_off, hooks, want, perms, wt_audit, runtime, ours, extra)
         if not miss:
-            problems += tested(wt, "OK", want if hooks else None)
+            problems += tested(wt, "OK", want if hooks else None, extra)
             continue
         if not a.apply:
             print(f"MISSING     {wt} ({', '.join(miss)})")
@@ -597,6 +750,9 @@ def main():
         for event in POST_EVENTS:
             if f"hooks.{event}" in miss:
                 install_post(data, event, post_entry(wt_audit))
+        for event, entry, script in extra:
+            if f"hooks.{event} {script}" in miss:
+                install_script(data, event, entry, script)
         if perms and any(m.startswith("permissions.") for m in miss):
             install_permissions(data, perms, ours)
         path.parent.mkdir(exist_ok=True)
@@ -605,12 +761,12 @@ def main():
             fh.write(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
         os.replace(tmp, path)
         again = wanted_missing(json.loads(path.read_text(encoding="utf-8")), window, plugins_off, hooks, want, perms, wt_audit,
-                               runtime, ours)
+                               runtime, ours, extra)
         if again:
             print(f"FAIL        {wt} (still missing: {', '.join(again)})")
             problems += 1
         else:
-            problems += tested(wt, "SET", want if hooks else None)
+            problems += tested(wt, "SET", want if hooks else None, extra)
     print("RESULT", "OK" if not problems else f"{problems} worktree(s) need attention")
     return 1 if problems else 0
 
