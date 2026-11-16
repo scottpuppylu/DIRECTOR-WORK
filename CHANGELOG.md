@@ -6,6 +6,73 @@
 - **MINOR**：新增規則、文件、工具或選項，舊檔案照樣通過。
 - **PATCH**：修正文字、修 bug，規則不變。
 
+## 2.5.0 — 2026-11-16
+
+MINOR（工單 WO-DW-250）：重新盤點這一週的教訓，修三個 2.4.0 的小錯，加四個只提醒的檢查（派工 effort、重複派工、刪除前的引用、卡關時的獨立診斷）、一個用量選項（`usage_mix.py --reads`）、兩個範本（閘門可行性、證據設定清單）和程序衛生規則；收件匣裡還沒併入的教訓全部寫進 `docs/10`。新檢查預設只提醒，不擋；每輪必讀沒有變大。只借概念，沒有複製程式碼；只用標準庫。
+
+### 修正（2.4.1 類）
+
+- F1 `usage_mix.py`：LOOPS 那一行不理 `--until`，只看 `--since` 之後修改過的 transcript 檔，所以三個不同的時間窗都印出同一個累計數（例如 ping_pong 73）。現在 `loop_guard` 依每一筆呼叫自己的時間，只算 [since, until) 裡的事件，和主統計同一個時間窗。selftest 用兩個時間窗跑同一份有已知打轉的 transcript，兩邊的次數不同且正確；這項測試在 2.4.0 的程式上會失敗。
+- F2 `usage_mix.py`：RESTART 損益兩平背後的樣本太少時（例如只有 1 個新 session），以前會印「break-even NEVER … adds 0.0K」這種結論。現在樣本最少的一項少於 5 個時改印 `RESTART break-even NOT_ENOUGH_DATA (n=…)`，不下結論；`--min-cases N` 可調。
+- F3 selftest：比對指令文字的測試同時接受 Windows 和 POSIX 兩種引號寫法（`either_quoting`），Linux CI 不再因為引號不同而失敗。收件匣 L-057／L-059（長 TMP 路徑讓 status 測試失敗）已在 2.2.4 修好，這版確認後標成已併入。
+
+### 新工具與選項
+
+- `tools/dispatch_check.py`（N1、N4，新）：
+  - `--log DIRECTOR_LOG.md`：每筆 DISPATCH 行要在 `| basis` 欄寫難度類別和設定的 effort（`| class=dev effort=high model=opus`）。沒寫、類別或等級不認得、effort 不在派工難度表裡，印 `~ WARN EFFORT`。難度表預設：例行 medium／high；開發、UI high；根因、失敗後的修正、真實度關鍵、核心引擎 xhigh；重複失敗 xhigh／max（max 只是暫時升級）。`--table` 可換表。
+  - `--dup "<標題和範圍>"`：派工前拿新任務的字詞和各線 RESUME_STATE 的 NEXT_STEP（`--resume`）、各 repo 最近的 commit 標題（`--repo`、`--since`，預設 14 天）比 Jaccard 相似度，`--threshold`（預設 0.5）以上印 `~ WARN DUP`。中日文字以兩字一組計。
+  - 預設 exit 0；`--strict` 有警告時 exit 1；輸入錯 exit 2。
+- `tools/round_check.py`（N2）：第 2 組（含）以後的根因研究，沒寫 `DIAGNOSIS_BY:`／`DIAGNOSIS_RESULT:`，或診斷者就是 `IMPLEMENTER:`，印 `~ WARN NO_INDEPENDENT_DIAGNOSIS`。診斷者只診斷，不實作。
+- `tools/delete_guard.py`（N3，新）：給刪除候選（參數或 `--list` 清單），在 `--repo` 的追蹤檔（`git grep -F -i -I`）和 `--refs` 指定的檔案（RESUME_STATE、計畫、工單）裡找完整路徑和檔名。有人引用印 `REFERENCED`（最多 5 個 `檔:行`，不印內容）並 exit 1；全部乾淨 exit 0；輸入錯 exit 2。只讀，從不刪。
+- `usage_mix.py --reads [N]`（N5）：列出被讀最多次的前 N 個路徑（預設 20）、次數和加權成本（Read 工具，以及 cat／head／tail／`sed -n`／Get-Content）。路徑只印在本機畫面；不加 `--reads` 不印路徑；selftest 只用假路徑。
+
+### 範本與規則（文件）
+
+- `docs/05`（N1、N4）：派工難度表（附官方 effort 文件出處）、派工前查重複。
+- `docs/07`（N2、N6、N7）：卡關兩組後要有獨立診斷；核准閘門前先做可行性檢查（`templates/GATE_FEASIBILITY.md`：每個條件對到現有量測工具、在現況試跑一次、原則上達得到；放寬量法要由別人用已知缺陷確認仍抓得到）；證據的設定先寫、後比（`templates/SETTINGS_MANIFEST.md`：設定不符時結果是 INVALID，不是 FAIL）。
+- `docs/06b`（N3、N8）：刪除五步（列清單 → `delete_guard.py` → 隔離或備份並記 SHA-256 → 保留期後才刪 → 對帳）；新節「程序衛生」：停背景工作要看整棵程序樹、只停自己的 PID；批次前用程式自己的規則驗名稱，監看也抓「N 分鐘沒有新 log」；commit 前用 `&&` 不用 `;`、先 `git diff --cached --check`；JSON 用 JSON parser 讀；時間取時鐘；CRLF 檔不用 `sed -i`；改 RESUME 標頭要安全重寫；量測要獨佔機器。
+- `templates/.pre-commit-config.yaml`（N8）：加 `dw-conflict-markers`（pre-commit 內建的 pygrep，本機執行、不下載），暫存檔有衝突標記行時停下 commit。仍是範例，DW 不依賴。
+- `docs/10`（N9）：收件匣 L-006～L-078 還沒併入的教訓寫成第 82～126 條，每條一行規則，標「收件匣 L-0xx」（和 `docs/10` 原本括號裡的 L 編號是兩套）。
+
+### 已知限制
+
+- `dispatch_check.py --dup` 只比字詞，同一件事換了說法就比不出來，不同的事用了相同的詞會誤報；它是「先去看一下」的提醒，不是判定。
+- `delete_guard.py` 只找完整路徑和檔名的字面出現；用萬用字元、變數組出來的路徑找不到。沒給 `--repo` 也沒有 `--refs` 對到檔案時印 WARN（等於沒查）。
+- `usage_mix.py --reads` 只認得常見的讀檔命令；用管線或腳本讀的檔不算。
+- N6、N7 是文件和範本，沒有工具自動檢查填寫內容。
+
+### 遷移
+
+- 不用改任何東西：新檢查都要自己執行，預設只提醒。
+- 要用 effort 檢查，就在 DIRECTOR_LOG 的 DISPATCH 行尾加 `| class=<類別> effort=<等級>`；舊的 DISPATCH 行 `gate_check.py` 照樣認得，只是 `dispatch_check.py --log` 會提醒。
+- `usage_mix.py` 的 RESTART 行在樣本不足時改印 NOT_ENOUGH_DATA；有程式讀這一行的，多認一種結果。
+- 上層 `README.md` 加「2.5.0 新增的小幫手（選用）」一節，檔案地圖補上新工具和範本；最上面的提示詞沒有改。
+
+### 數字
+
+- 每輪必讀（`docs/01`、`03`、`06`、`08`）：9,697 bytes，本版沒有改。
+- `selftest.py`：2.4.0 的 3,086 項 → 本版 3,230 項（+144；1 項 SKIP：這台不能建 symlink）。Python 3.11 和 3.9 全過。
+
+### Credits（借用的概念；都沒有複製程式碼；2026-11-16 查）
+
+| 來源 | 授權 | 借了什麼 |
+|---|---|---|
+| Claude Code 官方文件〈Model configuration〉https://code.claude.com/docs/en/model-config | 文件 | effort 等級 low／medium／high／xhigh／max，max 只做暫時升級（N1） |
+| Claude Code 官方文件〈Subagents〉https://code.claude.com/docs/en/sub-agents | 文件 | 子代理可各自設 model、effort、tools：獨立診斷可用不同模型的唯讀代理（N1、N2） |
+| Google SRE book〈Eliminating Toil〉https://sre.google/sre-book/eliminating-toil/ | CC BY-NC-ND 4.0 | 重複、可自動化、沒有長久價值的工作要找出來：重讀路徑、重複派工（N4、N5） |
+| Google SRE book〈Postmortem Culture〉https://sre.google/sre-book/postmortem-culture/ | CC BY-NC-ND 4.0 | 根因由別人審查、每條教訓要有後續行動（N2、N9） |
+| Google SRE workbook〈Canarying Releases〉https://sre.google/workbook/canarying-releases/ | CC BY-NC-ND 4.0 | 指標要能歸因於變更本身、用注入的錯誤證明指標抓得到壞變更（N6、N8） |
+| git 文件〈gitattributes〉https://git-scm.com/docs/gitattributes、〈git-grep〉https://git-scm.com/docs/git-grep | GPL-2.0（文件隨 git 發布） | 換行屬性與 `core.autocrlf`（N8）；`-F` 固定字串只搜追蹤檔（N3） |
+| Google Cloud Storage〈Soft delete〉https://docs.cloud.google.com/storage/docs/soft-delete | CC BY 4.0（Google Cloud 文件） | 刪除先保留一段可復原期，再真刪（N3） |
+| pre-commit | MIT | `pygrep` 本機 hook 的設定格式（N8，DW 不依賴） |
+
+對齊初衷：
+1. 幫到誰：總監（派工時看得到 effort 和重複、卡關時知道該找人診斷、閘門核准前先確認量得到）、worker（刪檔前知道誰還在用、設定不符時結果是 INVALID 不被冤枉成 FAIL、程序衛生少踩坑）、PO（每輪必讀沒有變大，`--reads` 找出最常重讀的檔案來省額度）。依據：工單 WO-DW-250 和本週的教訓。
+2. Desktop：都是本機命令列工具、範本和文件；Desktop Code 分頁照常用，沒有新的每輪步驟。
+3. 服務：初衷 2（省額度）：effort 照難度、重複派工早點發現、`--reads` 找重讀；初衷 4（中斷不丟進度）：刪除前查引用、改 RESUME 標頭安全重寫；初衷 5（成品要真的對）：閘門可行性、設定不符判 INVALID、獨立診斷；初衷 7（零成本）：只用標準庫。
+4. 核心：每輪必讀沒有變長；新檢查全部只提醒、預設不擋（`--strict` 才擋）；沒有加額度上限或節奏限制；git 只讀，`delete_guard.py` 從不刪。
+5. 舊檔案和舊指令：照樣通過；`usage_mix.py` 只有樣本不足時 RESTART 行改印 NOT_ENOUGH_DATA，`--reads` 要自己加。
+
 ## 2.4.0 — 2026-11-15
 
 MINOR（工單 WO-DW-240）：把開源調查裡值得用的概念自己寫進 DW：找出原地打轉的呼叫、重開／壓縮後把 RESUME_STATE 表頭放回、讀進來的內容像在下指令時警告、完成度表加依賴和「現在能開工」清單、說「做完」前的紀律、用量交叉核對、pre-commit／gitleaks 範例。所有新 hook 都要自己選擇加入，只提醒或警告，不擋。只借概念，沒有複製程式碼；只用標準庫。

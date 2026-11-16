@@ -498,6 +498,33 @@ sequenceDiagram
 
 AI 讀到的網頁或檔案，可能藏著「現在開始你要……」這種想騙 AI 的句子。`inject_scan.py` 看到這類句子，會在工具結果旁邊加一行警告；它不會擋、不會改，也不會把那句話再印一次。它會漏（換個說法就抓不到），也會誤報（例如講提示注入的文件本身）。真正的規則仍然是：只有使用者在對話裡說的才算指令。
 
+## 2.5.0 新增的小幫手（選用）
+
+讀完這節，你會知道 2.5.0 多了哪幾個小幫手、什麼時候用。它們都是你（或總監）**自己執行**的檢查，不裝 hook、不改設定；預設只印提醒，不擋任何事。
+
+| 工具 | 什麼時候用 | 一句話 | 會不會擋 |
+|---|---|---|---|
+| `tools/dispatch_check.py --log` | 派工之後 | 檢查每一筆派工紀錄有沒有寫「這件事多難」和「給 AI 多少思考力氣（effort）」，而且兩者對得上 | 不擋，只提醒 |
+| `tools/dispatch_check.py --dup` | 派工之前 | 拿新任務和各條工作線「下一步要做的事」、最近的 commit 比，太像就提醒你：可能已經有人在做 | 不擋，只提醒 |
+| `tools/delete_guard.py` | 刪檔之前 | 列出還有誰在用這些檔案（repo 裡的檔、各線的 RESUME_STATE）；有人在用就先別刪 | 只讀，從不刪 |
+| `tools/round_check.py` | 修了兩組還沒好時 | 提醒你請另一個人（或另一個模型）先診斷，不要同一個人一直試 | 不擋，只提醒 |
+| `tools/usage_mix.py --reads` | 想省額度時 | 列出 AI 最常重讀的檔案和花了多少，看哪些可以改成摘要 | 不擋 |
+| `templates/GATE_FEASIBILITY.md` | 核准一個驗收條件之前 | 先確認每個條件都有工具量得到、現在就試跑過一次 | 範本 |
+| `templates/SETTINGS_MANIFEST.md` | 擷取、量測、審查之前 | 先寫好要用的設定，跑完對照；對不上時這次結果不算數（INVALID），不是成品不及格 | 範本 |
+
+### 怎麼用
+
+在總監的資料夾執行，路徑換成你自己的：
+
+```text
+python -I -X utf8 <RULES>/tools/dispatch_check.py --log DIRECTOR_LOG.md
+python -I -X utf8 <RULES>/tools/dispatch_check.py --dup "新任務的標題和範圍" --resume "<各線>/RESUME_STATE.md" --repo <repo>
+python -I -X utf8 <RULES>/tools/delete_guard.py --list 要刪的清單.txt --repo <repo> --refs "<各線>/**/RESUME_STATE*.md"
+python -I -X utf8 <RULES>/tools/usage_mix.py --since 2026-11-10 --reads
+```
+
+派工紀錄要讓 `--log` 看得懂，就在 DISPATCH 那一行最後加上 `| class=dev effort=high`（難度類別和 effort 的對照表在 `docs/05`）。`--reads` 會在畫面上印出檔案路徑，只在自己的電腦上看，不要貼到公開的地方。
+
 ## 常見問題
 
 讀完這節，你會知道新手最常卡住的地方怎麼辦。
@@ -640,15 +667,15 @@ worker 的分支、交件檢查都靠它；改壞了也能回到之前的存檔�
 | `docs/04_quota_efficiency.md` | 額度成本模型、省額度的槓桿、怎麼量 | 設定時、每週複查時 |
 | `docs/05_models_effort.md` | 模型與思考程度（effort）怎麼選 | 開新工作線時 |
 | `docs/06_resume_lossless.md` | RESUME_STATE、每輪第一步 | **每輪必讀**（恢復時） |
-| `docs/06b_on_demand_procedures.md` | 中斷後恢復程序、機制重建、額度重置喚醒、刪檔前比對 | 恢復、建機制、刪檔時 |
+| `docs/06b_on_demand_procedures.md` | 中斷後恢復程序、機制重建、額度重置喚醒、刪檔前比對、程序衛生（2.5.0） | 恢復、建機制、刪檔時 |
 | `docs/07_quality_gates.md` | 工程與成品分開、盲審包、常識閘門、修正上限 | 審查成品時 |
 | `docs/08_safety_rules.md` | 要 PO 核准的事、git 與檔案的禁止事項 | **每輪必讀** |
 | `docs/09_memory.md` | 記憶索引的大小與整理 | 每週、超過門檻時 |
 | `docs/10_lessons_learned.md` | 原專案的教訓；每輪必讀規則的理由 | 第一次；寫新規則前；判斷必讀規則的邊界情況時 |
 | `docs/11_claude_desktop.md` | 在 Claude Desktop 上開 worker、傳訊息、讀額度和上下文視窗用哪個工具 | 在 Desktop 上建置與操作時 |
 | `docs/12_chat_to_product.md` | 一般 / 小白模式、專案初衷卡、待決頁網頁（選擇題與成品截圖）、不做歪的檢查 | 建置時；談需求、開選擇題、寫工單時 |
-| `templates/` | CLAUDE.md 段落、工單、報告、RESUME_STATE、測試申請、決策登記、裁決、待決頁（本機帳和網頁 `choice_page.html`）、專案初衷卡、規格審查提示、DIRECTOR/ 其他檔案骨架；2.3.0 加 CPU 重現步驟（`CPU_REPRO.md`）、送 TR 前的缺陷類別檢查設定（`pre_tr.json`）、執行腳本收尾範本（`run_closing.py`）；2.4.0 加 commit 前掃秘密的範例（`.pre-commit-config.yaml`、`.gitleaks.toml`） | 建置與派工時 |
-| `tools/` | 設定寫入、免費探測、用量統計和用量結構、記憶大小檢查；建置檢查（`setup_check`：待決頁網址和置頂）、交件檢查（格式、驗收對照、範圍、證據紀錄、報告對動作紀錄）、追溯表、修正輪數、每線狀態腳本；2.4.0 加打轉提醒（`loop_guard`）、中斷後自動接回（`resume_inject`）、提示注入警告（`inject_scan`）、完成度表的 `depends_on` | 見 `tools/README.md` |
+| `templates/` | CLAUDE.md 段落、工單、報告、RESUME_STATE、測試申請、決策登記、裁決、待決頁（本機帳和網頁 `choice_page.html`）、專案初衷卡、規格審查提示、DIRECTOR/ 其他檔案骨架；2.3.0 加 CPU 重現步驟（`CPU_REPRO.md`）、送 TR 前的缺陷類別檢查設定（`pre_tr.json`）、執行腳本收尾範本（`run_closing.py`）；2.4.0 加 commit 前掃秘密的範例（`.pre-commit-config.yaml`、`.gitleaks.toml`）；2.5.0 加閘門可行性（`GATE_FEASIBILITY.md`）、證據設定清單（`SETTINGS_MANIFEST.md`）、commit 前查衝突標記（`.pre-commit-config.yaml` 的 `dw-conflict-markers`） | 建置與派工時 |
+| `tools/` | 設定寫入、免費探測、用量統計和用量結構、記憶大小檢查；建置檢查（`setup_check`：待決頁網址和置頂）、交件檢查（格式、驗收對照、範圍、證據紀錄、報告對動作紀錄）、追溯表、修正輪數、每線狀態腳本；2.4.0 加打轉提醒（`loop_guard`）、中斷後自動接回（`resume_inject`）、提示注入警告（`inject_scan`）、完成度表的 `depends_on`；2.5.0 加派工檢查（`dispatch_check`）、刪除前引用檢查（`delete_guard`）、最常重讀的檔案（`usage_mix --reads`） | 見 `tools/README.md` |
 | `director_work.example.json` | 工具設定範例 | 建置時 |
 | `VERSION`、`CHANGELOG.md` | 版本號、各版改了什麼、升級怎麼遷移 | 建置時記版本；升級時 |
 
