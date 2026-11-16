@@ -10787,6 +10787,33 @@ def test_usage_loops_240(tmp):
         check("usage_mix --json has loops", False, out[-300:])
 
 
+def test_usage_loops_until_250(tmp):
+    """2.5.0 (F1): the LOOPS line counts only the calls made in [--since, --until) by their own timestamps; 2.4.0 picked
+    whole files by mtime and printed the count up to now for every window."""
+    root = tmp / "usage_loops_250"
+    p = root / "proj"
+    p.mkdir(parents=True)
+    lines, n = [], 0
+    for day, commands in (("2026-11-14", ["git status"]), ("2026-11-15", ["git log", "git diff"])):
+        for command in commands:
+            for k in range(3):
+                n += 1
+                ts = f"{day}T10:{n:02d}:0{k}Z"
+                lines.append(json.dumps({"type": "assistant", "sessionId": "win-1", "timestamp": ts, "message": {
+                    "id": f"m{n}", "role": "assistant", "usage": {"input_tokens": 100, "output_tokens": 10},
+                    "content": [{"type": "tool_use", "id": f"t{n}", "name": "Bash", "input": {"command": command}}]}}))
+                lines.append(json.dumps({"type": "user", "sessionId": "win-1", "timestamp": ts, "message": {"content": [
+                    {"type": "tool_result", "tool_use_id": f"t{n}", "is_error": False, "content": f"out {n}"}]}}))
+    (p / "win-1.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    for label, window, want in (("day 1", ["--since", "2026-11-14", "--until", "2026-11-14"], "LOOPS repeat=1 "),
+                                ("day 2", ["--since", "2026-11-15", "--until", "2026-11-15"], "LOOPS repeat=2 "),
+                                ("both", ["--since", "2026-11-14"], "LOOPS repeat=3 ")):
+        code, out = run("usage_mix.py", "--root", root, "--project-dir", "proj", *window)
+        loops = [row for row in out.splitlines() if row.startswith("LOOPS")]
+        check(f"usage_mix LOOPS window {label}: {want.strip()}", code == 0 and loops and loops[0].startswith(want),
+              out[-300:])
+
+
 def test_spec_review_wording_240(tmp):
     """2.4.0 (L12): the docs say one thing about the spec review: Standard needs it too (docs/02 since 2.2.5)."""
     docs = TOOLS.parent / "docs"
@@ -10998,6 +11025,7 @@ def main():
         guarded(test_completion_deps_240, tmp)
         guarded(test_precommit_samples_240, tmp)
         guarded(test_help_any_console_230, tmp)
+        guarded(test_usage_loops_until_250, tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     for failure in failures:

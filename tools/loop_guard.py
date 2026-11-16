@@ -50,6 +50,7 @@ CHANGELOG 2.4.0 Credits).
 """
 import argparse
 import collections
+import datetime
 import hashlib
 import importlib.util
 import json
@@ -395,13 +396,27 @@ def transcript_files(paths, subagents=True):
     return files
 
 
-def events_from_transcripts(files):
+def in_window(ts, since=None, until=None):
+    """2.5.0: True when the call's own time (transcript_audit's ts string) is in [since, until); with no window every
+    call counts, with a window a call without a readable time does not."""
+    if since is None and until is None:
+        return True
+    try:
+        moment = datetime.datetime.fromisoformat(ts)
+    except (TypeError, ValueError):
+        return False
+    return not ((since and moment < since) or (until and moment >= until))
+
+
+def events_from_transcripts(files, since=None, until=None):
     """Events from transcripts (via transcript_audit's reader), in the order the calls were made; error text kept
-    only as a class (validation / other)."""
+    only as a class (validation / other). since / until (aware datetimes) keep only the calls made in [since, until)."""
     reader, audit = load_sibling("transcript_audit"), load_sibling("audit_log")
     calls, results, _, _ = reader.read_calls(files)
     events = []
     for key, call in sorted(calls.items(), key=lambda kv: kv[1]["order"]):
+        if not in_window(call.get("ts"), since, until):
+            continue
         result = results.get(key)
         entry = {"kind": "pending", "session_id": call["session_id"], "agent_id": call["agent_id"],
                  "tool": call["tool"], "input": plain_summary(audit, call["input"])}

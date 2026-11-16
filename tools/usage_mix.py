@@ -42,6 +42,7 @@ The transcript format is not an official interface; when nothing is read the res
 LOOPS (2.4.0) is one line from loop_guard.py over the same transcript files: how many loops of each kind (the same
 call again, the same error again, A B A B, a poll with no progress, rejected arguments, a failed subagent call left
 unhandled); `loop_guard.py scan --transcript FILE` shows which. --no-loops leaves it out (it reads the files again).
+2.5.0: it counts only the calls made in [--since, --until) by their own timestamps, like the main tally.
 """
 import argparse
 import collections as C
@@ -458,15 +459,17 @@ def render(res):
     return "\n".join(lines)
 
 
-def loops_line(root, project_dirs, since=None, sids=None):
-    """2.4.0: the LOOPS line of loop_guard.py over the transcript files read here; never raises."""
+def loops_line(root, project_dirs, since=None, sids=None, until=None):
+    """2.4.0: the LOOPS line of loop_guard.py over the transcript files read here; never raises. 2.5.0: only the calls
+    made in [since, until) by their own timestamps, the same window as the main tally (2.4.0 counted whole files)."""
     try:
         spec = importlib.util.spec_from_file_location("loop_guard", pathlib.Path(__file__).with_name("loop_guard.py"))
         loop = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(loop)
         files = [pathlib.Path(path) for path, sid, _ in transcript_files(root, project_dirs)
                  if not (since and os.path.getmtime(path) < since.timestamp()) and (sids is None or sid in sids)]
-        return loop.summary_line(loop.events_from_transcripts(files)) if files else "LOOPS NOT_CHECKED (no transcript file)"
+        return (loop.summary_line(loop.events_from_transcripts(files, since, until)) if files
+                else "LOOPS NOT_CHECKED (no transcript file)")
     except Exception as error:  # noqa: BLE001 - one line, the rest of the report stands
         return f"LOOPS NOT_CHECKED ({type(error).__name__}: {error})"
 
@@ -510,7 +513,7 @@ def main(argv=None):
                 "range": f"{a.since or 'start'}..{a.until or 'now'} UTC", "restart": restart_numbers(sessions, groups),
                 "weights": WEIGHTS})
     if not a.no_loops:
-        res["loops"] = loops_line(a.root, dirs, since, {s["sid"] for s in sessions} if a.session else None)
+        res["loops"] = loops_line(a.root, dirs, since, {s["sid"] for s in sessions} if a.session else None, until)
     lines = render(res).split("\n")
     text = "\n".join(lines[:-1] + [res["loops"], lines[-1]] if "loops" in res else lines)  # RESULT stays the last line
     print(json.dumps(res, ensure_ascii=False, indent=1) if a.json else text)

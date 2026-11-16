@@ -158,7 +158,8 @@ def take(line, order, calls, results, counts):
                 continue
             order += 1
             calls[key] = {"order": order, "tool": use["name"], "input": use.get("input"),
-                          "session_id": text_word(line, "sessionId"), "agent_id": text_word(line, "agentId")}
+                          "session_id": text_word(line, "sessionId"), "agent_id": text_word(line, "agentId"),
+                          "ts": utc_ms(line.get("timestamp"))}
     elif line.get("type") == "user":
         found = blocks(line, "tool_result")
         single = len(found) == 1 and "toolUseResult" in line
