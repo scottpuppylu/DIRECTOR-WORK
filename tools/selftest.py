@@ -11056,6 +11056,22 @@ def test_process_hygiene_250(tmp):
               not rx.search("a <<<<<<< b") and not rx.search("=" * 7) and not rx.search("<" * 4 + " spec"))
 
 
+def test_lessons_intake_merged_250(tmp):
+    """2.5.0 (N9): every lesson merged from the director's intake in 2.5.0 has its own numbered line in docs/10 with
+    a `→` rule, tagged `收件匣 L-0xx` (a numbering separate from the L numbers already in docs/10), and the list
+    stays numbered 1, 2, 3, ... without gaps."""
+    text = (TOOLS.parent / "docs/10_lessons_learned.md").read_text(encoding="utf-8")
+    numbers = [int(n) for n in re.findall(r"(?m)^(\d+)\. \*\*", text)]
+    check("docs/10 lessons are numbered without gaps", numbers == list(range(1, len(numbers) + 1)), numbers[-5:])
+    wanted = [f"L-{n:03d}" for n in list(range(6, 22)) + [46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 58, 60, 61]
+              + list(range(62, 79))]
+    lines = [line for line in re.split(r"\r\n|\r|\n", text) if re.match(r"^\d+\. \*\*", line)]
+    for lesson in wanted:
+        hit = [line for line in lines if re.search(r"收件匣 (?:L-\d{3}、)*" + lesson + r"\b", line)]
+        check(f"docs/10 has 收件匣 {lesson} with a rule", len(hit) == 1 and "→" in hit[0], hit[:2])
+    check("docs/10 says the intake numbering is separate", "是兩套，不要混" in text)
+
+
 def test_spec_review_wording_240(tmp):
     """2.4.0 (L12): the docs say one thing about the spec review: Standard needs it too (docs/02 since 2.2.5)."""
     docs = TOOLS.parent / "docs"
@@ -11277,6 +11293,7 @@ def main():
         guarded(test_gate_feasibility_250, tmp)
         guarded(test_settings_manifest_250, tmp)
         guarded(test_process_hygiene_250, tmp)
+        guarded(test_lessons_intake_merged_250, tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     for failure in failures:
