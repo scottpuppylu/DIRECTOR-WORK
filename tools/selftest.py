@@ -10975,6 +10975,36 @@ def test_dispatch_dup_250(tmp):
     check("token Jaccard is shared over all", abs(load_tool_240("dispatch_check").jaccard({"a", "b"}, {"b", "c"}) - 1 / 3) < 1e-9)
 
 
+def test_usage_reads_250(tmp):
+    """2.5.0 (N5): usage_mix --reads lists the most re-read paths with read count and cost (Read tool, cat / head /
+    tail / sed -n / Get-Content); without --reads no path is printed. Fixture paths only, never a real one."""
+    root = tmp / "usage_reads_250"
+    p = root / "proj"
+    p.mkdir(parents=True)
+    uses = [("Read", {"file_path": "notes/plan.md"}), ("Read", {"file_path": "notes/plan.md"}),
+            ("Bash", {"command": "cat notes/plan.md | head -5"}), ("Bash", {"command": "sed -n '1,20p' src/app.py"}),
+            ("Bash", {"command": "tail -n 30 logs/run.log && echo done"}), ("Bash", {"command": "git status"}),
+            ("PowerShell", {"command": "Get-Content src/app.py -TotalCount 40"})]
+    lines = []
+    for n, (name, inp) in enumerate(uses):
+        lines.append(json.dumps({"type": "assistant", "sessionId": "reads-1", "timestamp": f"2026-11-15T10:00:0{n}Z",
+                                 "message": {"id": f"m{n}", "role": "assistant",
+                                             "usage": {"input_tokens": 1000, "output_tokens": 0},
+                                             "content": [{"type": "tool_use", "id": f"t{n}", "name": name, "input": inp}]}}))
+    (p / "reads-1.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    expect("usage_mix --reads counts and costs re-read paths", "usage_mix.py", 0, "--root", root, "--project-dir", "proj",
+           "--reads", "--no-loops", says=["READS top 3 re-read paths", "READS     3x     3.0K notes/plan.md",
+                                          "READS     2x     2.0K src/app.py", "READS     1x     1.0K logs/run.log"],
+           lacks="git status")
+    expect("usage_mix --reads 1 keeps the top one", "usage_mix.py", 0, "--root", root, "--project-dir", "proj",
+           "--reads", "1", "--no-loops", says="READS top 1 ", lacks="src/app.py")
+    expect("usage_mix without --reads prints no path", "usage_mix.py", 0, "--root", root, "--project-dir", "proj",
+           "--no-loops", lacks=["notes/plan.md", "READS"])
+    um = load_tool_240("usage_mix")
+    check("read_target ignores a non-read command", um.read_target("Bash", {"command": "python -m x notes/plan.md"}) is None)
+    check("read_target reads sed -n's file, not its script", um.read_target("Bash", {"command": "sed -n 5p a.txt"}) == "a.txt")
+
+
 def test_spec_review_wording_240(tmp):
     """2.4.0 (L12): the docs say one thing about the spec review: Standard needs it too (docs/02 since 2.2.5)."""
     docs = TOOLS.parent / "docs"
@@ -11192,6 +11222,7 @@ def main():
         guarded(test_round_diagnosis_250, tmp)
         guarded(test_delete_guard_250, tmp)
         guarded(test_dispatch_dup_250, tmp)
+        guarded(test_usage_reads_250, tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     for failure in failures:

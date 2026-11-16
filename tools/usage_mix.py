@@ -42,6 +42,9 @@ The transcript format is not an official interface; when nothing is read the res
 LOOPS (2.4.0) is one line from loop_guard.py over the same transcript files: how many loops of each kind (the same
 call again, the same error again, A B A B, a poll with no progress, rejected arguments, a failed subagent call left
 unhandled); `loop_guard.py scan --transcript FILE` shows which. --no-loops leaves it out (it reads the files again).
+--reads [N] (2.5.0) adds the N (default 20) most re-read paths: how often each was read (the Read tool, or a shell
+cat / head / tail / sed -n / Get-Content) and the quota its reads cost (each call's cost split over its tool calls).
+It prints file paths, so keep its output local; the rest of the report prints no path.
 2.5.0: it counts only the calls made in [--since, --until) by their own timestamps, like the main tally.
 """
 import argparse
@@ -52,6 +55,7 @@ import json
 import os
 import pathlib
 import re
+import shlex
 import statistics
 import sys
 
@@ -229,6 +233,35 @@ def transcript_files(root, project_dirs=None):
     return out
 
 
+SHELL_READ = {"cat", "head", "tail", "less", "more", "type", "get-content", "gc", "bat"}
+
+
+def read_target(name, inp):
+    """2.5.0 (--reads): the path one tool call reads, or None. The Read tool's file_path; for a shell command, the
+    first piece (before a pipe or chain) when it is cat / head / tail / sed -n / Get-Content: its last argument that
+    is not an option or a number."""
+    inp = inp if isinstance(inp, dict) else {}
+    if name in ("Read", "NotebookRead"):
+        target = inp.get("file_path") or inp.get("notebook_path")
+        return target if isinstance(target, str) and target else None
+    if name not in ("Bash", "PowerShell"):
+        return None
+    first = re.split(r"\|\||&&|[|;\n]", str(inp.get("command", "")), maxsplit=1)[0]
+    try:
+        words = shlex.split(first, posix=True)
+    except ValueError:
+        return None
+    if not words:
+        return None
+    prog = os.path.basename(words[0]).lower()
+    if prog not in SHELL_READ and not (prog == "sed" and "-n" in words):
+        return None
+    args = [w for w in words[1:] if not w.startswith("-") and not w.isdigit()]
+    if prog == "sed":
+        args = args[1:]  # the sed script comes first
+    return args[-1] if args else None
+
+
 def read_calls(path, pats, since=None, until=None, seen=None):
     """The model calls of one transcript in order, fragments merged: dicts with id, ctx, eq, cats, time.
     Also returns the session title and whether a call before --since was dropped."""
@@ -254,10 +287,13 @@ def read_calls(path, pats, since=None, until=None, seen=None):
             content = m.get("content") if isinstance(m.get("content"), list) else []
             cats = [classify(b.get("name", ""), b.get("input"), pats) for b in content
                     if isinstance(b, dict) and b.get("type") == "tool_use"]
+            reads = [t for t in (read_target(b.get("name", ""), b.get("input")) for b in content
+                                 if isinstance(b, dict) and b.get("type") == "tool_use") if t]
             usage = m.get("usage") if isinstance(m.get("usage"), dict) else {}
             if mid in by_id:  # a later fragment of the same message
                 call = by_id[mid]
                 call["cats"].extend(cats)
+                call["reads"].extend(reads)
                 for k in WEIGHTS:
                     call["usage"][k] = max(call["usage"].get(k, 0), usage.get(k) or 0)
                 continue
@@ -270,7 +306,7 @@ def read_calls(path, pats, since=None, until=None, seen=None):
             if mid in seen:
                 continue
             seen.add(mid)
-            call = {"id": mid, "time": ts, "cats": cats, "usage": {k: usage.get(k) or 0 for k in WEIGHTS}}
+            call = {"id": mid, "time": ts, "cats": cats, "reads": reads, "usage": {k: usage.get(k) or 0 for k in WEIGHTS}}
             by_id[mid] = call
             calls.append(call)
     for call in calls:
@@ -279,6 +315,18 @@ def read_calls(path, pats, since=None, until=None, seen=None):
         call["eq"] = sum(u[k] * w for k, w in WEIGHTS.items())
         call["cats"] = call["cats"] or ["text_reply"]
     return calls, title, dropped
+
+
+def reads_table(sessions, top=20):
+    """2.5.0 (--reads): [(path, reads, eq)] of the most re-read paths, by read count, then cost."""
+    count, cost = C.Counter(), C.Counter()
+    for s in sessions:
+        for c in s["calls"]:
+            for target in c.get("reads", []):
+                count[target] += 1
+                cost[target] += c["eq"] / len(c["cats"])
+    rows = sorted(count, key=lambda p: (-count[p], -cost[p], p))[:top]
+    return [(p, count[p], round(cost[p])) for p in rows]
 
 
 def bucket(ctx):
@@ -503,6 +551,8 @@ def main(argv=None):
                     help="one line per session: share, calls, quota, group shares, costliest fine categories")
     ap.add_argument("--json", action="store_true", help="print JSON instead of text")
     ap.add_argument("--check", action="store_true", help="exit 1 when a DD-049 target is missed")
+    ap.add_argument("--reads", type=int, nargs="?", const=20, metavar="N",
+                    help="also list the N (default 20) most re-read paths with read count and cost; prints paths")
     ap.add_argument("--no-loops", action="store_true", help="leave out the LOOPS line (loop_guard.py over the same files)")
     a = ap.parse_args(argv)
     sys.stdout.reconfigure(encoding="utf-8")
@@ -527,6 +577,10 @@ def main(argv=None):
     if not a.no_loops:
         res["loops"] = loops_line(a.root, dirs, since, {s["sid"] for s in sessions} if a.session else None, until)
     lines = render(res).split("\n")
+    if a.reads:
+        res["reads"] = [{"path": p, "reads": n, "eq": eq} for p, n, eq in reads_table(sessions, a.reads)]
+        lines[-1:-1] = [f"READS top {len(res['reads'])} re-read paths (count, cost):"] + [
+            f"READS {r['reads']:>5}x {kfmt(r['eq']):>8} {r['path']}" for r in res["reads"]]
     text = "\n".join(lines[:-1] + [res["loops"], lines[-1]] if "loops" in res else lines)  # RESULT stays the last line
     print(json.dumps(res, ensure_ascii=False, indent=1) if a.json else text)
     return 1 if a.check and res["result"] != "ON_TARGET" else 0
