@@ -18,6 +18,10 @@ change) and `DECISION:` lines. A defect without a FIX_ROUNDS line is not checked
 names both, e.g. `| item | test conditions | reference conditions |`, with at least one row): a study that never
 compares how the test ran with how the reference ran keeps fixing the wrong thing. A section without it prints
 `~ WARN NO_CONDITIONS_TABLE` (a warning in 2.3.0, not a FAIL).
+2.5.0: from the 2nd failed set on, the same worker trying again is not enough. The study section for SET 2 (and every
+later set) names an independent diagnosis and its result: `DIAGNOSIS_BY:` (a different reviewer or model, read-only:
+the diagnoser does not implement) and `DIAGNOSIS_RESULT:`. When the section also names `IMPLEMENTER:`, the two must
+differ. Missing or the same prints `~ WARN NO_INDEPENDENT_DIAGNOSIS` (a warning, not a FAIL).
 
   round_check.py [--dir DIR]          every RESUME_STATE*.md in DIR (default: the current folder)
   round_check.py --resume FILE ...    these files
@@ -96,6 +100,24 @@ def has_conditions_table(section):
     return any(not re.fullmatch(r"[\s|:\-]*", r) for r in rows)
 
 
+def line_value(section, key):
+    m = re.search(rf"^[ \t]*{key}[ \t]*:[ \t]*(.*)$", section, re.M)
+    return m.group(1).strip() if m else ""
+
+
+def diagnosis_warnings(section, where):
+    """2.5.0 (N2): after the 2nd failed set, an independent diagnosis (who, and what it found) must be on record."""
+    empty = [k for k in ("DIAGNOSIS_BY", "DIAGNOSIS_RESULT") if not filled_line(section, k)]
+    if empty:
+        return [f"~ WARN NO_INDEPENDENT_DIAGNOSIS {where}: {', '.join(empty)} empty or missing (after the 2nd failed "
+                "set, a different reviewer or model diagnoses read-only and writes what it found; it does not implement)"]
+    by, implementer = line_value(section, "DIAGNOSIS_BY"), line_value(section, "IMPLEMENTER")
+    if implementer and by.lower() == implementer.lower():
+        return [f"~ WARN NO_INDEPENDENT_DIAGNOSIS {where}: DIAGNOSIS_BY is the IMPLEMENTER ({by}); the diagnosis must "
+                "come from a different reviewer or model"]
+    return []
+
+
 def check_defect(defect, fields, folder):
     problems = []
     try:
@@ -124,6 +146,8 @@ def check_defect(defect, fields, folder):
         empty = [k for k in ("WHERE", "ALTERNATIVES", "DECISION") if not filled_line(sections[n], k)]
         if empty:
             problems.append(f"{study} SET {n}: {', '.join(empty)} empty or missing")
+        if n >= 2:
+            problems += diagnosis_warnings(sections[n], f"{study} SET {n}")
         if not has_conditions_table(sections[n]):
             problems.append(f"~ WARN NO_CONDITIONS_TABLE {study} SET {n}: start the study with a `| item | test conditions "
                             "| reference conditions |` table (how the test ran vs how the reference ran)")

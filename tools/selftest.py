@@ -10881,6 +10881,35 @@ def test_dispatch_effort_250(tmp):
     expect("dispatch_check missing log is exit 2", "dispatch_check.py", 2, "--log", d / "none.md", says="FAIL input")
 
 
+def test_round_diagnosis_250(tmp):
+    """2.5.0 (N2): after the 2nd failed set the study section names an independent diagnosis (DIAGNOSIS_BY /
+    DIAGNOSIS_RESULT, not the IMPLEMENTER); missing or the same is `~ WARN NO_INDEPENDENT_DIAGNOSIS`, exit unchanged."""
+    d = tmp / "round_diag_250"
+    d.mkdir()
+    table = "| item | test conditions | reference conditions |\n|---|---|---|\n| light | studio | game |\n"
+    set1 = "## SET 1\n" + table + "WHERE: w1\nALTERNATIVES: a1\nDECISION: d1\n\n"
+    plain = set1 + "## SET 2\n" + table + "WHERE: w2\nALTERNATIVES: a2\nDECISION: d2\n"
+    (d / "PLAIN.md").write_text(plain, encoding="utf-8")
+    (d / "DIAG.md").write_text(plain + "IMPLEMENTER: worker-a\nDIAGNOSIS_BY: reviewer-b (other model)\n"
+                               "DIAGNOSIS_RESULT: the input data, not the code\n", encoding="utf-8")
+    (d / "SAME.md").write_text(plain + "IMPLEMENTER: worker-a\nDIAGNOSIS_BY: Worker-A\nDIAGNOSIS_RESULT: x\n",
+                               encoding="utf-8")
+
+    def resume(name, study, rnd=7):
+        f = d / f"RESUME_STATE_{name}.md"
+        f.write_text(f"FIX_ROUNDS:\n- hair: round={rnd} set={(rnd - 1) // 3 + 1} study={study}\n", encoding="utf-8")
+        return f
+
+    expect("round_check set 3 without a diagnosis warns", "round_check.py", 0, "--resume", resume("plain", "PLAIN.md"),
+           says=["~ WARN NO_INDEPENDENT_DIAGNOSIS PLAIN.md SET 2: DIAGNOSIS_BY, DIAGNOSIS_RESULT", "ROUNDS: PASS"])
+    expect("round_check set 3 with a diagnosis is quiet", "round_check.py", 0, "--resume", resume("diag", "DIAG.md"),
+           says="ROUNDS: PASS", lacks="NO_INDEPENDENT_DIAGNOSIS")
+    expect("round_check diagnosis by the implementer warns", "round_check.py", 0, "--resume",
+           resume("same", "SAME.md"), says="DIAGNOSIS_BY is the IMPLEMENTER")
+    expect("round_check set 2 needs no diagnosis yet", "round_check.py", 0, "--resume",
+           resume("set2", "PLAIN.md", rnd=4), lacks="NO_INDEPENDENT_DIAGNOSIS")
+
+
 def test_spec_review_wording_240(tmp):
     """2.4.0 (L12): the docs say one thing about the spec review: Standard needs it too (docs/02 since 2.2.5)."""
     docs = TOOLS.parent / "docs"
@@ -11095,6 +11124,7 @@ def main():
         guarded(test_usage_loops_until_250, tmp)
         guarded(test_quoting_either_250, tmp)
         guarded(test_dispatch_effort_250, tmp)
+        guarded(test_round_diagnosis_250, tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     for failure in failures:

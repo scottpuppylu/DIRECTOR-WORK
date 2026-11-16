@@ -728,6 +728,7 @@ python -I -X utf8 round_check.py --resume <RESUME_STATE.md> ...
 - RESUME_STATE 的 `FIX_ROUNDS:` 每個缺陷一行：`- <缺陷>: round=<n> set=<n> study=<檔名>|NONE`。`set` = (round − 1) // 3 + 1。
 - 第 4 輪起，研究檔要存在，而且每個做完的組都有 `## SET n`（或 `## <缺陷> SET n`）一節，填了 `WHERE:`、`ALTERNATIVES:`、`DECISION:`（`docs/07` 第 4 節）。
 - 每個缺陷印 OK / FAIL，最後一行 `ROUNDS: PASS|FAIL files= defects= failed=`；有 FAIL 或找不到 RESUME_STATE 就 exit 1。專案的 guard_check 對每個 worktree 跑它。
+- 2.5.0：第 2 組（之後每組）沒過，研究檔那一節要寫獨立診斷 `DIAGNOSIS_BY:`（不同的審查者或模型）和 `DIAGNOSIS_RESULT:`；有寫 `IMPLEMENTER:` 時兩者要不同。沒寫或相同印 `~ WARN NO_INDEPENDENT_DIAGNOSIS`，不改 exit。
 
 ## poll_hint.py（1.3.0）
 
