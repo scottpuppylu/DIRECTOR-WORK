@@ -11005,6 +11005,20 @@ def test_usage_reads_250(tmp):
     check("read_target reads sed -n's file, not its script", um.read_target("Bash", {"command": "sed -n 5p a.txt"}) == "a.txt")
 
 
+def test_gate_feasibility_250(tmp):
+    """2.5.0 (N6): the gate-feasibility template asks, per condition, for an existing tool, a dry run on the baseline
+    and reachability, and for an independent known-defect check when a measurement rule is loosened; docs/07 says so."""
+    root = TOOLS.parent
+    text = (TEMPLATES / "GATE_FEASIBILITY.md").read_text(encoding="utf-8")
+    for needle in ("BASELINE:", "## A. 每個條件", "量它的現有工具", "在 BASELINE 試跑一次", "原則上達得到", "NO_TOOL",
+                   "NOT_RUN", "UNREACHABLE", "## B. 放寬量法", "LOOSENED_RULE:", "KNOWN_DEFECT:", "CHECKED_BY_OTHER:",
+                   "RESULT:", "FEASIBILITY: <FEASIBLE | NOT_FEASIBLE | NOT_VERIFIED>", "ran_line.py --stamp"):
+        check(f"GATE_FEASIBILITY template has {needle!r}", needle in text)
+    gates = (root / "docs/07_quality_gates.md").read_text(encoding="utf-8")
+    check("docs/07 points to the gate-feasibility template", "templates/GATE_FEASIBILITY.md" in gates)
+    check("docs/07 asks for a known-defect check when loosening", "已知有缺陷的樣本" in gates)
+
+
 def test_spec_review_wording_240(tmp):
     """2.4.0 (L12): the docs say one thing about the spec review: Standard needs it too (docs/02 since 2.2.5)."""
     docs = TOOLS.parent / "docs"
@@ -11223,6 +11237,7 @@ def main():
         guarded(test_delete_guard_250, tmp)
         guarded(test_dispatch_dup_250, tmp)
         guarded(test_usage_reads_250, tmp)
+        guarded(test_gate_feasibility_250, tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     for failure in failures:
