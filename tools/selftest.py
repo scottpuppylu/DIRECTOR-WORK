@@ -132,7 +132,7 @@ GIT_GROUPS = {
     "test_trusted_isolation", "test_rerun_tree_modes_v220", "test_required_final_v220", "test_rerun_brief_v220",
     "test_release_222", "test_base_ref_222", "test_after_verdict_224",
     "test_report_vs_audit_225", "test_gate_order_225", "test_after_verdict_225", "test_scope_shared_225",
-    "test_line_brief_230", "test_setup_opt_in_240", "test_delete_guard_250",
+    "test_line_brief_230", "test_setup_opt_in_240", "test_delete_guard_250", "test_dispatch_dup_250",
 }
 
 
@@ -10943,6 +10943,38 @@ def test_delete_guard_250(tmp):
     expect("delete_guard nothing searched warns", "delete_guard.py", 0, junk, says="~ WARN nothing searched")
 
 
+def test_dispatch_dup_250(tmp):
+    """2.5.0 (N4): dispatch_check.py --dup compares the new task with open NEXT_STEP lines and recent commit subjects
+    (token Jaccard, CJK in character pairs); a high overlap is `~ WARN DUP`, exit 0 unless --strict."""
+    d = tmp / "dispatch_dup_250"
+    repo = d / "repo"
+    repo.mkdir(parents=True)
+    git_fixture(repo)
+    subprocess.run(["git", "-c", "user.name=selftest", "-c", "user.email=selftest@example.invalid", "-c",
+                    "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "fix login timeout retry handling"],
+                   cwd=repo, check=True, capture_output=True)
+    lines = d / "lines"
+    (lines / "a").mkdir(parents=True)
+    (lines / "b").mkdir()
+    _write_text(lines / "a" / "RESUME_STATE.md", "STATUS: x\nNEXT_STEP: 修正登入逾時重試\n")
+    _write_text(lines / "b" / "RESUME_STATE.md", "STATUS: x\nNEXT_STEP: write the export report page\nBLOCKERS: NONE\n")
+    glob_all = str(lines / "**" / "RESUME_STATE.md")
+    expect("dispatch_check --dup finds a commit with the same words", "dispatch_check.py", 0, "--dup",
+           "login timeout retry handling", "--repo", repo, "--resume", glob_all,
+           says=["~ WARN DUP 0.80 ", "fix login timeout retry handling", "DUP_CHECK: WARN compared=4 matches=1"],
+           lacks="export report")
+    expect("dispatch_check --dup reads CJK NEXT_STEP lines", "dispatch_check.py", 0, "--dup", "登入逾時重試修正",
+           "--resume", glob_all, says=["~ WARN DUP", "修正登入逾時重試"])
+    expect("dispatch_check --dup unrelated task is OK", "dispatch_check.py", 0, "--dup", "draw the stadium seats",
+           "--resume", glob_all, "--repo", repo, "--strict", says="DUP_CHECK: OK compared=4 matches=0")
+    expect("dispatch_check --dup --threshold 0.1 --strict", "dispatch_check.py", 1, "--dup", "export the login page",
+           "--resume", glob_all, "--threshold", "0.1", "--strict", says="export report page")
+    expect("dispatch_check --dup bad repo is exit 2", "dispatch_check.py", 2, "--dup", "x y", "--repo", lines,
+           says="FAIL input")
+    expect("dispatch_check without --log or --dup is exit 2", "dispatch_check.py", 2, says="FAIL input")
+    check("token Jaccard is shared over all", abs(load_tool_240("dispatch_check").jaccard({"a", "b"}, {"b", "c"}) - 1 / 3) < 1e-9)
+
+
 def test_spec_review_wording_240(tmp):
     """2.4.0 (L12): the docs say one thing about the spec review: Standard needs it too (docs/02 since 2.2.5)."""
     docs = TOOLS.parent / "docs"
@@ -11159,6 +11191,7 @@ def main():
         guarded(test_dispatch_effort_250, tmp)
         guarded(test_round_diagnosis_250, tmp)
         guarded(test_delete_guard_250, tmp)
+        guarded(test_dispatch_dup_250, tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     for failure in failures:
