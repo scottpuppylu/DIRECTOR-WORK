@@ -6590,7 +6590,7 @@ def test_usage_mix(tmp):
         um_call("r4", "2026-01-02T10:03:00Z", [md], cache_read_input_tokens=190000),
         um_call("r5", "2026-01-02T10:04:00Z", [md], cache_read_input_tokens=50000),   # < 0.6 x 190K: a compaction
         um_call("r6", "2026-01-02T10:05:00Z", [py], cache_read_input_tokens=60000)]) + "\n", encoding="utf-8")
-    expect("usage_mix restart numbers", "usage_mix.py", 0, "--root", root, "--project-dir", "restart",
+    expect("usage_mix restart numbers", "usage_mix.py", 0, "--root", root, "--project-dir", "restart", "--min-cases", "1",
            says=["RESTART new main sessions 1, first-call context median 100.0K; compactions 1, after it 50.0K",
                  "RESTART after a new session: 1 reached 實際動手, median 1 calls and 10.0K eq before the first one",
                  "RESTART after a compaction: 1 reached 實際動手, median 1 calls and 5.0K eq",
@@ -6602,8 +6602,16 @@ def test_usage_mix(tmp):
         um_call("n1", "2026-01-02T10:00:00Z", [md], cache_creation_input_tokens=100000),  # a new session writes its cache
         um_call("n2", "2026-01-02T10:01:00Z", [py], cache_read_input_tokens=110000),
         um_call("n3", "2026-01-02T10:02:00Z", [md], cache_read_input_tokens=180000)]) + "\n", encoding="utf-8")
-    expect("usage_mix break-even NEVER", "usage_mix.py", 0, "--root", root, "--project-dir", "never",
+    expect("usage_mix break-even NEVER", "usage_mix.py", 0, "--root", root, "--project-dir", "never", "--min-cases", "1",
            says="RESTART break-even NEVER: a call at >=170K costs 18.0K, no more than 68.0K at 60-120K")
+    # 2.5.0 (F2): one new session is not a sample; the default --min-cases 5 prints NOT_ENOUGH_DATA, never NEVER
+    expect("usage_mix break-even NOT_ENOUGH_DATA with 1 case", "usage_mix.py", 0, "--root", root, "--project-dir", "never",
+           says="RESTART break-even NOT_ENOUGH_DATA (n=1): ", lacks="break-even NEVER")
+    expect("usage_mix break-even NOT_ENOUGH_DATA names the short sample", "usage_mix.py", 0, "--root", root,
+           "--project-dir", "restart", says="NOT_ENOUGH_DATA (n=1): new sessions that reached 實際動手, fewer than 5",
+           lacks="break-even after")
+    expect("usage_mix break-even --min-cases 2 still short", "usage_mix.py", 0, "--root", root, "--project-dir", "never",
+           "--min-cases", "2", says="fewer than 2 (--min-cases)")
     expect("usage_mix break-even UNKNOWN", "usage_mix.py", 0, *base, says="RESTART break-even UNKNOWN")
 
 

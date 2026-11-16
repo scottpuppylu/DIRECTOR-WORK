@@ -102,6 +102,7 @@ CODE_EXT = (".cs", ".shader", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs", ".java
 BUCKETS = (("<60K", 60e3), ("60-120K", 120e3), ("120-170K", 170e3), (">=170K", float("inf")))
 RESET = 0.6       # a call whose context is below 60% of the previous one follows a compaction
 ORIENT_CAP = 400  # calls looked at after a start before giving up on finding a 實際動手 call
+MIN_CASES = 5     # 2.5.0: a break-even from fewer cases than this is NOT_ENOUGH_DATA (--min-cases)
 
 
 class PatternError(ValueError):
@@ -288,7 +289,7 @@ def median(values):
     return statistics.median(values) if values else None
 
 
-def restart_numbers(sessions, groups):
+def restart_numbers(sessions, groups, min_cases=MIN_CASES):
     """Orientation cost after a new session or a compaction, first-call context and cost per call by context."""
     per_bucket = C.defaultdict(C.Counter)
     first_ctx, post_ctx = [], []
@@ -327,8 +328,14 @@ def restart_numbers(sessions, groups):
     fresh = bucket(res["first_call_ctx_median"]) if res["first_call_ctx_median"] is not None else None
     high, low = cost.get(">=170K"), cost.get(fresh) if fresh else None
     rebuild = res["after_session"]["eq_to_first_make_median"]
+    samples = {"new sessions that reached 實際動手": res["after_session"]["reached"],
+               "calls at >=170K": res["calls_by_ctx"].get(">=170K", 0),
+               f"calls at {fresh}": res["calls_by_ctx"].get(fresh, 0) if fresh else 0}
+    short = min(samples, key=samples.get)
     if None in (high, low, rebuild):
         res["break_even"] = {"result": "UNKNOWN", "why": "not enough calls in the buckets or no new session reached 實際動手"}
+    elif samples[short] < min_cases:
+        res["break_even"] = {"result": "NOT_ENOUGH_DATA", "n": samples[short], "sample": short, "min_cases": min_cases}
     else:
         saving = high - low
         res["break_even"] = {"fresh_bucket": fresh, "eq_per_call_fresh": low, "eq_per_call_>=170K": high,
@@ -446,6 +453,9 @@ def render(res):
     be = r["break_even"]
     if be["result"] == "UNKNOWN":
         lines.append(f"RESTART break-even UNKNOWN: {be['why']}")
+    elif be["result"] == "NOT_ENOUGH_DATA":
+        lines.append(f"RESTART break-even NOT_ENOUGH_DATA (n={be['n']}): {be['sample']}, fewer than {be['min_cases']} "
+                     f"(--min-cases); no conclusion")
     elif be["result"] == "NEVER":
         lines.append(f"RESTART break-even NEVER: a call at >=170K costs {kfmt(be['eq_per_call_>=170K'])}, no more than "
                      f"{kfmt(be['eq_per_call_fresh'])} at {be['fresh_bucket']}; a new session only adds "
@@ -487,6 +497,8 @@ def main(argv=None):
     ap.add_argument("--session", help="only sessions whose id starts with this, or whose title holds it")
     ap.add_argument("--patterns", metavar="FILE", help="project words added to the default patterns (JSON)")
     ap.add_argument("--top", type=int, default=0, metavar="N", help="also show the N costliest sessions")
+    ap.add_argument("--min-cases", type=int, default=MIN_CASES, metavar="N",
+                    help=f"fewest cases behind a RESTART break-even (default {MIN_CASES}); fewer prints NOT_ENOUGH_DATA")
     ap.add_argument("--by-session", action="store_true",
                     help="one line per session: share, calls, quota, group shares, costliest fine categories")
     ap.add_argument("--json", action="store_true", help="print JSON instead of text")
@@ -510,7 +522,7 @@ def main(argv=None):
         print(f"NO_DATA: no model calls found (files read: {files}); this is not a measured 0")
         return 1
     res.update({"files": files, "sessions_read": len(sessions), "session": a.session,
-                "range": f"{a.since or 'start'}..{a.until or 'now'} UTC", "restart": restart_numbers(sessions, groups),
+                "range": f"{a.since or 'start'}..{a.until or 'now'} UTC", "restart": restart_numbers(sessions, groups, a.min_cases),
                 "weights": WEIGHTS})
     if not a.no_loops:
         res["loops"] = loops_line(a.root, dirs, since, {s["sid"] for s in sessions} if a.session else None, until)

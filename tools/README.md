@@ -687,6 +687,7 @@ python -I -X utf8 usage_mix.py --since 2026-11-01 [--until ...] [--session <id �
 - shell 指令依序歸類（1.3.1 把原本的 `shell_other` 拆開）：`wait_board`、`render`、`engine_run`、`log_check`、`git`、`disk`；python 執行（`python`、`py -3`、`pytest`、`uv run`、直接跑 `.py`）是 `python_other`，帶審查工具名的是 `review_tools`；`build`（make、cmake、msbuild、dotnet、cargo、npm、node、gcc、pip 等編譯建置）；`list_files`；`shell_search`（grep、rg、findstr、Select-String）；`file_ops`（cat、sed、cp、mv、mkdir、rm、echo、Copy-Item、Set-Content 等）；`sys_query`（程序、版本、環境變數、網路）；剩下的才是 `shell_other`。`build` 和 `python_other` 算實際動手，其他算讀和查。
 - `--by-session`（1.3.1）：每個 session 一行（它的 subagent 算在它身上），依花費排序：佔總量比例、呼叫數、等價量、五大類比例、花最多的五個細類。`--top N` 只列前 N 個、不含細類。
 - RESTART 行：新 session 第一次呼叫的上下文、新 session 或壓縮後到第一個實際動手的呼叫數和等價量、依上下文大小的單價，和由這些算出的損益兩平點（`docs/04`「開新 session 划不划算」）。
+- 損益兩平點背後的樣本（到實際動手的新 session 數、>=170K 和新 session 那一段的呼叫數）最少的一項少於 5 個時，印 `RESTART break-even NOT_ENOUGH_DATA (n=…)`，不下結論（2.5.0；`--min-cases N` 可調）。
 - LOOPS 行（2.4.0）只算 `--since`／`--until` 範圍內的呼叫，依每次呼叫自己的時間（2.5.0 修正：2.4.0 用檔案修改時間挑整份 transcript，加了 `--until` 仍是「到現在為止」的累計）。
 - `--patterns <檔>` 加專案自己的字（執行檔、審查工具名、建置指令），讓 shell 指令歸到對的類別；鍵可以是 `wait_board`、`render`、`engine_run`、`log_check`、`git`、`disk`、`review_tools`、`list_files`、`review_read`、`engine_mcp`、`python`、`build`、`shell_search`、`file_ops`、`sys_query`。專案字只放在那個檔，不進工具。
 - 只印比例和數字，不印訊息內容。紀錄格式不是官方介面，改版後可能讀不到；讀不到就印 UNKNOWN，不印 0。
