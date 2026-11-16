@@ -11019,6 +11019,18 @@ def test_gate_feasibility_250(tmp):
     check("docs/07 asks for a known-defect check when loosening", "已知有缺陷的樣本" in gates)
 
 
+def test_settings_manifest_250(tmp):
+    """2.5.0 (N7): the settings manifest is written before the run, compared item by item with what the run itself
+    reports, and a mismatch makes the evidence INVALID, not a FAIL of the candidate; docs/07 says so."""
+    text = (TEMPLATES / "SETTINGS_MANIFEST.md").read_text(encoding="utf-8")
+    for needle in ("WRITTEN_AT:", "RUN_AT:", "## A. 打算用的設定（執行前寫）", "## B. 實際用到的設定", "紀錄編號", "前置步驟",
+                   "設定組 / 變體", "SAME / DIFF", "EVIDENCE: <VALID | INVALID | NOT_VERIFIED>", "**不是** 候選的 FAIL"):
+        check(f"SETTINGS_MANIFEST template has {needle!r}", needle in text)
+    gates = (TOOLS.parent / "docs/07_quality_gates.md").read_text(encoding="utf-8")
+    check("docs/07 points to the settings manifest", "templates/SETTINGS_MANIFEST.md" in gates)
+    check("docs/07 says a settings mismatch is INVALID, not FAIL", "結果是 INVALID" in gates and "不是候選的 FAIL" in gates)
+
+
 def test_spec_review_wording_240(tmp):
     """2.4.0 (L12): the docs say one thing about the spec review: Standard needs it too (docs/02 since 2.2.5)."""
     docs = TOOLS.parent / "docs"
@@ -11238,6 +11250,7 @@ def main():
         guarded(test_dispatch_dup_250, tmp)
         guarded(test_usage_reads_250, tmp)
         guarded(test_gate_feasibility_250, tmp)
+        guarded(test_settings_manifest_250, tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     for failure in failures:
