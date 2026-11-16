@@ -21,6 +21,19 @@ effort 等級：`low / medium / high / xhigh / max`。
 - worker 最低 medium。只有「只收發指令、不需要判斷」的線（例如清理員只照清單做）才用 low。
 - **max 只臨時用**：同一難題兩輪有根因的修正都失敗、要做最後一次深度根因分析時才開；寫進 `DIRECTOR_LOG.md`，解決後調回。
 - 只在工作線換到重要度或難度明顯不同的階段時才調整，不每次開工都重評。
+
+### 派工難度表（2.5.0）
+
+每次派工都寫難度類別和 effort（DISPATCH 行的 `| class=<類別> effort=<等級>`），`tools/dispatch_check.py` 檢查，只提醒。
+
+| 類別 | 例子 | effort |
+|---|---|---|
+| `routine` | 照清單做、整理、搬檔 | medium 或 high |
+| `dev`、`ui` | 一般開發、介面 | high |
+| `root_cause`、`fix_after_fail`、`realism`、`core_engine` | 根因研究、修失敗之後的那一輪、真實度關鍵、核心引擎 | xhigh |
+| `repeated_failure` | 同一問題重複失敗之後 | xhigh；最後一次深度分析才 max，解決後調回 |
+
+等級名稱和「模型不支援就降到較低的可用等級」照官方說明：Claude Code〈Model configuration〉effort 一節（https://code.claude.com/docs/en/model-config ，2026-11-16 查）；子代理可在定義裡設 `effort`（〈Subagents〉https://code.claude.com/docs/en/sub-agents ）。
 - 環境若提供設定 session effort 的工具（例如 `set_session_effort`），總監用它調整 worker；通常下一輪生效，不必停 session。總監自己的 effort 由 PO 設定。
 
 ### 依角色

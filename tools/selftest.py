@@ -10848,6 +10848,39 @@ def test_quoting_either_250(tmp):
           [f"- `{form}` exit=0" for form in forms])
 
 
+def test_dispatch_effort_250(tmp):
+    """2.5.0 (N1): dispatch_check.py warns on a DISPATCH line without class= / effort=, an unknown class or level, and
+    an effort outside the table; warn only (exit 0) unless --strict; 2 on a missing log or a bad table."""
+    d = tmp / "dispatch_250"
+    d.mkdir()
+    sha = "a" * 64
+    log = _write_text(d / "DIRECTOR_LOG.md", "\n".join([
+        "# LOG",
+        f"2026-11-16 10:00 | DISPATCH WO-001 rev=1 sha={sha} | class=dev effort=high model=opus",
+        f"DISPATCH WO-002 rev=1 sha={sha}",
+        f"DISPATCH WO-003 rev=2 sha={sha} | class=routine effort=xhigh",
+        f"DISPATCH WO-004 rev=1 sha={sha} | class=root_cause effort=max",
+        f"DISPATCH WO-005 rev=1 sha={sha} | class=guess effort=high",
+        f"DISPATCH WO-006 rev=1 sha={sha} | class=repeated_failure effort=max",
+        f"> DISPATCH WO-007 rev=1 sha={sha}",
+        f"DISPATCH WO-008 rev=1 sha={sha} | class=ui effort=huge", ""]))
+    expect("dispatch_check warns, exit 0", "dispatch_check.py", 0, "--log", log,
+           says=["~ WARN EFFORT WO-002 line 3: no class= and effort=", "WO-003 line 4: class=routine wants effort medium/high, got xhigh",
+                 "WO-004 line 5: class=root_cause wants effort xhigh, got max", "WO-005 line 6: unknown class=guess",
+                 "WO-008 line 9: unknown effort=huge", "DISPATCH_CHECK: WARN records=7 warnings=5"],
+           lacks=["WO-001", "WO-006", "WO-007"])
+    expect("dispatch_check --strict exits 1", "dispatch_check.py", 1, "--log", log, "--strict")
+    good = _write_text(d / "good.md", f"DISPATCH WO-001 rev=1 sha={sha} | class=fix_after_fail effort=xhigh\n")
+    expect("dispatch_check clean log", "dispatch_check.py", 0, "--log", good, "--strict",
+           says="DISPATCH_CHECK: OK records=1 warnings=0")
+    table = _write_text(d / "table.json", '{"routine": ["xhigh"]}')
+    expect("dispatch_check --table replaces the table", "dispatch_check.py", 0, "--log", log, "--table", table,
+           says="WO-001 line 2: unknown class=dev", lacks="WO-003")
+    bad = _write_text(d / "bad.json", '{"routine": ["turbo"]}')
+    expect("dispatch_check bad table is exit 2", "dispatch_check.py", 2, "--log", log, "--table", bad, says="FAIL input")
+    expect("dispatch_check missing log is exit 2", "dispatch_check.py", 2, "--log", d / "none.md", says="FAIL input")
+
+
 def test_spec_review_wording_240(tmp):
     """2.4.0 (L12): the docs say one thing about the spec review: Standard needs it too (docs/02 since 2.2.5)."""
     docs = TOOLS.parent / "docs"
@@ -11061,6 +11094,7 @@ def main():
         guarded(test_help_any_console_230, tmp)
         guarded(test_usage_loops_until_250, tmp)
         guarded(test_quoting_either_250, tmp)
+        guarded(test_dispatch_effort_250, tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     for failure in failures:

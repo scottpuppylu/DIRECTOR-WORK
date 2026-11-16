@@ -14,6 +14,7 @@ Python 3.9 以上，只用標準函式庫。一律用 `python -I -X utf8 <tool> 
 | `gate_check.py` | 檢查 RESUME_STATE（2.2.2 起含大小，shadow）、工單（2.2.2 起含 BASE_REF 新鮮度，會 `git fetch`）、TASK REPORT、裁決的欄位和用詞；`--match` 逐條對照報告和工單的驗收條件，加 `--evidence-dir` 再核對證據紀錄；`--hash` 印工單雜湊；2.2.4 `--after-verdict` 列出最後一份裁決之後動到 SCOPE 外程式碼的 commit（shadow） | 不寫 | 不花 |
 | `release.py`（2.2.2） | 發版一次到位：fetch → 工作樹乾淨 → 比對遠端主線（落後停、分岔停或 `--merge`）→ HEAD 的 VERSION 與 CHANGELOG 最上段一致、tag 排序高於遠端所有 tag → selftest → 公開掃描 → push → annotated tag → `gh release create --latest`，每步用 ls-remote／`gh release view` 驗。預設 dry run | 只有 `--execute` 動遠端；`--merge --execute` 開本機分支 | 不花 |
 | `setup_check.py`（2.2.0） | 建置完成的檢查：`DIRECTOR_STATE.md` 的 `PO_PAGE_URL` 和 `PO_PAGE_PINNED` 兩行是不是三種合法寫法之一；2.2.1 起另查旁邊的 `PO_PENDING.md`、`RESUME_STATE.md` 表頭（2.2.2 加大小）、`director_work.json`（shadow，`--strict` 才失敗） | 不寫 | 不花 |
+| `dispatch_check.py`（2.5.0） | 派工紀錄：DISPATCH 行沒寫難度類別和 effort、或 effort 不在 `docs/05` 的表裡，印 WARN | 不寫 | 不花 |
 | `round_check.py`（1.3.0） | 修正輪數：RESUME_STATE 的 `FIX_ROUNDS:` 到第 4 輪（之後每組）沒有根因研究就 FAIL；2.3.0 研究沒有「測試條件 vs 參考條件」表印 WARN | 不寫 | 不花 |
 | `report_vs_audit.py`（1.3.0） | 用動作紀錄核對 TASK REPORT：報告說跑過的指令（`RAN:` 和 TESTS / EVIDENCE / DONE 裡的 selftest、Unity、Blender、雜湊檢查）紀錄裡有沒有、exit 和時間對不對；2.2.1 修截斷的長指令（引號、反斜線）比不到；2.2.3 比對多行腳本、省略寫法、多個 AC 編號，印 scope_check 時序 WARN；2.2.4 展開變數、`git -C`、字中 `...`、短 hex、HH:MM:SS、截斷覆蓋 | 不寫 | 不花 |
 | `transcript_audit.py`（2.2.1） | 沒裝 hook 時，從本機 Claude Code transcript（含 subagents）重建一份 hook 格式的動作紀錄，第 1 行標明是重建的 | 只寫 `--out`（已存在要 `--force`） | 不花 |
@@ -706,6 +707,16 @@ python -I -X utf8 status_gen.py --out <DIRECTOR>/status.py --config templates/st
 - 2.1.0（shadow）：待決頁是文字頁（沒有 `extract`）時，若有項目 `STATUS: open` 但 `ANSWER:` 已填（不算空白或 `<…>` 佔位），多印一行 `PO hint: N item(s) still STATUS open with an ANSWER filled in (ID…)`：PO 可能已回覆但沒改狀態，計數會漏掉，要到頁上讀。exit code 不變。
 - 2.2.0（shadow）：總監版設了 `po_page` 時，待決頁旁邊的 `DIRECTOR_STATE.md`（或 `po_page.state` 指定的路徑，相對於設定檔）沒有 `PO_PAGE_URL:` 開頭的行，多印一行 `~ PO_PAGE_MISSING: <路徑> has no PO_PAGE_URL line; publish and pin the PO page (BOOTSTRAP step 6)`，exit code 不變。2.2.0 以前建置的專案會看到它：照 `docs/11`「待決頁網頁的授權與備援」取得同意後補建，或寫 `PO_PAGE_URL: NONE reason=<原因>`。舊的 `status.py` 要用新 `status_gen.py` 重新產生（`--force`）才會印。
 - 已存在的 `--out` 要加 `--force` 才覆蓋。
+
+## dispatch_check.py（2.5.0）
+
+```text
+python -I -X utf8 dispatch_check.py --log DIRECTOR_LOG.md [--table <表.json>] [--strict]
+```
+
+- 每一筆 `DISPATCH <WO-ID> rev=<n> sha=<雜湊>` 行在 `|` 欄寫 `class=<難度類別> effort=<等級>`（可加 `model=`），gate_check 照樣讀得到。
+- 預設表（`docs/05`「派工難度表」）：`routine` medium/high；`dev`、`ui` high；`root_cause`、`fix_after_fail`、`realism`、`core_engine` xhigh；`repeated_failure` xhigh/max。`--table` 用 JSON 換掉整張表。
+- 沒寫、類別或等級不認得、等級不在表裡：印 `~ WARN EFFORT <WO-ID> line <n>: …`；最後一行 `DISPATCH_CHECK: OK|WARN records=n warnings=n`。只提醒，exit 0；`--strict` 有 WARN 就 exit 1；檔案讀不到或表格式錯 exit 2。
 
 ## round_check.py（1.3.0）
 
