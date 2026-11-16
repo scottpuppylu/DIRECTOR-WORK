@@ -98,6 +98,7 @@ RESUME_STATE 每次續接都整份讀進 context，太大就是每輪多花額�
 - 不在版控內的工作資料（例如 worktree 裡的本機資料夾），刪除前先產生盤點清單（路徑、大小、SHA-256）存檔。
 - 同一路徑不能同時出現在「保留」和「可回收」，改標記要附系統時間並刪掉舊標記。
 - 擁有者同意還不夠：刪 build 或審查匯出前，先 grep 所有工單、PLAN、RESUME_STATE 有沒有提到這個名稱；有提到的等總監確認。可以重建的，也先寫明重建用的 commit（L-026）。
+- **刪除五步**（2.5.0，L-072）：① 先列清單（路徑一行一個）② `tools/delete_guard.py --list <清單> --repo <每個 repo> --refs "<各線>/**/RESUME_STATE*.md"`，exit 1 的項目不刪，等總監確認 ③ 搬進隔離區或備份，記 SHA-256 ④ 過一段保留期才真刪 ⑤ 對帳：刪了哪些、留下哪些、清單和實際一致。先隔離、可復原期過了才刪，是雲端儲存「soft delete」的做法（Google Cloud Storage〈Soft delete〉，https://docs.cloud.google.com/storage/docs/soft-delete ，2026-11-16 查）。
 - 工作線自己剛產出的中間檔也不刪：不用的 `mv` 到 `_trash_pending/` 交給清理員；要換掉試做的輸出就寫到新資料夾（b1 → b2），試做最好直接寫進暫存資料夾（L-023）。
 
 ## 為什麼

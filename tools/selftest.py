@@ -132,7 +132,7 @@ GIT_GROUPS = {
     "test_trusted_isolation", "test_rerun_tree_modes_v220", "test_required_final_v220", "test_rerun_brief_v220",
     "test_release_222", "test_base_ref_222", "test_after_verdict_224",
     "test_report_vs_audit_225", "test_gate_order_225", "test_after_verdict_225", "test_scope_shared_225",
-    "test_line_brief_230", "test_setup_opt_in_240",
+    "test_line_brief_230", "test_setup_opt_in_240", "test_delete_guard_250",
 }
 
 
@@ -10910,6 +10910,39 @@ def test_round_diagnosis_250(tmp):
            resume("set2", "PLAIN.md", rnd=4), lacks="NO_INDEPENDENT_DIAGNOSIS")
 
 
+def test_delete_guard_250(tmp):
+    """2.5.0 (N3): delete_guard.py reports every candidate still named by a tracked file (git grep -F) or a --refs
+    file, exit 1; all clean exit 0; input errors exit 2. It never deletes, and a file does not reference itself."""
+    d = tmp / "delete_guard_250"
+    repo = d / "repo"
+    repo.mkdir(parents=True)
+    (repo / "plan.md").write_text("inputs: data/Input_A.csv\n", encoding="utf-8")
+    (repo / "self_named.txt").write_text("self_named.txt is this file\n", encoding="utf-8")
+    git_fixture(repo)
+    notes = d / "lines"
+    notes.mkdir()
+    _write_text(notes / "RESUME_STATE.md", "NEXT_STEP: compare with old_build_7 before the merge\n")
+    junk = _write_text(d / "unused.bin", "x")
+    lst = _write_text(d / "list.txt", "# delete list\ndata/input_a.csv\n\nbuilds\old_build_7\n")
+    refs = str(notes / "**" / "RESUME_STATE*.md")
+    expect("delete_guard finds repo and RESUME_STATE references", "delete_guard.py", 1, "--list", lst, junk,
+           "--repo", repo, "--refs", refs,
+           says=["REFERENCED data/input_a.csv (1 places)", "plan.md:1", "REFERENCED builds\old_build_7 (1 places)",
+                 "RESUME_STATE.md:1", f"CLEAN {junk}", "DELETE_GUARD: REFERENCED candidates=3 referenced=2"],
+           lacks="compare with")
+    check("delete_guard never deletes", junk.is_file() and (repo / "plan.md").is_file())
+    expect("delete_guard a file does not reference itself", "delete_guard.py", 0, repo / "self_named.txt",
+           "--repo", repo, says="DELETE_GUARD: CLEAN candidates=1 referenced=0")
+    expect("delete_guard --no-basename", "delete_guard.py", 0, "other/old_build_7", "--refs", refs, "--no-basename",
+           says="CLEAN other/old_build_7")
+    expect("delete_guard basename match by default", "delete_guard.py", 1, "other/old_build_7", "--refs", refs,
+           says="REFERENCED other/old_build_7")
+    expect("delete_guard no candidate is exit 2", "delete_guard.py", 2, "--repo", repo, says="FAIL input: no candidate")
+    expect("delete_guard missing list is exit 2", "delete_guard.py", 2, "--list", d / "none.txt", says="FAIL input")
+    expect("delete_guard not a repo is exit 2", "delete_guard.py", 2, junk, "--repo", notes, says="not a git repository")
+    expect("delete_guard nothing searched warns", "delete_guard.py", 0, junk, says="~ WARN nothing searched")
+
+
 def test_spec_review_wording_240(tmp):
     """2.4.0 (L12): the docs say one thing about the spec review: Standard needs it too (docs/02 since 2.2.5)."""
     docs = TOOLS.parent / "docs"
@@ -11125,6 +11158,7 @@ def main():
         guarded(test_quoting_either_250, tmp)
         guarded(test_dispatch_effort_250, tmp)
         guarded(test_round_diagnosis_250, tmp)
+        guarded(test_delete_guard_250, tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     for failure in failures:

@@ -15,6 +15,7 @@ Python 3.9 以上，只用標準函式庫。一律用 `python -I -X utf8 <tool> 
 | `release.py`（2.2.2） | 發版一次到位：fetch → 工作樹乾淨 → 比對遠端主線（落後停、分岔停或 `--merge`）→ HEAD 的 VERSION 與 CHANGELOG 最上段一致、tag 排序高於遠端所有 tag → selftest → 公開掃描 → push → annotated tag → `gh release create --latest`，每步用 ls-remote／`gh release view` 驗。預設 dry run | 只有 `--execute` 動遠端；`--merge --execute` 開本機分支 | 不花 |
 | `setup_check.py`（2.2.0） | 建置完成的檢查：`DIRECTOR_STATE.md` 的 `PO_PAGE_URL` 和 `PO_PAGE_PINNED` 兩行是不是三種合法寫法之一；2.2.1 起另查旁邊的 `PO_PENDING.md`、`RESUME_STATE.md` 表頭（2.2.2 加大小）、`director_work.json`（shadow，`--strict` 才失敗） | 不寫 | 不花 |
 | `dispatch_check.py`（2.5.0） | 派工紀錄：DISPATCH 行沒寫難度類別和 effort、或 effort 不在 `docs/05` 的表裡，印 WARN | 不寫 | 不花 |
+| `delete_guard.py`（2.5.0） | 刪除前：候選路徑還有沒有被追蹤檔（`git grep -F`）或 RESUME_STATE／計畫檔（`--refs`）提到；有就 exit 1。從不刪檔 | 不寫 | 不花 |
 | `round_check.py`（1.3.0） | 修正輪數：RESUME_STATE 的 `FIX_ROUNDS:` 到第 4 輪（之後每組）沒有根因研究就 FAIL；2.3.0 研究沒有「測試條件 vs 參考條件」表印 WARN | 不寫 | 不花 |
 | `report_vs_audit.py`（1.3.0） | 用動作紀錄核對 TASK REPORT：報告說跑過的指令（`RAN:` 和 TESTS / EVIDENCE / DONE 裡的 selftest、Unity、Blender、雜湊檢查）紀錄裡有沒有、exit 和時間對不對；2.2.1 修截斷的長指令（引號、反斜線）比不到；2.2.3 比對多行腳本、省略寫法、多個 AC 編號，印 scope_check 時序 WARN；2.2.4 展開變數、`git -C`、字中 `...`、短 hex、HH:MM:SS、截斷覆蓋 | 不寫 | 不花 |
 | `transcript_audit.py`（2.2.1） | 沒裝 hook 時，從本機 Claude Code transcript（含 subagents）重建一份 hook 格式的動作紀錄，第 1 行標明是重建的 | 只寫 `--out`（已存在要 `--force`） | 不花 |
@@ -717,6 +718,17 @@ python -I -X utf8 dispatch_check.py --log DIRECTOR_LOG.md [--table <表.json>] [
 - 每一筆 `DISPATCH <WO-ID> rev=<n> sha=<雜湊>` 行在 `|` 欄寫 `class=<難度類別> effort=<等級>`（可加 `model=`），gate_check 照樣讀得到。
 - 預設表（`docs/05`「派工難度表」）：`routine` medium/high；`dev`、`ui` high；`root_cause`、`fix_after_fail`、`realism`、`core_engine` xhigh；`repeated_failure` xhigh/max。`--table` 用 JSON 換掉整張表。
 - 沒寫、類別或等級不認得、等級不在表裡：印 `~ WARN EFFORT <WO-ID> line <n>: …`；最後一行 `DISPATCH_CHECK: OK|WARN records=n warnings=n`。只提醒，exit 0；`--strict` 有 WARN 就 exit 1；檔案讀不到或表格式錯 exit 2。
+
+## delete_guard.py（2.5.0）
+
+```text
+python -I -X utf8 delete_guard.py [路徑 ...] [--list <清單>] [--repo <repo>]... [--refs "<glob>"]... [--no-basename]
+```
+
+- 每個候選用完整路徑（`/` 和 `\` 都試）和檔名去找；`--no-basename` 只找完整路徑。不分大小寫。
+- `--repo`：那個 repo 的追蹤檔（`git grep -F -i -I`）；`--refs`：其他宣告輸入的檔（RESUME_STATE、PLAN、工單），glob 可用 `**`。檔案自己提到自己不算。
+- 印 `REFERENCED <候選> (n places)` 加最多 5 個 `檔案:行號`（不印那一行的內容），或 `CLEAN <候選>`；最後一行 `DELETE_GUARD: REFERENCED|CLEAN candidates=n referenced=n`。
+- exit 1 有被引用、0 全部乾淨、2 輸入錯誤（沒有候選、清單讀不到、`--repo` 不是 git repo、沒有 git）。只讀，從不刪、不搬。刪除流程見 `docs/06b`「刪檔之前」。
 
 ## round_check.py（1.3.0）
 
