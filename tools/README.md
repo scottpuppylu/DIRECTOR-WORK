@@ -958,6 +958,7 @@ python -I -X utf8 selftest.py
 
 - 沒有 git（2.1.0）：要建 git 測試資料的測試組整組略過，每組印一行 `SKIP <測試組>: needs git, none on PATH`；其餘照跑，有失敗照樣 exit 1。有 git 時這些測試組照常跑，建資料失敗仍是失敗。`test_no_git` 自己把 git 從 PATH 拿掉，確認 `evidence_record run` 仍寫紀錄、`--rerun` 是 NOT_RUN、doctor 說沒有 git。
 - 最後一行（2.2.4）：`selftest: 通過/總數 passed; skipped=N`。每一行 `SKIP`（沒有 git、沒有 bash、不能建 symlink、沒有 8.3 短檔名、GIT_DIR 太長）都算進 skipped，不算進 passed；exit 規則不變（有 FAIL 才 exit 1），所以有 SKIP 要看這一行。
+- 指令文字（2.5.0）：比對指令文字的測試用 `either_quoting(argv)`，POSIX 單引號（`shlex.join`）和 Windows 雙引號（`list2cmdline`）兩種都收，Windows 本機和 Linux CI 測的是同一件事（`test_quoting_either_250`，接續 2.3.0 `test_ran_line_posix_230`）。
 - 長路徑（2.2.4）：selftest 開頭給整個 process 設 `GIT_CONFIG_COUNT`／`core.longpaths=true`（原本有就接在後面），它叫起來的工具裡的 git 也吃得到；測試建的本機 origin 另外在 repo 裡設 `core.longpaths`。`test_submodule_ignore` 的 GIT_DIR 超過 220 字時印 `SKIP test_submodule_ignore: GIT_DIR <n> chars > 220 (git limit)`。
 
 ### 已知限制（2.2.4，Windows 長路徑）

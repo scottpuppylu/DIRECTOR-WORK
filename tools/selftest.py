@@ -10822,6 +10822,32 @@ def test_usage_loops_until_250(tmp):
               out[-300:])
 
 
+def either_quoting(argv):
+    """2.5.0 (F3): the two ways a command line is written (POSIX shlex single quotes, Windows double quotes); a selftest
+    that compares command text accepts either, so a Windows run and a Linux CI check the same thing."""
+    spec = importlib.util.spec_from_file_location("ran_line_quoting_250", TOOLS / "ran_line.py")
+    tool = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tool)
+    return {tool.command_text(argv, posix=True), tool.command_text(argv, posix=False)}
+
+
+def test_quoting_either_250(tmp):
+    """2.5.0 (F3): ran_line's run mode writes the command exactly in one of the two quotings, whatever the OS; the
+    comparison is exact (not a loose regex), and a line in neither quoting is caught."""
+    folder = tmp / "quoting_250"
+    folder.mkdir()
+    report = _write_text(folder / "r.md", "# REPORT\nRAN:\n\nNEXT: x\n")
+    argv = [sys.executable, "-c", "import sys; print('a b'); sys.exit(0)"]
+    code, out, err = ran_line_run("--to", report, "--utc-offset", "+00:00", "--", *argv)
+    text = report.read_text(encoding="utf-8")
+    forms = either_quoting(argv)
+    check("either_quoting gives two different forms", len(forms) == 2, forms)
+    check("ran_line run mode writes the command in one of the two quotings",
+          code == 0 and any(f"- `{form}` exit=0 at=" in text for form in forms), (code, text, err))
+    check("either_quoting rejects a third quoting", "- `" + " ".join(argv) + "` exit=0" not in
+          [f"- `{form}` exit=0" for form in forms])
+
+
 def test_spec_review_wording_240(tmp):
     """2.4.0 (L12): the docs say one thing about the spec review: Standard needs it too (docs/02 since 2.2.5)."""
     docs = TOOLS.parent / "docs"
@@ -11034,6 +11060,7 @@ def main():
         guarded(test_precommit_samples_240, tmp)
         guarded(test_help_any_console_230, tmp)
         guarded(test_usage_loops_until_250, tmp)
+        guarded(test_quoting_either_250, tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     for failure in failures:
