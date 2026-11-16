@@ -17,6 +17,15 @@ repos:
         language: system
         types: [text]
 
+      # Conflict markers left in staged files (2.5.0). pygrep is built into pre-commit (nothing downloaded); the commit
+      # stops when a staged text file has a line that starts with seven < or > signs. Pair it with `&&` before
+      # `git commit`, never `;` (docs/06b 程序衛生).
+      - id: dw-conflict-markers
+        name: DW conflict-marker check
+        entry: '^(<<<<<<<|>>>>>>>)( |$)'
+        language: pygrep
+        types: [text]
+
       # The DW selftest. It takes minutes, so it runs on `git push` only (pre-commit install --hook-type pre-push).
       # Delete this hook if you do not keep the DW tools in this repo.
       - id: dw-selftest

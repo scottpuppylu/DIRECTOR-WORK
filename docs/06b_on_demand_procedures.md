@@ -101,6 +101,17 @@ RESUME_STATE 每次續接都整份讀進 context，太大就是每輪多花額�
 - **刪除五步**（2.5.0，L-072）：① 先列清單（路徑一行一個）② `tools/delete_guard.py --list <清單> --repo <每個 repo> --refs "<各線>/**/RESUME_STATE*.md"`，exit 1 的項目不刪，等總監確認 ③ 搬進隔離區或備份，記 SHA-256 ④ 過一段保留期才真刪 ⑤ 對帳：刪了哪些、留下哪些、清單和實際一致。先隔離、可復原期過了才刪，是雲端儲存「soft delete」的做法（Google Cloud Storage〈Soft delete〉，https://docs.cloud.google.com/storage/docs/soft-delete ，2026-11-16 查）。
 - 工作線自己剛產出的中間檔也不刪：不用的 `mv` 到 `_trash_pending/` 交給清理員；要換掉試做的輸出就寫到新資料夾（b1 → b2），試做最好直接寫進暫存資料夾（L-023）。
 
+### 程序衛生（2.5.0）
+
+- **停背景工作要連子程序一起看，只停自己的。** 停掉背景工作後，它開的子程序可能還在跑。先依完整命令列列出程序樹（Windows：`Get-CimInstance Win32_Process | Select ProcessId,ParentProcessId,CommandLine`；Linux：`ps -eo pid,ppid,args`），只停自己啟動的那棵樹的 PID，不依名稱停程序（同名的可能是別人的，或是常駐服務）。（收件匣 L-063）
+- **批次前先用程式自己的規則驗名稱。** 由參數組出來的名稱（輸出檔名、資產名、分支名），在批次開始前用目標程式自己的命名規則全部驗一次，不合的先改；監看程式除了看完成檔，也要在「N 分鐘沒有新 log」時停下回報，不無限等。（收件匣 L-062）
+- **commit 不用 `;` 接。** 檢查步驟和 commit 用 `&&` 串，檢查失敗 commit 就不會跑；commit 前先 `git diff --cached --check`（會報殘留的衝突標記和空白錯誤）。要自動擋，`templates/.pre-commit-config.yaml` 的 `dw-conflict-markers` hook 在暫存檔有 `<<<<<<<` / `>>>>>>>` 行時停下 commit（選用，要自己裝 pre-commit）。（收件匣 L-065）
+- **JSON 用 JSON parser 讀，不用 grep。** 多行或縮排不同的 JSON，grep 一行一行比會永遠對不上；閘門要讀 JSON 欄位就用 `python -c "import json,sys; print(json.load(open(sys.argv[1]))['key'])" 檔名` 或工具本身的 `--json`。（收件匣 L-075）
+- **時間取時鐘，不手打。** 紀錄、報告、標頭裡的時間用 `tools/ran_line.py --stamp` 或系統時鐘印，不憑記憶打；手打的時間曾經寫成未來時間。（收件匣 L-070）
+- **CRLF 檔不用 `sed -i`。** Git Bash 的 `sed -i` 會把整個 CRLF 檔改成 LF，而且含 `\r` 的比對常常沒套上。改檔前後各看一次 `file <檔>` 或 `git ls-files --eol <檔>`，換行不能變；改檔用會保留原換行的方式（編輯器工具、或讀 bytes 改完原樣寫回的小腳本）。（收件匣 L-069；換行規則見 git〈gitattributes〉）
+- **改 RESUME 標頭要安全重寫。** 先把整份讀進來、只換四行表頭、寫到暫存檔，比對「新檔行數 = 舊檔行數」和表頭以外的內容不變，才換掉原檔；不用會先清空檔案的重導向（`> 檔`）邊讀邊寫。（收件匣 L-068）
+- **量測跑次要獨佔機器。** 排了量測（效能、時間、GPU）的時段，自己也不在同一台機器跑別的工作；同時有別的工作，這次量測作廢重跑，不拿來比。（收件匣 L-066；Google SRE workbook〈Canarying Releases〉：指標要能歸因於變更本身）
+
 ## 為什麼
 
 - 原專案有一次 worker 在清單還沒做完時就結束回合，閒置了 80 分鐘沒人發現。之後才加了閒置監看，並規定「真的要等，就寫明在等誰、等什麼，並用背景等待觸發」。

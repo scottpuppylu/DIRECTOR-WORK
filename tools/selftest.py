@@ -11031,6 +11031,31 @@ def test_settings_manifest_250(tmp):
     check("docs/07 says a settings mismatch is INVALID, not FAIL", "結果是 INVALID" in gates and "不是候選的 FAIL" in gates)
 
 
+def test_process_hygiene_250(tmp):
+    """2.5.0 (N8): docs/06b lists the process-hygiene rules (own process tree only, names validated before a batch, a
+    stalled-log stop, `&&` before commit, JSON parser, clock timestamps, no sed -i on CRLF, safe RESUME header
+    rewrite, exclusive measurement runs) and the pre-commit sample has a local conflict-marker hook that catches a
+    marker line and leaves ordinary text and Markdown underlines alone."""
+    root = TOOLS.parent
+    proc = (root / "docs/06b_on_demand_procedures.md").read_text(encoding="utf-8")
+    for needle in ("### 程序衛生（2.5.0）", "只停自己啟動的那棵樹的 PID", "N 分鐘沒有新 log", "commit 不用 `;` 接",
+                   "git diff --cached --check", "JSON 用 JSON parser 讀", "ran_line.py --stamp", "CRLF 檔不用 `sed -i`",
+                   "新檔行數 = 舊檔行數", "量測跑次要獨佔機器", "L-062", "L-063", "L-065", "L-066", "L-068", "L-069",
+                   "L-070", "L-075"):
+        check(f"docs/06b process hygiene has {needle!r}", needle in proc)
+    pre = (root / "templates" / ".pre-commit-config.yaml").read_text(encoding="utf-8")
+    block = pre.partition("id: dw-conflict-markers")[2].partition("- id:")[0]
+    entry = re.search(r"^\s*entry:\s*'([^']+)'", block, re.M)
+    check("pre-commit sample: conflict-marker hook is pygrep (built in, local)",
+          entry is not None and "language: pygrep" in block, block[:200])
+    if entry:
+        rx = re.compile(entry.group(1))
+        mark = "<" * 7
+        check("conflict-marker regex catches a marker line", rx.search(mark + " HEAD") and rx.search(">" * 7 + " side"))
+        check("conflict-marker regex leaves text and a setext underline alone",
+              not rx.search("a <<<<<<< b") and not rx.search("=" * 7) and not rx.search("<" * 4 + " spec"))
+
+
 def test_spec_review_wording_240(tmp):
     """2.4.0 (L12): the docs say one thing about the spec review: Standard needs it too (docs/02 since 2.2.5)."""
     docs = TOOLS.parent / "docs"
@@ -11251,6 +11276,7 @@ def main():
         guarded(test_usage_reads_250, tmp)
         guarded(test_gate_feasibility_250, tmp)
         guarded(test_settings_manifest_250, tmp)
+        guarded(test_process_hygiene_250, tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     for failure in failures:
