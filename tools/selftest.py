@@ -133,6 +133,7 @@ GIT_GROUPS = {
     "test_release_222", "test_base_ref_222", "test_after_verdict_224",
     "test_report_vs_audit_225", "test_gate_order_225", "test_after_verdict_225", "test_scope_shared_225",
     "test_line_brief_230", "test_setup_opt_in_240", "test_delete_guard_250", "test_dispatch_dup_250",
+    "test_run_plan_check_260",
 }
 
 
@@ -10050,8 +10051,8 @@ def test_pre_tr_230(tmp):
     expect("pre_tr: unknown class is NOT_RUN", s, 2, "--config", conf, "--classes", "nope", says="PRE_TR: NOT_RUN")
     expect("pre_tr: the example config loads", s, 0, "--config", TEMPLATES / "pre_tr.json", "--changed", "docs/a.md",
            "--dry-run", says="~ no CPU check by design")
-    module = mutant(TOOLS / s, [("    blocked = failed or missing or (a.strict and free)\n",
-                                 "    blocked = failed or (a.strict and free)\n")], "pre_tr_230_missing")
+    module = mutant(TOOLS / s, [("    blocked = failed or missing or bad_inputs or (a.strict and free)\n",
+                                 "    blocked = failed or bad_inputs or (a.strict and free)\n")], "pre_tr_230_missing")
     if module is not None:
         import contextlib, io
         with contextlib.redirect_stdout(io.TextIOWrapper(io.BytesIO(), encoding="utf-8")):
@@ -11072,6 +11073,154 @@ def test_lessons_intake_merged_250(tmp):
     check("docs/10 says the intake numbering is separate", "是兩套，不要混" in text)
 
 
+def _wt260(path, text):
+    """_write_text that also makes the folder."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_ruler_check_260(tmp):
+    """2.6.0 (N1, N5): ruler_check.py: zero matches, too few matches, a real line the ruler misses, files of another
+    extension than the glob, and a truncated trace without the required rows are INVALID (exit 1), never FAIL; a
+    truncated trace whose required rows are present is a WARN; good input is OK."""
+    s = "ruler_check.py"
+    d = tmp / "ruler_260"
+    real = "[GATE] hint pitch 1: cam=Main Camera overlap batter=1x1"
+    log = _wt260(d / "run.log", real + "\n" + real.replace("1:", "2:") + "\n")
+    expect("ruler: a pattern that stops at a space misses the real line", s, 1, "lines", "--input", log,
+           "--pattern", r"cam=(\S+) overlap", "--real-line", real,
+           says=["INVALID ZERO_MATCH", "INVALID RULER_MISSES_REAL_LINE", "RULER: INVALID matches=0"], lacks="FAIL")
+    expect("ruler: the fixed pattern is OK", s, 0, "lines", "--input", log, "--pattern", r"cam=(.+?) overlap",
+           "--real-line", real, "--expect-min", "2", says="RULER: OK matches=2 files=1 problems=0")
+    expect("ruler: too few matches", s, 1, "lines", "--input", log, "--pattern", "hint pitch", "--expect-min", "3",
+           says="INVALID TOO_FEW 2 < 3")
+    caps = d / "caps"
+    _wt260(caps / "a.jpg", "x")
+    _wt260(caps / "b.jpg", "y")
+    expect("ruler: a png count over jpg captures is INVALID and names the jpg files", s, 1, "files", "--input", caps,
+           "--glob", "*.png", says=["ZERO_MATCH for *.png", "other files present: .jpg=2"])
+    expect("ruler: the right glob is OK", s, 0, "files", "--input", caps, "--glob", "*.jpg",
+           says="RULER: OK matches=2")
+    trace = _wt260(d / "trace" / "t.csv", "frame,event\n1,arrive\n2,arrive\n# skippedOverCap=1249\n")
+    expect("ruler: a truncated trace is INVALID", s, 1, "lines", "--input", trace, "--pattern", "arrive",
+           "--cap-key", "skippedOverCap", says="INVALID TRUNCATED skippedOverCap=1249, no --required rows given")
+    expect("ruler: truncated but the required rows present is a WARN", s, 0, "lines", "--input", trace,
+           "--pattern", "arrive", "--cap-key", "skippedOverCap", "--required", ",arrive", "--required-min", "2",
+           says=["~ WARN TRUNCATED skippedOverCap=1249", "RULER: OK"])
+    expect("ruler: truncated and required rows missing", s, 1, "lines", "--input", trace, "--pattern", "arrive",
+           "--cap-key", "skippedOverCap", "--required", ",arrive", "--required-min", "3",
+           says="required rows 2 < 3")
+    expect("ruler: a missing input is exit 2", s, 2, "lines", "--input", d / "none.log", "--pattern", "x",
+           says="RULER: NOT_RUN")
+
+
+def test_run_plan_check_260(tmp):
+    """2.6.0 (N2): run_plan_check.py: a planned switch or output with no code reference, a reference not in the built
+    commit, a log without a launch line and a planned argument missing from the launch line all STOP; `--a=v` and
+    `--a v` are the same argument; a plan that matches passes."""
+    s = "run_plan_check.py"
+    d = tmp / "run_plan_260"
+    repo = d / "repo"
+    _wt260(repo / "src" / "Mode.cs", "\n".join(f"line {i}" for i in range(1, 51)) + "\n")
+    git_fixture(repo)
+    commit = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True,
+                            text=True).stdout.strip()
+    plan = {"schema": "run-plan-v1", "runs": {"r1": {"args": ["--mode=on", "--bounds 1"],
+                                                     "code": {"--mode": "src/Mode.cs:42",
+                                                              "--bounds": "src/Mode.cs:10"},
+                                                     "outputs": [{"name": "side", "code": "src/Mode.cs:20"}]}}}
+    good = _wt260(d / "plan.json", json.dumps(plan))
+    ok_log = _wt260(d / "ok.log", "boot\nCommand line: game.exe --bounds=1 --mode on --x\n")
+    expect("run_plan: a matching plan and launch line pass", s, 0, "--plan", good, "--repo", repo,
+           "--commit", commit, "--log", f"r1={ok_log}", says=["LAUNCH r1:", "RUN_PLAN: OK runs=1 problems=0"])
+    bad_log = _wt260(d / "bad.log", "Command line: game.exe --mode=on\n")
+    expect("run_plan: a planned argument missing from the launch line", s, 1, "--plan", good,
+           "--log", f"r1={bad_log}",
+           says=["~ WARN NOT_VERIFIED_IN_BUILD", "PLAN_MISMATCH r1: --bounds 1 not in the launch line"])
+    none_log = _wt260(d / "none.log", "boot only\n")
+    expect("run_plan: no launch line", s, 1, "--plan", good, "--log", f"r1={none_log}", says="NO_LAUNCH_LINE r1")
+    plan["runs"]["r1"]["outputs"] = [{"name": "face close-up", "code": "src/EditorOnly.cs:5"}, {"name": "top"}]
+    plan["runs"]["r1"]["code"]["--mode"] = "src/Mode.cs:99"
+    bad = _wt260(d / "bad.json", json.dumps(plan))
+    expect("run_plan: references not in the build and a missing reference stop", s, 1, "--plan", bad,
+           "--repo", repo, "--commit", commit,
+           says=["NOT_IN_BUILD r1 --mode src/Mode.cs:99", "NOT_IN_BUILD r1 output face close-up",
+                 "NO_CODE_REF r1 output top"])
+    expect("run_plan: not a plan is exit 2", s, 2, "--plan", ok_log, says="RUN_PLAN: NOT_RUN")
+
+
+def test_pre_tr_inputs_260(tmp):
+    """2.6.0 (N3): pre_tr.py checks the config's non-tracked "inputs" first: a missing file or a changed SHA-256
+    blocks with the file's source; present files with the right hash pass."""
+    d = tmp / "pre_tr_260"
+    repo = d / "repo"
+    (repo / "Library").mkdir(parents=True, exist_ok=True)
+    (repo / "Library" / "build-info.json").write_bytes(b"{}")
+    digest = hashlib.sha256(b"{}").hexdigest()
+    cfg = {"schema": "pre-tr-v1",
+           "inputs": [{"path": "Library/build-info.json", "sha256": digest, "source": "copy"}],
+           "classes": {"docs": {"paths": ["*.md"], "checks": [], "why": "text only"}}}
+    good = _wt260(d / "good.json", json.dumps(cfg))
+    expect("pre_tr: present inputs pass", "pre_tr.py", 0, "--config", good, "--changed", "a.md", "--repo", repo,
+           says=["INPUT OK Library/build-info.json", "PRE_TR: PASS", "inputs_bad=0"])
+    cfg["inputs"] = [{"path": "Assets/Untracked.cs", "source": "the old worktree's file, see notes"},
+                     {"path": "Library/build-info.json", "sha256": "0" * 64}]
+    bad = _wt260(d / "bad.json", json.dumps(cfg))
+    expect("pre_tr: a missing or changed input blocks", "pre_tr.py", 1, "--config", bad, "--changed", "a.md",
+           "--repo", repo, says=["MISSING_INPUT Assets/Untracked.cs (source: the old worktree", "INPUT_CHANGED",
+                                 "PRE_TR: BLOCK", "inputs_bad=2"])
+
+
+def test_pack_unique_260(tmp):
+    """2.6.0 (N4): pack_check.py counts distinct contents: duplicates are listed and count once, and a required
+    segment with no distinct image fails as INVALID."""
+    pack = tmp / "pack_260"
+    _png_230(pack / "img" / "s_0001.png", 1000, 800)
+    (pack / "img" / "s_0002.png").write_bytes((pack / "img" / "s_0001.png").read_bytes())
+    _png_230(pack / "img" / "s_0010.png", 1000, 801)
+    imgs = [{"file": f"img/s_{f:04d}.png", "camera": "cam", "frame": f, "subject_bbox": [0, 0, 10, 10]}
+            for f in (1, 2, 10)]
+    data = {"schema": "review-pack-v1", "sampled_frames": [1, 2, 10], "min_phase_frames": 40, "images": imgs,
+            "required_segments": {"late": [9, 10, 11]},
+            "render": {"motion_blur": False, "resolution_percent": 100, "file_format": "PNG", "view": "Standard"}}
+    _wt260(pack / "manifest.json", json.dumps(data))
+    expect("pack_check: readme for the unique pack", "pack_check.py", 0, "readme", pack, says="README written")
+    expect("pack_check: duplicates count once", "pack_check.py", 0, "check", pack,
+           says=["~ DUPLICATE img/s_0002.png == img/s_0001.png", "unique=2"])
+    data["required_segments"]["early"] = [1, 2]
+    _wt260(pack / "manifest.json", json.dumps(data))
+    expect("pack_check: a segment shown only by one repeated image is INVALID", "pack_check.py", 1, "check", pack,
+           says="coverage: segment early has no distinct image (frames 1-2): INVALID")
+
+
+def test_waiver_bulk_260(tmp):
+    """2.6.0 (N6): waiver.py snooze takes several lanes and --to a local time; check shows a later day's date; --to
+    in the past and --to with --minutes are refused."""
+    f = tmp / "waiver_260" / "w.json"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    expect("waiver: several lanes until the reset in one call", "waiver.py", 0, "snooze", "--file", f, "--lane",
+           "lane a", "lane b", "--until", "weekly reset", "--to", "2099-01-02T00:00",
+           says=["SNOOZE lane a until: weekly reset", "SNOOZE lane b until: weekly reset"])
+    expect("waiver: check shows the date of a later day", "waiver.py", 0, "check", "--file", f,
+           says=["SNOOZED lane a until: weekly reset till 2099-01-02 00:00", "WAIVERS: lanes=2 wake=0"])
+    expect("waiver: --to in the past is refused", "waiver.py", 2, "snooze", "--file", f, "--lane", "c",
+           "--until", "x", "--to", "2000-01-01T00:00", says="not in the future")
+    expect("waiver: --to and --minutes together are refused", "waiver.py", 2, "snooze", "--file", f, "--lane", "c",
+           "--until", "x", "--to", "2099-01-01T00:00", "--minutes", "5", says="not both")
+    expect("waiver: lift several lanes", "waiver.py", 0, "lift", "--file", f, "--lane", "lane a", "lane b",
+           says=["LIFT lane a", "LIFT lane b"])
+
+
+def test_lessons_intake_merged_260(tmp):
+    """2.6.0 (N7): the intake lessons L-079..L-086 each have one numbered docs/10 line with a rule."""
+    text = (TOOLS.parent / "docs/10_lessons_learned.md").read_text(encoding="utf-8")
+    lines = [line for line in re.split(r"\r\n|\r|\n", text) if re.match(r"^\d+\. \*\*", line)]
+    for n in range(79, 87):
+        hit = [line for line in lines if re.search(rf"收件匣 (?:L-\d{{3}}、)*L-{n:03d}\b", line)]
+        check(f"docs/10 has 收件匣 L-{n:03d} with a rule", len(hit) == 1 and "→" in hit[0], hit[:2])
+
+
 def test_spec_review_wording_240(tmp):
     """2.4.0 (L12): the docs say one thing about the spec review: Standard needs it too (docs/02 since 2.2.5)."""
     docs = TOOLS.parent / "docs"
@@ -11294,6 +11443,12 @@ def main():
         guarded(test_settings_manifest_250, tmp)
         guarded(test_process_hygiene_250, tmp)
         guarded(test_lessons_intake_merged_250, tmp)
+        guarded(test_ruler_check_260, tmp)
+        guarded(test_run_plan_check_260, tmp)
+        guarded(test_pre_tr_inputs_260, tmp)
+        guarded(test_pack_unique_260, tmp)
+        guarded(test_waiver_bulk_260, tmp)
+        guarded(test_lessons_intake_merged_260, tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     for failure in failures:

@@ -33,6 +33,12 @@ check (F5):
               a lossless file_format (PNG, EXR, TIFF); every key of reference_render must have the same value in render
               (a different color transform or sample count is a different picture, not a defect)
   README      when PACK/README.md exists, it must list exactly the files the pack holds (write it with `readme`)
+unique (2.6.0, N4; docs/10 lesson 133): coverage counts distinct contents, not files. Every listed image is hashed
+              (SHA-256); files with the same content are one image (`~ DUPLICATE a == b`). An optional
+              "required_segments": {"swing": [0, 1, 2, ...]} needs, per segment, at least one distinct image whose
+              frame is in the list, else `coverage: segment <name> has no distinct image` (the segment is INVALID).
+              The last line ends with `unique=n`.
+
 readme: writes PACK/README.md from the objects really in the pack: each file with size and, for PNG, width x height,
   and per manifest image its camera and frame. It holds no verdicts or scores (the blind layer stays blind).
 
@@ -40,6 +46,7 @@ Prints one line per finding and a last line `PACK_CHECK: PASS|FAIL images=n find
 pack cannot be read. Only reads, except `readme`.
 """
 import argparse
+import hashlib
 import json
 import pathlib
 import re
@@ -176,6 +183,29 @@ def readme_findings(pack):
     return out
 
 
+def unique_findings(pack, data):
+    """2.6.0: (number of distinct image contents, findings): duplicates and required segments without a distinct image."""
+    first, frames_by_digest, out = {}, {}, []
+    for item in data["images"]:
+        path = pack / str(item.get("file", ""))
+        if not path.is_file():
+            continue
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if digest in first:
+            print(f"~ DUPLICATE {item.get('file')} == {first[digest]} (same content: counts once)")
+        else:
+            first[digest] = item.get("file")
+        frames_by_digest.setdefault(digest, set()).add(item.get("frame"))
+    distinct_frames = set()
+    for frames in frames_by_digest.values():
+        if len(frames) == 1:  # one content shown as several frames proves none of them
+            distinct_frames |= frames
+    for name, frames in (data.get("required_segments") or {}).items():
+        if not distinct_frames & set(frames):
+            out.append(f"coverage: segment {name} has no distinct image (frames {min(frames)}-{max(frames)}): INVALID")
+    return len(first), out
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("action", choices=("check", "readme"))
@@ -206,9 +236,12 @@ def main(argv=None):
         if pathlib.PurePosixPath(name).suffix.lower() in IMAGE and name not in listed and name not in SKIP:
             findings.append(f"files: {name} is in the pack but not in the manifest")
     findings += readme_findings(pack)
+    unique, extra = unique_findings(pack, data)
+    findings += extra
     for f in findings:
         print(f"FAIL {f}")
-    print(f"PACK_CHECK: {'FAIL' if findings else 'PASS'} images={len(data['images'])} findings={len(findings)}")
+    print(f"PACK_CHECK: {'FAIL' if findings else 'PASS'} images={len(data['images'])} findings={len(findings)} "
+          f"unique={unique}")
     return 1 if findings else 0
 
 

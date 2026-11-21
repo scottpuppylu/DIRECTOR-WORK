@@ -6,6 +6,37 @@
 - **MINOR**：新增規則、文件、工具或選項，舊檔案照樣通過。
 - **PATCH**：修正文字、修 bug，規則不變。
 
+## 2.6.0 — 2026-11-22
+
+MINOR（工單 WO-DW-260）：把 11-15～11-21 那一週的八個教訓（收件匣 L-079～L-086）寫成規則，加兩個新工具、三個工具的新選項。舊檔案和舊設定照樣通過。
+
+### 新工具與選項
+
+- `tools/ruler_check.py`（N1、N5，新）：量尺自己看得到嗎。`lines` 數符合正規式的行，`files` 數符合 glob 的檔並列出所有副檔名。對到 0 筆（`ZERO_MATCH`）、少於 `--expect-min`（`TOO_FEW`）、`--real-line` 給的實際輸出行對不上（`RULER_MISSES_REAL_LINE`）、`--cap-key` 讀到截斷計數而 `--required` 的列不夠（`TRUNCATED`），都是 INVALID（exit 1），不是 FAIL。需要的列都在時，截斷只印 `~ WARN TRUNCATED`。
+- `tools/run_plan_check.py`（N2，新）：計畫（schema run-plan-v1）的每個開關和輸出項要有程式位置 `path:line`（`NO_CODE_REF`），用 `--repo --commit` 查它在要跑的 commit 裡（`NOT_IN_BUILD`）；`--log RUN=LOG` 比對 log 印出的啟動參數（`NO_LAUNCH_LINE`、`PLAN_MISMATCH`），`--a=v` 和 `--a v` 視為相同。
+- `pre_tr.py`（N3）：設定檔可加 `inputs`（非版控的必要輸入：`path`、`sha256`、`source`），在所有類別之前檢查；缺了 `MISSING_INPUT`、雜湊不同 `INPUT_CHANGED`，都會擋。最後一行加 `inputs_bad=n`。
+- `pack_check.py`（N4）：每張圖用內容 SHA-256 去重，重複的印 `~ DUPLICATE`；manifest 可加 `required_segments`（片段名 → 影格），沒有獨特圖的片段是 FAIL（INVALID）。最後一行結尾加 `unique=n`。
+- `waiver.py`（N6）：`add`／`snooze`／`lift` 的 `--lane` 可給多條線；`snooze --to YYYY-MM-DDTHH:MM` 指定結束的本地時間（不能和 `--minutes` 一起用，必須在未來）；`check` 對隔天以後結束的延後印出日期。
+
+### 範本與規則（文件）
+
+- `docs/07` 第 7 節：量尺先證明看得到、計畫要對到程式碼並在跑完比啟動參數、表現層用模擬時鐘、涵蓋數用獨特內容算。
+- `docs/04` 週額度收尾：接近停止線時放行條件先寫成數字；收尾的同一輪用 `waiver.py` 一次寫好全部豁免。
+- `docs/06b` 程序衛生：非版控輸入要有清單，工具不寫死別的工作樹路徑。
+- `templates/TEST_REQUEST.md`：加 `CODE_REFS:` 一行。
+- `docs/10`：第 127～134 條（收件匣 L-079～L-086）。
+
+對齊初衷：
+1. 幫到誰：總監（判 TR 前先知道量尺看不看得到、計畫和 build 對不對得上、涵蓋數是不是灌水）、worker（新工作樹第 0 步就知道缺哪個非版控檔、量尺錯時結果是 INVALID 不被冤枉成 FAIL）、PO（收尾一次寫好豁免，監看不再一條一條跳；每輪必讀沒有變大）。依據：工單 WO-DW-260 和 11-15～11-21 的教訓 L-079～L-086。
+2. Desktop：都是本機命令列工具、範本和文件；Desktop Code 分頁照常用，沒有新的每輪步驟。
+3. 服務：初衷 2（省額度）：量尺錯、計畫錯的場次在跑之前或判之前就擋下，不重跑；收尾豁免一次寫；初衷 4（中斷不丟進度）：非版控輸入有清單；初衷 5（成品要真的對）：量尺先證明、計畫對到程式碼、獨特涵蓋數；初衷 7（零成本）：只用標準庫。
+4. 核心：每輪必讀沒有變長；新工具都是選用、只讀；沒有加額度上限或節奏限制；git 只讀。
+5. 舊檔案和舊指令：照樣通過；`pack_check`、`pre_tr` 最後一行只在結尾多一個欄位。
+
+### 遷移
+
+不用遷移。要用新功能：在 `pre_tr` 設定加 `inputs`；在審查包 manifest 加 `required_segments`；閒置監看改用 `waiver.py` 的 JSON 和 `idle_watch --waiver-file`；讀最後一行的腳本注意 `pack_check` 和 `pre_tr` 多了一個欄位（加在結尾）。
+
 ## 2.5.0 — 2026-11-16
 
 MINOR（工單 WO-DW-250）：重新盤點這一週的教訓，修三個 2.4.0 的小錯，加四個只提醒的檢查（派工 effort、重複派工、刪除前的引用、卡關時的獨立診斷）、一個用量選項（`usage_mix.py --reads`）、兩個範本（閘門可行性、證據設定清單）和程序衛生規則；收件匣裡還沒併入的教訓全部寫進 `docs/10`。新檢查預設只提醒，不擋；每輪必讀沒有變大。只借概念，沒有複製程式碼；只用標準庫。

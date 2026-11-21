@@ -18,6 +18,11 @@ Config (JSON, schema pre-tr-v1; example: templates/pre_tr.json):
 
 Changed files: --changed PATH ... (given), or --git-diff BASE: `git diff --name-only BASE` plus untracked files in
 --repo (default: the current folder). --classes names the classes directly (no path matching).
+2.6.0 (N3, docs/10 lesson 130): an optional top-level "inputs" list names the files the build needs that are not in
+version control (untracked or ignored sources, generated settings, caches), each {"path": ..., "sha256": optional,
+"source": "where to get it"}; `path` is relative to --repo. They are checked first, before any class: a missing file is
+`MISSING_INPUT <path> (source: ...)`, a different SHA-256 is `INPUT_CHANGED <path>`; either blocks (a fresh worktree
+fails here with the list, not three build attempts later). Never point a path into another worktree.
 A touched class with no checks is MISSING; a changed file no class claims is `~ UNCLASSIFIED` (a WARN; with --strict it
 blocks too: add it to a class, or to a class with an explicit `"checks": []` and a "why").
 Prints per class the files that touched it, per check `PASS|FAIL <class>: <name> (<s>s)` and the failing output's last
@@ -27,6 +32,7 @@ ships the runner and an example config only; the project owns its classes and ch
 """
 import argparse
 import fnmatch
+import hashlib
 import json
 import pathlib
 import subprocess
@@ -34,6 +40,25 @@ import sys
 import time
 
 SCHEMA = "pre-tr-v1"
+
+
+def input_findings(config, repo):
+    """2.6.0: the non-tracked files the build needs, checked before anything runs."""
+    data = json.loads(pathlib.Path(config).read_text(encoding="utf-8-sig"))
+    out = []
+    for item in data.get("inputs") or []:
+        rel = str(item.get("path", "")).strip()
+        target = pathlib.Path(repo) / rel
+        source = item.get("source") or "not written: add a source"
+        if not rel or not target.is_file():
+            out.append(f"MISSING_INPUT {rel or '(no path)'} (source: {source})")
+            continue
+        want = str(item.get("sha256") or "").lower()
+        if want and hashlib.sha256(target.read_bytes()).hexdigest() != want:
+            out.append(f"INPUT_CHANGED {rel}: SHA-256 differs from the config (source: {source})")
+        else:
+            print(f"INPUT OK {rel}" + ("" if want else " (no sha256 in the config: presence only)"))
+    return out
 
 
 def load(path):
@@ -118,6 +143,9 @@ def main(argv=None):
         return 2
     base = pathlib.Path(a.config).resolve().parent
     checks = failed = missing = 0
+    bad_inputs = input_findings(a.config, repo)
+    for line in bad_inputs:
+        print(line)
     for name in sorted(hit):
         spec = classes[name]
         print(f"CLASS {name}: {', '.join(hit[name][:6])}" + (f" (+{len(hit[name]) - 6})" if len(hit[name]) > 6 else ""))
@@ -144,11 +172,11 @@ def main(argv=None):
         print(f"~ UNCLASSIFIED {f}: no defect class claims it" + (" (blocks: --strict)" if a.strict else ""))
     if not hit:
         print("~ the change touches no defect class: nothing to run")
-    blocked = failed or missing or (a.strict and free)
+    blocked = failed or missing or bad_inputs or (a.strict and free)
     if blocked:
         print("BLOCK: the test request waits until every check passes and every touched class has a check")
     print(f"PRE_TR: {'BLOCK' if blocked else 'PASS'} classes={len(hit)} checks={checks} failed={failed} "
-          f"missing={missing} unclassified={len(free)}" + (" (dry run)" if a.dry_run else ""))
+          f"missing={missing} unclassified={len(free)} inputs_bad={len(bad_inputs)}" + (" (dry run)" if a.dry_run else ""))
     return 1 if blocked else 0
 
 

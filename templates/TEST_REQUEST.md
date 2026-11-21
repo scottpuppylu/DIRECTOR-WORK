@@ -8,6 +8,7 @@ MIN_SCOPE: 最小範圍，以及為什麼不能更小
 TIER: 1 批次（預設） | 2 單項（寫理由：P0 / PO 在等 / 下一步依賴 / 耦合無法用開關分 / 單一根因驗證）
 CHANGES: 這次 build 包含的每一項修改，以及對應的開關
 SWITCHES: 要跑的開 / 關組合
+CODE_REFS: 每個開關、鏡頭、輸出項的程式位置（檔案:行號，在要跑的 commit 裡）；計畫檔給 run_plan_check.py（2.6.0）
 EXCLUSIVE_MIN: 需要獨佔安靜時段的分鐘數（沒有寫 0）
 NORMAL_MIN: 一般時段的分鐘數
 BUILD_GB: <新 build 資料夾的 GiB>

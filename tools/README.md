@@ -26,6 +26,8 @@ Python 3.9 以上，只用標準函式庫。一律用 `python -I -X utf8 <tool> 
 | `line_brief.py`（2.3.0） | 一條工作線的摘要一次印完：看板行、git 狀態和最後 commit、最新結果檔開頭、log 尾段 | 不寫 | 不花 |
 | `pre_tr.py`（2.3.0） | 送 TR 前依改到的檔判斷缺陷類別，跑每個類別的 CPU 檢查；有一個失敗或類別沒有檢查就擋 | 不寫（跑的檢查自己寫的除外） | 不花 |
 | `pack_check.py`（2.3.0） | 審查包送出前：抽格（漏掉短階段、和週期同步）、主體在畫面內、近景真的拍到部位、檔名洩漏版本或結論、渲染設定會做出假缺陷、README 和實際檔案一致；`readme` 從實際檔案產生 README | 只有 `readme` 寫 README.md | 不花 |
+| `ruler_check.py`（2.6.0） | 量尺自己看得到嗎：對到 0 筆、少於預期、對不上實際輸出的一行、trace 被截斷都是 INVALID，不是 FAIL；列出找過的副檔名 | 不寫 | 不花 |
+| `run_plan_check.py`（2.6.0） | 測試計畫的開關和輸出項都有程式位置、在要跑的 commit 裡；跑完比對 log 的啟動參數 | 不寫 | 不花 |
 | `hash_check.py`（2.3.0） | 雜湊比對少一個案例就 FAIL；build 新不新用內容雜湊判斷（不看檔案時間）；印實際跑的組件路徑和雜湊 | 只有 `stamp` 寫 `--out` | 不花 |
 | `flag_check.py`（2.3.0） | 開關有沒有真的被讀到：log 第一個 frame 前每個開關一行 `flag X read = 值`，型別和值都對；缺行就停、不判定 | 不寫 | 不花 |
 | `loop_guard.py`（2.4.0） | 找出在原地打轉的呼叫：同一呼叫重複、同一錯誤重試、兩個呼叫輪流、輪詢結果不變、參數一直被拒、subagent 失敗沒人處理；`scan` 讀動作紀錄或 transcript，事後列出；`hook_guard.py --loop-guard` 在呼叫前提醒（不擋）；只印工具名、雜湊和次數 | 不寫 | 不花 |
@@ -997,3 +999,28 @@ python -I -X utf8 selftest.py
 
 - **guard_check**：逐項檢查續航機制（計時器、排程、監看、壓縮設定、記憶大小）並印重建指令，對每個 worktree 跑 `round_check.py`，見 `docs/06b`。各專案機制不同，所以沒有通用版。
 - **排程看板工具**：有總管時，看板的讀寫（go / wait / ack / quiet / hold）用一支小工具統一，名稱檢查和 ACK 逾時警示寫在工具裡，見 `docs/02`。
+
+## ruler_check.py（2.6.0，N1、N5）
+
+```text
+python -I -X utf8 ruler_check.py lines --pattern "cam=(.+?) overlap" --input run.log --real-line "<從 log 複製的一行>" [--expect-min 34]
+python -I -X utf8 ruler_check.py files --input captures/ --glob "*.jpg" [--expect-min 1800]
+python -I -X utf8 ruler_check.py lines --pattern ",arrive" --input trace.csv --cap-key skippedOverCap --required ",arrive" --required-min 34
+```
+
+量尺先證明看得到，才判產品。對到 0 筆、少於 `--expect-min`、`--real-line` 對不上、trace 截斷而需要的列不夠：INVALID（exit 1）。最後一行 `RULER: OK|INVALID matches=n files=n problems=n`。只讀。
+
+## run_plan_check.py（2.6.0，N2）
+
+```text
+python -I -X utf8 run_plan_check.py --plan PLAN.json --repo <工作樹> --commit <要跑的 commit>
+python -I -X utf8 run_plan_check.py --plan PLAN.json --log r1=run1.log r2=run2.log
+```
+
+計畫檔（run-plan-v1）每場寫 `args`、每個開關的 `code`（`path:line`）、每個輸出項的 `code`。跑之前查程式位置在 commit 裡；跑完比對 log 的啟動參數。不符的場次 INVALID，不判。最後一行 `RUN_PLAN: OK|STOP runs=n problems=n`。只讀。
+
+## 2.6.0 的選項（pre_tr、pack_check、waiver）
+
+- `pre_tr.py` 設定的 `inputs`：`[{"path": "Library/x.json", "sha256": "...", "source": "從哪裡拿"}]`，路徑相對 `--repo`；缺了 `MISSING_INPUT`，雜湊不同 `INPUT_CHANGED`。
+- `pack_check.py`：重複內容 `~ DUPLICATE`，最後一行結尾 `unique=n`；manifest 的 `"required_segments": {"swing_t0_t8": [100, 101, 102]}` 沒有獨特圖就 FAIL。
+- `waiver.py snooze --file W.json --lane A B C --until "weekly reset" --to 2026-11-27T00:00`：收尾時一次寫好全部線。

@@ -8,6 +8,7 @@ The waivers live in one JSON file, so a watcher that restarts reads them back in
 
   waiver.py add   --file WAIVERS.json --lane LANE --until "TEXT" [--watch PATH] [--reason TEXT]
   waiver.py snooze --file WAIVERS.json --lane LANE --until "TEXT" --minutes N
+  waiver.py snooze --file WAIVERS.json --lane LANE [LANE ...] --until "TEXT" --to YYYY-MM-DDTHH:MM   (2.6.0)
   waiver.py lift  --file WAIVERS.json --lane LANE
   waiver.py block --file WAIVERS.json --branch NAME [--note TEXT]        (the branch blocks integration from now)
   waiver.py unblock --file WAIVERS.json --branch NAME
@@ -16,7 +17,11 @@ The waivers live in one JSON file, so a watcher that restarts reads them back in
   add      the lane is waived until TEXT; --watch records the SHA-256 of PATH now (relative to the file's folder),
            so a later change of that file is what wakes the lane. One waiver per lane: a new one replaces the old.
   snooze   a waiver that also ends by time: after N minutes the lane is woken whatever else happened.
-  check    per lane: `WAIVED <lane> until: <TEXT> (unchanged; do not wake)`, `SNOOZED <lane> ... till HH:MM`,
+           2.6.0: --to gives the end as a local date and time instead (for example the quota reset), and add /
+           snooze / lift take several lanes at once. At a weekly wrap-up, waive every paused lane in one call up to
+           the reset, instead of answering the idle check lane by lane:
+             waiver.py snooze --file W.json --lane A B C --until "weekly reset" --to 2026-11-27T00:00
+  check    per lane: `WAIVED <lane> until: <TEXT> (unchanged; do not wake)`, `SNOOZED <lane> ... till HH:MM` (a later day: with the date),
            `WAKE <lane>: <why>` (the watch file changed or is gone, the snooze ran out), `~ WARN NO_UNTIL <lane>` (a
            waiver that does not say what lifts it: write --until). Per blocking branch: `BLOCK <branch> <h>h`, or after
            --block-hours (default 8) `~ INTEGRATION_BLOCKED <branch> <h>h > <n>h: merge it behind a default-off flag
@@ -79,7 +84,9 @@ def evaluate(data, base, now, block_hours):
                 wake += 1
                 continue
         if snooze is not None:
-            lines.append(f"SNOOZED {lane} until: {until} till {snooze.astimezone(now.tzinfo):%H:%M} (do not wake)")
+            local = snooze.astimezone(now.tzinfo)
+            shown = f"{local:%H:%M}" if local.date() == now.date() else f"{local:%Y-%m-%d %H:%M}"
+            lines.append(f"SNOOZED {lane} until: {until} till {shown} (do not wake)")
         elif watch:
             lines.append(f"WAIVED {lane} until: {until} ({watch} unchanged; do not wake)")
         else:
@@ -126,11 +133,12 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("action", choices=("add", "snooze", "lift", "block", "unblock", "check"))
     ap.add_argument("--file", required=True, help="the waivers JSON file (created on the first add / block)")
-    ap.add_argument("--lane")
+    ap.add_argument("--lane", nargs="+", help="the lane; add / snooze / lift take several (2.6.0)")
     ap.add_argument("--until", help="the event that lifts the waiver")
     ap.add_argument("--watch", help="add: a file whose change is that event (relative to the file's folder)")
     ap.add_argument("--reason", default="")
     ap.add_argument("--minutes", type=float, help="snooze: wake the lane after this many minutes")
+    ap.add_argument("--to", help="snooze (2.6.0): wake the lane at this local time, YYYY-MM-DDTHH:MM")
     ap.add_argument("--branch")
     ap.add_argument("--note", default="")
     ap.add_argument("--block-hours", type=float, default=8.0, help="check: a block longer than this is flagged")
@@ -150,26 +158,42 @@ def main(argv=None):
         refuse(f"{a.action} needs --lane")
     if a.action in ("block", "unblock") and not a.branch:
         refuse(f"{a.action} needs --branch")
+    lanes = list(dict.fromkeys(a.lane or []))
     if a.action in ("add", "snooze"):
         if not (a.until or "").strip():
             refuse(f"{a.action} needs --until: what lifts the waiver")
-        if a.action == "snooze" and (a.minutes is None or a.minutes <= 0):
-            refuse("snooze needs --minutes N (more than 0)")
-        item = {"lane": a.lane, "until": a.until.strip(), "since": stamp, "reason": a.reason}
-        if a.watch:
-            path = a.watch if os.path.isabs(a.watch) else os.path.join(base, a.watch)
-            item.update(watch=a.watch, watch_sha256=file_digest(path))
         if a.action == "snooze":
-            item["snooze_until"] = (now + datetime.timedelta(minutes=a.minutes)).isoformat(timespec="seconds")
-        data["waivers"] = [w for w in data["waivers"] if w.get("lane") != a.lane] + [item]
+            if a.to:
+                if a.minutes is not None:
+                    refuse("snooze takes --minutes or --to, not both")
+                try:
+                    end = datetime.datetime.fromisoformat(a.to)
+                except ValueError:
+                    refuse(f"--to {a.to!r} is not YYYY-MM-DDTHH:MM")
+                end = end.astimezone() if end.tzinfo is None else end
+                if end <= now:
+                    refuse(f"--to {a.to} is not in the future")
+            elif a.minutes is None or a.minutes <= 0:
+                refuse("snooze needs --minutes N (more than 0) or --to YYYY-MM-DDTHH:MM")
+            else:
+                end = now + datetime.timedelta(minutes=a.minutes)
+        for lane in lanes:
+            item = {"lane": lane, "until": a.until.strip(), "since": stamp, "reason": a.reason}
+            if a.watch:
+                path = a.watch if os.path.isabs(a.watch) else os.path.join(base, a.watch)
+                item.update(watch=a.watch, watch_sha256=file_digest(path))
+            if a.action == "snooze":
+                item["snooze_until"] = end.isoformat(timespec="seconds")
+            data["waivers"] = [w for w in data["waivers"] if w.get("lane") != lane] + [item]
+            print(f"{a.action.upper()} {lane} until: {item['until']}" + (f" watch={a.watch}" if a.watch else "")
+                  + (f" till {item['snooze_until']}" if a.action == "snooze" else ""))
         write(a.file, data)
-        print(f"{a.action.upper()} {a.lane} until: {item['until']}" + (f" watch={a.watch}" if a.watch else "")
-              + (f" till {item['snooze_until']}" if a.action == "snooze" else ""))
         return 0
     if a.action == "lift":
-        kept = [w for w in data["waivers"] if w.get("lane") != a.lane]
-        print(f"LIFT {a.lane}: " + ("removed" if len(kept) < len(data["waivers"]) else "no waiver for this lane"))
-        data["waivers"] = kept
+        for lane in lanes:
+            kept = [w for w in data["waivers"] if w.get("lane") != lane]
+            print(f"LIFT {lane}: " + ("removed" if len(kept) < len(data["waivers"]) else "no waiver for this lane"))
+            data["waivers"] = kept
         write(a.file, data)
         return 0
     if a.action == "block":
